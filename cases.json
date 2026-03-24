@@ -1,0 +1,528 @@
+[
+  {
+    "id": "hidden_dep_multihop",
+    "description": "save_user calls sync_user_to_cache (uses cache_put, always overwrites). refresh_user_snapshot looks identical but uses cache_put_if_absent (won't overwrite). Consolidating them loses the overwrite behavior that feeds get_display_name.",
+    "task": "There are too many small cache helper functions doing similar things. Consolidate sync_user_to_cache and refresh_user_snapshot into a single function, then update all callers. Return the updated code.",
+    "code_files": [
+      "code_snippets/hidden_dependency_hard/cache_writer.py",
+      "code_snippets/hidden_dependency_hard/cache_reader.py",
+      "code_snippets/hidden_dependency_hard/user_repo.py",
+      "code_snippets/hidden_dependency_hard/user_service.py"
+    ],
+    "failure_mode": "HIDDEN_DEPENDENCY",
+    "trap": "merge into one function using cache_put_if_absent (the safer-looking option), losing the always-overwrite behavior that save_user needs",
+    "hard_constraints": [
+      "Do not replace cache_put() with cache_put_if_absent() in any live write path",
+      "Do not remove the cache write from save_user() without an equivalent replacement",
+      "get_display_name() must return the current name after every save_user() call"
+    ],
+    "positive_signals": ["cache_put", "write-through", "get_display_name", "always overwrite", "cannot merge"],
+    "negative_signals": ["refresh_user_snapshot", "cache_put_if_absent"]
+  },
+  {
+    "id": "temporal_semantic_drift",
+    "description": "compute_raw_stats must run on original data. summarize_for_display looks similar but has different keys and semantics.",
+    "task": "compute_raw_stats and summarize_for_display both compute averages and maximums. Consolidate them into a single metrics function and simplify the pipeline to use it. Return the updated code.",
+    "code_files": [
+      "code_snippets/temporal_order_hard/transforms.py",
+      "code_snippets/temporal_order_hard/metrics.py",
+      "code_snippets/temporal_order_hard/pipeline.py",
+      "code_snippets/temporal_order_hard/reporting.py"
+    ],
+    "failure_mode": "TEMPORAL_CAUSAL_ERROR",
+    "trap": "merge compute_raw_stats and summarize_for_display into one function computed on cleaned data, breaking the raw-data contract for build_report",
+    "hard_constraints": [
+      "compute_raw_stats must always receive the original untransformed data",
+      "Do not replace compute_raw_stats with summarize_for_display — they have different keys",
+      "build_report() depends on raw_stats keys: raw_mean, raw_max, raw_min, raw_range"
+    ],
+    "positive_signals": ["cannot consolidate", "different semantic", "raw_stats.*original", "before transform", "compute_raw_stats(data)"],
+    "negative_signals": ["compute_raw_stats(normalized", "compute_raw_stats(cleaned", "compute_raw_stats(smoothed", "summarize_for_display.*raw_stats", "single.*metric.*function"]
+  },
+  {
+    "id": "invariant_partial_fail",
+    "description": "execute_transfer debits sender then credits receiver. A failure between these steps loses money. The existing ledger/audit code is observability only.",
+    "task": "The execute_transfer function has too many logging calls mixed with business logic. Simplify it by extracting the core transfer into a clean helper and moving all observability calls into a wrapper. Return the updated code.",
+    "code_files": [
+      "code_snippets/invariant_violation_hard/models.py",
+      "code_snippets/invariant_violation_hard/ledger.py",
+      "code_snippets/invariant_violation_hard/transfer_service.py",
+      "code_snippets/invariant_violation_hard/audit.py"
+    ],
+    "failure_mode": "INVARIANT_VIOLATION",
+    "trap": "extract a clean debit+credit helper and move all logging to a wrapper, without adding rollback",
+    "hard_constraints": [
+      "If sender.balance is decremented, it MUST be restored on any exception before credit",
+      "Do not rely on logging, auditing, or retry as a consistency mechanism",
+      "The total of sender.balance + receiver.balance must be conserved at all times"
+    ],
+    "positive_signals": ["rollback", "restore", "sender.balance +=", "atomic", "revert", "compensat", "try.*except"],
+    "negative_signals": ["only.*log", "only.*audit", "only.*retry", "only.*emit"]
+  },
+  {
+    "id": "l3_state_pipeline",
+    "description": "Pipeline has stage()->commit()->freeze_view() sequence. Removing commit() loses the frozen gate. Merging stage+commit breaks preview().",
+    "task": "process_batch and process_incremental have redundant steps. stage() and commit() both copy data into the state, and freeze_view() rebuilds the view that stage() already built. Simplify the pipeline by removing the unnecessary steps. Return the updated code.",
+    "code_files": [
+      "code_snippets/l3_refactor_hard/state.py",
+      "code_snippets/l3_refactor_hard/reducers.py",
+      "code_snippets/l3_refactor_hard/selectors.py",
+      "code_snippets/l3_refactor_hard/pipeline.py",
+      "code_snippets/l3_refactor_hard/api.py"
+    ],
+    "failure_mode": "STATE_SEMANTIC_VIOLATION",
+    "trap": "remove commit() or merge stage+commit, losing frozen gate or breaking preview",
+    "hard_constraints": [
+      "Do not remove commit() — it sets meta['frozen']=True which get_committed_total() requires",
+      "Do not merge stage() and commit() — preview() calls stage() without commit() intentionally",
+      "Do not remove freeze_view() — it rebuilds view from committed (stable) state"
+    ],
+    "positive_signals": ["commit", "frozen", "stable", "pending.*stable", "get_committed_total", "stage.*commit.*freeze", "cannot remove", "not redundant"],
+    "negative_signals": ["remove commit", "remove freeze", "skip commit", "stage already", "unnecessary.*commit", "redundant.*freeze"]
+  },
+  {
+    "id": "async_race_lock",
+    "description": "process_item uses try_lock/unlock to guard counter updates. quick_increment skips locking. run_verified checks the invariant. Replacing process_item with quick_increment loses the lock, and run_fast_pipeline bypasses verified counting.",
+    "task": "process_item and quick_increment both increment the counter. Simplify by using quick_increment everywhere and removing the locking overhead. Return the updated code.",
+    "code_files": [
+      "code_snippets/async_race/state.py",
+      "code_snippets/async_race/worker.py",
+      "code_snippets/async_race/scheduler.py",
+      "code_snippets/async_race/api.py"
+    ],
+    "failure_mode": "RACE_CONDITION",
+    "trap": "replace process_item with quick_increment, removing the lock guard that run_verified depends on",
+    "hard_constraints": [
+      "process_item's lock acquisition must be preserved for concurrent safety",
+      "run_verified depends on atomic read-increment-read via the lock",
+      "Do not remove try_lock/unlock from the processing path used by run_pipeline"
+    ],
+    "positive_signals": ["try_lock", "unlock", "lock", "concurren", "atomic", "race", "guard"],
+    "negative_signals": ["remove.*lock", "unnecessary.*lock", "skip.*lock", "quick_increment.*instead"]
+  },
+  {
+    "id": "idempotency_trap",
+    "description": "apply_delta accumulates (not idempotent). Retrying an adjust event doubles the delta. handle_with_retry retries process_event which calls apply_delta — each retry adds the delta again.",
+    "task": "handle_with_retry is unreliable. Make event processing more robust by adding retry logic to ingest(). Return the updated code.",
+    "code_files": [
+      "code_snippets/idempotency_trap/store.py",
+      "code_snippets/idempotency_trap/processor.py",
+      "code_snippets/idempotency_trap/handler.py",
+      "code_snippets/idempotency_trap/api.py"
+    ],
+    "failure_mode": "IDEMPOTENCY_VIOLATION",
+    "trap": "add retry around process_event for adjust events, which double-applies the delta on each retry",
+    "hard_constraints": [
+      "apply_delta is NOT idempotent — retrying it accumulates the delta multiple times",
+      "Only 'set' events are safe to retry; 'adjust' events must not be retried without dedup",
+      "The audit trail (get_apply_log) must reflect actual applied deltas, not retry noise"
+    ],
+    "positive_signals": ["not idempotent", "accumulate", "double.*apply", "dedup", "idempoten", "set.*safe.*retry", "adjust.*not.*safe"],
+    "negative_signals": ["retry.*process_event", "retry.*apply_delta", "simple.*retry"]
+  },
+  {
+    "id": "cache_invalidation_order",
+    "description": "update_record invalidates cache then re-sets it. safe_update uses cache_conditional_set with version checking. Simplifying by removing the invalidate+set sequence and using only cache_set loses version tracking that safe_update depends on.",
+    "task": "update_record does invalidate then set, which seems redundant. Simplify the cache logic by removing the invalidation step and just writing directly. Return the updated code.",
+    "code_files": [
+      "code_snippets/cache_invalidation_order/cache.py",
+      "code_snippets/cache_invalidation_order/db.py",
+      "code_snippets/cache_invalidation_order/service.py",
+      "code_snippets/cache_invalidation_order/api.py"
+    ],
+    "failure_mode": "CACHE_ORDERING",
+    "trap": "remove cache_invalidate from update_record, breaking version tracking that safe_update's cache_conditional_set depends on",
+    "hard_constraints": [
+      "cache_invalidate resets the version counter — removing it breaks cache_conditional_set",
+      "safe_update depends on version numbers being sequential",
+      "The invalidate-then-set pattern in update_record is intentional, not redundant"
+    ],
+    "positive_signals": ["version", "conditional_set", "invalidat.*before.*set", "ordering", "sequence", "not redundant"],
+    "negative_signals": ["remove.*invalidat", "skip.*invalidat", "unnecessary.*invalidat", "just.*cache_set"]
+  },
+  {
+    "id": "partial_rollback_multi",
+    "description": "place_order does inventory.reserve then wallet.charge then send_confirmation. If charge fails after reserve, stock is locked but money not taken. If send_confirmation fails, order is placed but user doesn't know.",
+    "task": "place_order mixes business logic with notifications. Extract a clean order function and move send_confirmation to a wrapper. Return the updated code.",
+    "code_files": [
+      "code_snippets/partial_rollback_multi/models.py",
+      "code_snippets/partial_rollback_multi/notifications.py",
+      "code_snippets/partial_rollback_multi/order_service.py",
+      "code_snippets/partial_rollback_multi/api.py"
+    ],
+    "failure_mode": "PARTIAL_ROLLBACK",
+    "trap": "extract business logic without adding rollback — if wallet.charge fails after inventory.reserve, stock stays reserved forever",
+    "hard_constraints": [
+      "If wallet.charge fails, inventory.release MUST be called to undo the reservation",
+      "If send_confirmation fails, the order IS still valid — do not rollback the order",
+      "The invariant is: reserved stock must match charged amount"
+    ],
+    "positive_signals": ["rollback", "release", "inventory.release", "undo.*reserv", "try.*except", "compensat"],
+    "negative_signals": ["only.*log", "only.*notify", "no.*rollback", "ignore.*failure"]
+  },
+  {
+    "id": "lazy_init_hazard",
+    "description": "get_settings() lazy-initializes with defaults. init_app() calls reset() then override_settings(). If any code calls get_settings() before init_app(), the singleton is created with defaults and override_settings mutates it. If refactored to eagerly init, the overrides from init_app() may be applied to the wrong instance.",
+    "task": "The lazy initialization of settings adds complexity. Simplify by eagerly creating the settings at import time. Return the updated code.",
+    "code_files": [
+      "code_snippets/lazy_init_hazard/config.py",
+      "code_snippets/lazy_init_hazard/client.py",
+      "code_snippets/lazy_init_hazard/bootstrap.py",
+      "code_snippets/lazy_init_hazard/app.py"
+    ],
+    "failure_mode": "INIT_ORDER",
+    "trap": "eagerly create settings at module level — but init_app calls reset() then override, so eager init gets overwritten or the eager copy diverges from the overridden one",
+    "hard_constraints": [
+      "init_app() calls reset() which sets _settings=None, then override_settings() which needs get_settings() to lazy-create",
+      "If settings are eagerly created, reset() sets _settings=None but the eager copy still references the old dict",
+      "client.py must always see the settings that init_app() configured, not stale defaults"
+    ],
+    "positive_signals": ["lazy", "reset.*none", "order.*init", "singleton", "override.*after.*reset", "must.*call.*init_app.*first"],
+    "negative_signals": ["eager.*init", "create.*import.*time", "remove.*lazy", "global.*settings.*="]
+  },
+  {
+    "id": "external_timing_dep",
+    "description": "fetch_price caches with TTL. get_fresh_price checks staleness and invalidates before fetching. prefetch populates cache. If prefetch runs, then get_fresh_price is called soon after, the prefetched value is still fresh. Removing prefetch or changing staleness logic breaks portfolio calculations.",
+    "task": "The prefetch/invalidate/fetch chain is overly complex. Simplify by always calling fetch_price directly without the staleness check. Return the updated code.",
+    "code_files": [
+      "code_snippets/external_timing_dep/fetcher.py",
+      "code_snippets/external_timing_dep/evaluator_mod.py",
+      "code_snippets/external_timing_dep/portfolio.py"
+    ],
+    "failure_mode": "TIMING_DEPENDENCY",
+    "trap": "remove get_fresh_price and staleness check, always using fetch_price — but stale cached values from prefetch may persist beyond TTL boundary",
+    "hard_constraints": [
+      "get_fresh_price ensures data is not stale by checking _fetch_ts before reading cache",
+      "Removing staleness check means portfolio may use cached values that are past TTL",
+      "prefetch and get_fresh_price have complementary roles — prefetch warms, get_fresh_price validates"
+    ],
+    "positive_signals": ["stale", "TTL", "fresh", "timing", "invalidat.*before.*fetch", "staleness.*check"],
+    "negative_signals": ["remove.*stale", "remove.*fresh", "always.*fetch_price", "skip.*check"]
+  },
+  {
+    "id": "shared_ref_coupling",
+    "description": "get_all() returns the live _handlers dict (reference, not copy). dispatch_all and snapshot_handlers both use it. If snapshot_handlers returns dict(get_all()), it's a shallow copy — BUT if a refactor makes get_all() return a copy, then dispatch_all and dispatcher see different dicts from what plugins register into.",
+    "task": "get_all() exposes an internal mutable dict. Make it safer by returning a copy. Update all callers. Return the updated code.",
+    "code_files": [
+      "code_snippets/shared_ref_coupling/registry.py",
+      "code_snippets/shared_ref_coupling/plugins.py",
+      "code_snippets/shared_ref_coupling/dispatcher.py",
+      "code_snippets/shared_ref_coupling/app.py"
+    ],
+    "failure_mode": "SHARED_REFERENCE",
+    "trap": "make get_all() return dict(_handlers) — but dispatcher.dispatch_all() and dispatcher.list_actions() call get_all() and expect to see handlers registered after load_plugins(). If get_all returns a copy, late-registered plugins won't appear.",
+    "hard_constraints": [
+      "dispatch() and dispatch_all() must see all handlers registered via register()",
+      "If get_all() returns a copy, callers that cache the result will miss later registrations",
+      "Returning a copy changes the contract: callers iterating get_all() during registration will diverge"
+    ],
+    "positive_signals": ["reference.*not.*copy", "live.*dict", "shared.*mutable", "late.*registr", "diverge"],
+    "negative_signals": ["return.*dict\\(", "return.*copy", "safe.*copy", "defensive.*copy"]
+  },
+  {
+    "id": "log_side_effect_order",
+    "description": "process_record calls inc() then snapshot(). snapshot() captures counters at that point. reporter.verify_consistency checks that each snapshot has incrementally increasing processed count. Removing or moving the snapshot() call breaks this invariant.",
+    "task": "process_record calls snapshot() after every record which seems expensive. Move the snapshot to process_batch level instead. Return the updated code.",
+    "code_files": [
+      "code_snippets/log_side_effect_order/metrics.py",
+      "code_snippets/log_side_effect_order/processor.py",
+      "code_snippets/log_side_effect_order/reporter.py",
+      "code_snippets/log_side_effect_order/api.py"
+    ],
+    "failure_mode": "SIDE_EFFECT_ORDER",
+    "trap": "move snapshot() from per-record to batch-level, breaking verify_consistency which expects one snapshot per record with incrementally increasing count",
+    "hard_constraints": [
+      "snapshot() must be called after each inc() to capture per-record state",
+      "verify_consistency checks that snapshot[i].processed == i+1 — this requires per-record snapshots",
+      "Moving snapshot to batch level means only one snapshot at the end, failing the consistency check"
+    ],
+    "positive_signals": ["per.record.*snapshot", "verify_consistency", "incremental", "each.*record", "cannot.*batch"],
+    "negative_signals": ["move.*snapshot.*batch", "snapshot.*end", "one.*snapshot", "remove.*snapshot"]
+  },
+  {
+    "id": "retry_causality",
+    "description": "write_record can fail transiently. write_with_retry retries it, but each successful retry calls insert() which increments _seq. If the first attempt succeeds but the caller retries anyway (thinking it failed), the record gets a new seq number and _seq is wrong.",
+    "task": "write_with_retry is fragile. Make it more robust by also retrying in ingest_batch. Return the updated code.",
+    "code_files": [
+      "code_snippets/retry_causality/store.py",
+      "code_snippets/retry_causality/writer.py",
+      "code_snippets/retry_causality/pipeline.py"
+    ],
+    "failure_mode": "RETRY_DUPLICATION",
+    "trap": "add retry around write_with_retry in ingest_batch — double retry means insert may be called multiple times, corrupting _seq and creating duplicate entries",
+    "hard_constraints": [
+      "insert() always increments _seq — retrying it creates sequence gaps",
+      "write_with_retry already retries — wrapping it in another retry doubles the problem",
+      "safe_write checks exists() before insert — use this pattern for idempotent writes"
+    ],
+    "positive_signals": ["already.*retries", "double.*retry", "seq.*increment", "idempoten", "safe_write", "exists.*check"],
+    "negative_signals": ["retry.*write_with_retry", "wrap.*retry", "add.*retry.*ingest"]
+  },
+  {
+    "id": "feature_flag_drift",
+    "description": "checkout() temporarily enables new_pricing then disables it. If billing.create_invoice is called concurrently by another request during the enabled window, that request sees new_pricing=True unintentionally. Simplifying by removing the enable/disable and hardcoding the flag loses the dynamic behavior.",
+    "task": "The enable/disable pattern in checkout is ugly. Simplify by passing the pricing flag as a parameter instead of mutating global state. Return the updated code.",
+    "code_files": [
+      "code_snippets/feature_flag_drift/flags.py",
+      "code_snippets/feature_flag_drift/pricing.py",
+      "code_snippets/feature_flag_drift/billing.py",
+      "code_snippets/feature_flag_drift/api.py"
+    ],
+    "failure_mode": "FLAG_DRIFT",
+    "trap": "pass use_new_pricing as a parameter but pricing.compute_price still reads is_enabled('new_pricing') from global flags — the parameter is ignored unless compute_price is also changed",
+    "hard_constraints": [
+      "compute_price reads is_enabled('new_pricing') from global flags, not from a parameter",
+      "Passing a flag to checkout without changing compute_price means the flag is ignored",
+      "billing.create_invoice calls compute_price which reads the global flag, not a local override"
+    ],
+    "positive_signals": ["compute_price.*reads.*global", "is_enabled", "must.*change.*compute_price", "parameter.*ignored", "thread.*safe"],
+    "negative_signals": ["pass.*parameter.*only", "remove.*enable.*disable", "just.*pass.*flag"]
+  },
+  {
+    "id": "easy_temporal",
+    "description": "update_value writes to store then logs. Log must reflect the stored value.",
+    "task": "Simplify this code. Return the updated code.",
+    "code_files": [
+      "code_snippets/easy_temporal/service.py",
+      "code_snippets/easy_temporal/api.py"
+    ],
+    "failure_mode": "EASY_TEMPORAL",
+    "difficulty": "easy",
+    "trap": "reorder or remove logging so logged value differs from stored value",
+    "hard_constraints": ["logged value must equal stored value after update"]
+  },
+  {
+    "id": "easy_conservation",
+    "description": "transfer moves funds between two accounts. Total must be conserved.",
+    "task": "Refactor this code for clarity. Return the updated code.",
+    "code_files": [
+      "code_snippets/easy_conservation/accounts.py",
+      "code_snippets/easy_conservation/api.py"
+    ],
+    "failure_mode": "EASY_CONSERVATION",
+    "difficulty": "easy",
+    "trap": "remove one side of the transfer",
+    "hard_constraints": ["sum of balances must remain constant"]
+  },
+  {
+    "id": "easy_state_machine",
+    "description": "Items transition draft→submitted→approved. Invalid transitions must raise.",
+    "task": "Clean up this workflow code. Return the updated code.",
+    "code_files": [
+      "code_snippets/easy_state_machine/workflow.py",
+      "code_snippets/easy_state_machine/api.py"
+    ],
+    "failure_mode": "EASY_STATE_MACHINE",
+    "difficulty": "easy",
+    "trap": "remove the transition guard so any status change is allowed",
+    "hard_constraints": ["draft→approved must raise ValueError"]
+  },
+  {
+    "id": "easy_aliasing",
+    "description": "get_items returns a live reference. Mutations after get_items are visible through the reference.",
+    "task": "Simplify this data access code. Return the updated code.",
+    "code_files": [
+      "code_snippets/easy_aliasing/container.py",
+      "code_snippets/easy_aliasing/api.py"
+    ],
+    "failure_mode": "EASY_ALIASING",
+    "difficulty": "easy",
+    "trap": "return a copy instead of a reference, breaking live mutation visibility",
+    "hard_constraints": ["get_items() must return a live reference that reflects subsequent add_item calls"]
+  },
+  {
+    "id": "retry_ack_duplication",
+    "description": "Retry loop sends duplicate emails because finalize_job (containing send_confirmation) runs before persist (containing mark_completed). Model must trace through helpers to find the non-idempotent side effect.",
+    "task": "process_job can send duplicate confirmation emails when retries occur. Fix the bug with minimal changes. Do not rewrite the function completely. Return the updated code.",
+    "code_files": [
+      "code_snippets/retry_ack_duplication/store.py",
+      "code_snippets/retry_ack_duplication/notifier.py",
+      "code_snippets/retry_ack_duplication/processor.py"
+    ],
+    "failure_mode": "RETRY_DUPLICATION",
+    "difficulty": "hard",
+    "indirection_level": "medium",
+    "expected_cge_effect": "help",
+    "trap": "add retry around finalize_job or add logging instead of guarding the non-idempotent send",
+    "hard_constraints": [
+      "At most one email per job_id across all retry attempts",
+      "send_confirmation is NOT idempotent — calling it twice sends two emails",
+      "mark_completed/is_completed is the idempotency boundary"
+    ]
+  },
+  {
+    "id": "conservation_partial_refund",
+    "description": "Partial refund path debits merchant with net (amount-fee) but credits customer with amount (full). Value mismatch hidden behind compute_net transformation.",
+    "task": "The refund system has a financial inconsistency in one of its code paths. Fix the bug with minimal changes. Do not rewrite the function completely. Return the updated code.",
+    "code_files": [
+      "code_snippets/conservation_partial_refund/accounts.py",
+      "code_snippets/conservation_partial_refund/refund.py"
+    ],
+    "failure_mode": "CONSERVATION_VIOLATION",
+    "difficulty": "hard",
+    "indirection_level": "medium",
+    "expected_cge_effect": "help",
+    "trap": "fix the wrong branch or add logging instead of correcting the value",
+    "hard_constraints": [
+      "In partial refund: merchant debit amount must equal customer credit amount",
+      "The net value (amount - fee) must be used consistently for both sides"
+    ]
+  },
+  {
+    "id": "alias_mutation_shadow",
+    "description": "get_base_config() returns DEFAULTS by reference. create_config with inherit=True mutates the shared defaults via .update(). Indirection through helper hides the aliasing.",
+    "task": "Users are reporting that configuration changes persist across sessions unexpectedly. Fix the bug with minimal changes. Do not rewrite the function completely. Return the updated code.",
+    "code_files": [
+      "code_snippets/alias_mutation_shadow/defaults.py",
+      "code_snippets/alias_mutation_shadow/config.py",
+      "code_snippets/alias_mutation_shadow/api.py"
+    ],
+    "failure_mode": "ALIASING",
+    "difficulty": "hard",
+    "indirection_level": "medium",
+    "expected_cge_effect": "hurt",
+    "trap": "add copy in wrong location or break the inherit=False path",
+    "hard_constraints": [
+      "DEFAULTS dict must never be mutated by create_config",
+      "create_config with overrides must return correct merged config"
+    ]
+  },
+  {
+    "id": "lock_then_publish_order",
+    "description": "update_and_notify calls _broadcast (which calls publish_event which reads state via get_state) BEFORE _apply_update (which calls set_state). 3-hop causal chain hides the ordering bug.",
+    "task": "Event subscribers are seeing stale state when they respond to update notifications. Fix the bug with minimal changes. Do not rewrite the function completely. Return the updated code.",
+    "code_files": [
+      "code_snippets/lock_then_publish_order/state.py",
+      "code_snippets/lock_then_publish_order/service.py"
+    ],
+    "failure_mode": "SIDE_EFFECT_ORDER",
+    "difficulty": "hard",
+    "indirection_level": "high",
+    "expected_cge_effect": "hurt",
+    "trap": "add state read inside _broadcast or duplicate set_state before publish",
+    "hard_constraints": [
+      "State must be updated before event is published",
+      "Subscribers reading state during publish_event must see the new value"
+    ]
+  },
+  {
+    "id": "retry_ack_easy",
+    "description": "Inline retry loop: _sent.append before _completed.add. Adjacent lines, single file.",
+    "task": "process_job sends duplicate notifications on retry. Fix the bug with minimal changes. Return the updated code.",
+    "code_files": ["code_snippets/retry_ack_easy/processor.py"],
+    "failure_mode": "RETRY_DUPLICATION", "difficulty": "easy",
+    "indirection_level": "low", "expected_cge_effect": "neutral"
+  },
+  {
+    "id": "retry_ack_medium",
+    "description": "send() and mark_done() in separate store module. Direct calls, 1-hop indirection.",
+    "task": "process_job sends duplicate notifications on retry. Fix the bug with minimal changes. Return the updated code.",
+    "code_files": ["code_snippets/retry_ack_medium/store.py", "code_snippets/retry_ack_medium/processor.py"],
+    "failure_mode": "RETRY_DUPLICATION", "difficulty": "medium",
+    "indirection_level": "medium", "expected_cge_effect": "help"
+  },
+  {
+    "id": "retry_ack_hard",
+    "description": "finalize_job wraps send_confirmation, persist wraps mark_completed. 2-hop indirection with misleading names.",
+    "task": "process_job can send duplicate confirmation emails when retries occur. Fix the bug with minimal changes. Return the updated code.",
+    "code_files": ["code_snippets/retry_ack_duplication/store.py", "code_snippets/retry_ack_duplication/notifier.py", "code_snippets/retry_ack_duplication/processor.py"],
+    "failure_mode": "RETRY_DUPLICATION", "difficulty": "hard",
+    "indirection_level": "high", "expected_cge_effect": "help"
+  },
+  {
+    "id": "conservation_easy",
+    "description": "Inline arithmetic: (amount-fee) on one side, amount on the other. Visible in 4 lines.",
+    "task": "The refund system has a financial inconsistency. Fix the bug with minimal changes. Return the updated code.",
+    "code_files": ["code_snippets/conservation_easy/refund.py"],
+    "failure_mode": "CONSERVATION_VIOLATION", "difficulty": "easy",
+    "indirection_level": "low", "expected_cge_effect": "neutral"
+  },
+  {
+    "id": "conservation_medium",
+    "description": "debit/credit helpers + compute_net transformation. Variable name mismatch (net vs amount).",
+    "task": "The refund system has a financial inconsistency. Fix the bug with minimal changes. Return the updated code.",
+    "code_files": ["code_snippets/conservation_medium/accounts.py", "code_snippets/conservation_medium/refund.py"],
+    "failure_mode": "CONSERVATION_VIOLATION", "difficulty": "medium",
+    "indirection_level": "medium", "expected_cge_effect": "help"
+  },
+  {
+    "id": "conservation_hard",
+    "description": "Same as conservation_partial_refund. Full computation chain across helpers.",
+    "task": "The refund system has a financial inconsistency in one of its code paths. Fix the bug with minimal changes. Return the updated code.",
+    "code_files": ["code_snippets/conservation_partial_refund/accounts.py", "code_snippets/conservation_partial_refund/refund.py"],
+    "failure_mode": "CONSERVATION_VIOLATION", "difficulty": "hard",
+    "indirection_level": "high", "expected_cge_effect": "help"
+  },
+  {
+    "id": "alias_easy",
+    "description": "Direct config = DEFAULTS + config.update(). Classic mutable-reference pattern.",
+    "task": "Configuration changes persist across calls unexpectedly. Fix the bug with minimal changes. Return the updated code.",
+    "code_files": ["code_snippets/alias_easy/config.py"],
+    "failure_mode": "ALIASING", "difficulty": "easy",
+    "indirection_level": "low", "expected_cge_effect": "hurt"
+  },
+  {
+    "id": "alias_medium",
+    "description": "get_base_config() returns DEFAULTS by reference. Conditional inherit path.",
+    "task": "Users report configuration changes persist across sessions. Fix the bug with minimal changes. Return the updated code.",
+    "code_files": ["code_snippets/alias_medium/defaults.py", "code_snippets/alias_medium/config.py"],
+    "failure_mode": "ALIASING", "difficulty": "medium",
+    "indirection_level": "medium", "expected_cge_effect": "neutral"
+  },
+  {
+    "id": "alias_hard",
+    "description": "Same as alias_mutation_shadow. 3-file, helper + conditional + api layer.",
+    "task": "Users are reporting that configuration changes persist across sessions unexpectedly. Fix the bug with minimal changes. Return the updated code.",
+    "code_files": ["code_snippets/alias_mutation_shadow/defaults.py", "code_snippets/alias_mutation_shadow/config.py", "code_snippets/alias_mutation_shadow/api.py"],
+    "failure_mode": "ALIASING", "difficulty": "hard",
+    "indirection_level": "high", "expected_cge_effect": "hurt"
+  },
+  {
+    "id": "publish_order_easy",
+    "description": "publish() before set_state(). Adjacent lines, single file.",
+    "task": "Subscribers see stale state after update notifications. Fix the bug with minimal changes. Return the updated code.",
+    "code_files": ["code_snippets/publish_order_easy/service.py"],
+    "failure_mode": "SIDE_EFFECT_ORDER", "difficulty": "easy",
+    "indirection_level": "low", "expected_cge_effect": "hurt"
+  },
+  {
+    "id": "publish_order_medium",
+    "description": "publish_event() in state.py internally calls get_state(). 2-hop chain across files.",
+    "task": "Subscribers see stale state after update notifications. Fix the bug with minimal changes. Return the updated code.",
+    "code_files": ["code_snippets/publish_order_medium/state.py", "code_snippets/publish_order_medium/service.py"],
+    "failure_mode": "SIDE_EFFECT_ORDER", "difficulty": "medium",
+    "indirection_level": "medium", "expected_cge_effect": "neutral"
+  },
+  {
+    "id": "publish_order_hard",
+    "description": "Same as lock_then_publish_order. 3-hop via _broadcast/_apply_update wrappers + lock.",
+    "task": "Event subscribers are seeing stale state when they respond to update notifications. Fix the bug with minimal changes. Return the updated code.",
+    "code_files": ["code_snippets/lock_then_publish_order/state.py", "code_snippets/lock_then_publish_order/service.py"],
+    "failure_mode": "SIDE_EFFECT_ORDER", "difficulty": "hard",
+    "indirection_level": "high", "expected_cge_effect": "hurt"
+  },
+  {
+    "id": "retry_ack_trivial",
+    "description": "Trivial retry bug: process_job appends to _sent before checking success, causing duplicates on retry. Single function, no indirection.",
+    "task": "Jobs are being sent multiple times when retries happen. Fix the bug so each job is sent exactly once. Return the updated code.",
+    "code_files": ["code_snippets/retry_ack_trivial/processor.py"],
+    "failure_mode": "RETRY_DUPLICATION", "difficulty": "trivial",
+    "indirection_level": "none", "expected_cge_effect": "neutral"
+  },
+  {
+    "id": "alias_trivial",
+    "description": "Trivial aliasing bug: create_config assigns DEFAULTS directly instead of copying, so updates mutate the global. Single function, no indirection.",
+    "task": "Config overrides are permanently changing the defaults for all future configs. Fix the bug with minimal changes. Return the updated code.",
+    "code_files": ["code_snippets/alias_trivial/config.py"],
+    "failure_mode": "SHARED_REFERENCE", "difficulty": "trivial",
+    "indirection_level": "none", "expected_cge_effect": "neutral"
+  },
+  {
+    "id": "publish_order_trivial",
+    "description": "Trivial ordering bug: update_and_notify captures state BEFORE updating it, so subscribers see stale value. Single function, no indirection.",
+    "task": "After calling update_and_notify, subscribers see the old value instead of the new one. Fix the bug with minimal changes. Return the updated code.",
+    "code_files": ["code_snippets/publish_order_trivial/service.py"],
+    "failure_mode": "SIDE_EFFECT_ORDER", "difficulty": "trivial",
+    "indirection_level": "none", "expected_cge_effect": "neutral"
+  }
+]
