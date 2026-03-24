@@ -99,16 +99,36 @@ def build_prompt(case: dict, condition: str) -> tuple[str, str | None]:
 # LIVE METRICS EVENT EMISSION
 # ============================================================
 
+_ablation_events_path: Path | None = None
+_ablation_trial: int | None = None
+_ablation_run_id: str | None = None
+
+
+def set_ablation_context(events_path: Path | None, trial: int | None, run_id: str | None):
+    """Set ablation context for event emission. Called from runner before evaluations."""
+    global _ablation_events_path, _ablation_trial, _ablation_run_id
+    _ablation_events_path = events_path
+    _ablation_trial = trial
+    _ablation_run_id = run_id
+
+
 def _emit_metrics_event(case: dict, model: str, condition: str, ev: dict,
                         elapsed_seconds: float | None = None) -> None:
-    """Emit a live metrics event. Safe to call even if dashboard not started."""
-    try:
+    """Emit a live metrics event.
+
+    In ablation mode (events_path set): writes to per-run events.jsonl via emit_event().
+    In legacy mode: writes to old shared events.jsonl if dashboard is running.
+    """
+    if _ablation_events_path is not None:
+        # Ablation mode: strict event emission with schema validation
         from live_metrics import emit_event
         alignment = ev.get("alignment", {})
         emit_event({
             "case_id": case["id"],
             "model": model,
             "condition": condition,
+            "trial": _ablation_trial,
+            "run_id": _ablation_run_id,
             "pass": ev.get("pass", False),
             "score": ev.get("score", 0),
             "reasoning_correct": ev.get("reasoning_correct"),
@@ -117,7 +137,37 @@ def _emit_metrics_event(case: dict, model: str, condition: str, ev: dict,
             "category": alignment.get("category"),
             "num_attempts": ev.get("num_attempts", 1),
             "elapsed_seconds": elapsed_seconds,
-        })
+        }, _ablation_events_path)
+        return
+
+    # Legacy mode: old emit_event path (for non-ablation runs)
+    try:
+        from live_metrics import EVENTS_PATH
+        events_path = Path(__file__).parent / "logs" / "events.jsonl"
+        if events_path.exists() or events_path.parent.exists():
+            from live_metrics import emit_event as _legacy_emit
+            alignment = ev.get("alignment", {})
+            # Legacy events don't have trial/run_id — skip strict validation
+            event = {
+                "case_id": case["id"],
+                "model": model,
+                "condition": condition,
+                "pass": ev.get("pass", False),
+                "score": ev.get("score", 0),
+                "reasoning_correct": ev.get("reasoning_correct"),
+                "code_correct": ev.get("code_correct"),
+                "failure_type": ev.get("failure_type"),
+                "category": alignment.get("category"),
+                "num_attempts": ev.get("num_attempts", 1),
+                "elapsed_seconds": elapsed_seconds,
+            }
+            # In legacy mode, write without strict schema validation
+            import json, os
+            from datetime import datetime
+            event["timestamp"] = datetime.now().isoformat()
+            line = json.dumps(event, default=str) + "\n"
+            with open(events_path, "a", encoding="utf-8") as f:
+                f.write(line)
     except Exception as e:
         _exec_log.warning("_emit_metrics_event failed: %s: %s", type(e).__name__, e)
 
@@ -545,8 +595,14 @@ class RunLogger:
 _active_logger: RunLogger | None = None
 
 
-def init_run_log(model: str) -> Path:
+def init_run_log(model: str, log_dir: Path | None = None) -> Path:
     """Create a RunLogger for this experiment run.
+
+    Args:
+        model: Model name for this run.
+        log_dir: If provided, write log files to this directory with fixed names
+                 (run.jsonl, run_prompts.jsonl, run_responses.jsonl).
+                 If None, use legacy timestamped naming in logs/.
 
     Returns the log path. The logger is accessible via get_run_logger().
     Raises RuntimeError if a previous logger is still active.
@@ -560,6 +616,21 @@ def init_run_log(model: str) -> Path:
             f"at {_active_logger.log_path}. Call close_run_log() first."
         )
 
+    if log_dir is not None:
+        # Ablation mode: fixed filenames in provided directory
+        log_dir = Path(log_dir)
+        log_path = log_dir / "run.jsonl"
+        prompts_path = log_dir / "run_prompts.jsonl"
+        responses_path = log_dir / "run_responses.jsonl"
+
+        import uuid
+        run_id = str(uuid.uuid4())[:8]
+        _active_logger = RunLogger(log_path, prompts_path, responses_path, model, run_id)
+        _exec_log.info("RunLogger created (ablation): run_id=%s, model=%s, log_dir=%s",
+                       run_id, model, log_dir)
+        return log_path
+
+    # Legacy mode: timestamped filenames in logs/
     from datetime import datetime
 
     logs_dir = BASE_DIR / "logs"

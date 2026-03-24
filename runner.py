@@ -350,6 +350,105 @@ def print_results(results: list[dict], conditions: list[str], model: str):
 # MAIN
 # ============================================================
 
+def _run_ablation_mode(args):
+    """Ablation mode: single (model, trial) run with isolated output directory."""
+    import os
+    import subprocess as _sp
+    from execution import set_ablation_context
+
+    run_dir = Path(args.run_dir)
+    model = args.model
+    trial = args.trial
+    run_id = args.run_id
+
+    conditions = [c.strip() for c in args.conditions.split(",")] if args.conditions else ALL_CONDITIONS
+    for c in conditions:
+        if c not in VALID_CONDITIONS:
+            raise ValueError(f"Invalid condition {c!r}")
+
+    cases = load_cases(case_id=args.case_id, cases_file=args.cases)
+
+    # PREFLIGHT: verify every case can be evaluated BEFORE spending API calls
+    preflight_verify_tests(cases)
+
+    from condition_registry import validate_run
+    validate_run(cases, conditions)
+
+    n_calls = len(cases) * len(conditions)
+    total_jobs = args.total_jobs if args.total_jobs > 0 else n_calls
+
+    # Step 1: Create run directory
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Step 2: Write metadata.json immediately
+    try:
+        git_hash = _sp.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=_sp.DEVNULL
+        ).decode().strip()
+    except Exception:
+        git_hash = "unknown"
+
+    metadata = {
+        "model": model,
+        "trial": trial,
+        "run_id": run_id,
+        "start_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "cases_file": args.cases,
+        "conditions": conditions,
+        "total_jobs": total_jobs,
+        "command_line": sys.argv,
+        "git_hash": git_hash,
+    }
+    metadata_path = run_dir / "metadata.json"
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+
+    # Step 3: Touch events.jsonl
+    events_path = run_dir / "events.jsonl"
+    events_path.touch()
+
+    # Step 4: Set ablation context for event emission
+    set_ablation_context(events_path=events_path, trial=trial, run_id=run_id)
+
+    # Step 5: Initialize run logger
+    log_path = init_run_log(model, log_dir=run_dir)
+
+    print(f"T3 Ablation — {len(cases)} cases x {len(conditions)} conditions = {n_calls} evals")
+    print(f"  Model: {model}, Trial: {trial}, Run ID: {run_id}")
+    print(f"  Run dir: {run_dir}")
+
+    # Step 6: Run evaluations sequentially (no thread pool)
+    results = run_all(cases, model, conditions, max_workers=1, quiet=args.quiet)
+    print_results(results, conditions, model)
+
+    # Step 7: Verify log integrity
+    from execution import get_run_logger
+    logger = get_run_logger()
+    valid, reason = logger.verify_integrity()
+    stats = logger.get_stats()
+    if valid:
+        print(f"\n  Log verified: {log_path} (run_id={stats['run_id']}, {stats['attempted']} writes OK)")
+    else:
+        print(f"\n  RUN INVALID: {reason}")
+
+    close_run_log()
+
+    # Step 8: Write completion marker to metadata
+    events_written = len([line for line in open(events_path) if line.strip()])
+    metadata["end_time"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    metadata["events_written"] = events_written
+    metadata["log_valid"] = valid
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+
+    # Reset ablation context
+    set_ablation_context(events_path=None, trial=None, run_id=None)
+
+
 def main():
     parser = argparse.ArgumentParser(description="T3 multi-condition experiment")
     parser.add_argument("--model", default="gpt-4.1-nano")
@@ -359,12 +458,30 @@ def main():
     parser.add_argument("--conditions", default=None)
     parser.add_argument("--parallel", type=int, default=1)
     parser.add_argument("--quiet", action="store_true")
+    # Legacy mode args
     parser.add_argument("--clear-events", action="store_true",
-                        help="Clear events.jsonl before this run (use for first run in ablation)")
+                        help="Clear events.jsonl before this run (legacy mode)")
     parser.add_argument("--total-jobs", type=int, default=0,
-                        help="Grand total eval calls across all runs (for dashboard progress)")
+                        help="Expected eval calls for this run")
+    # Ablation mode args
+    parser.add_argument("--trial", type=int, default=None,
+                        help="Trial number (ablation mode)")
+    parser.add_argument("--run-dir", default=None,
+                        help="Isolated output directory (ablation mode)")
+    parser.add_argument("--run-id", default=None,
+                        help="Unique run ID (ablation mode)")
     args = parser.parse_args()
 
+    # Route to ablation mode if --run-dir is provided
+    if args.run_dir is not None:
+        if args.trial is None:
+            raise ValueError("--trial is required in ablation mode (--run-dir provided)")
+        if args.run_id is None:
+            raise ValueError("--run-id is required in ablation mode (--run-dir provided)")
+        _run_ablation_mode(args)
+        return
+
+    # Legacy mode (unchanged)
     conditions = [c.strip() for c in args.conditions.split(",")] if args.conditions else ALL_CONDITIONS
     for c in conditions:
         if c not in VALID_CONDITIONS:
@@ -384,23 +501,25 @@ def main():
     # Initialize per-run log file
     log_path = init_run_log(args.model)
 
-    # Start live metrics dashboard
-    from live_metrics import start_dashboard, stop_dashboard
+    # Start live metrics dashboard (legacy — uses old thread-based path for backward compat)
+    # In ablation mode, dashboard is a separate process (scripts/update_dashboards.py)
+    try:
+        # Try to import legacy functions — they may not exist after rewrite
+        from live_metrics import emit_event  # noqa: F401
+        # Legacy dashboard not available in new architecture — skip
+    except ImportError:
+        pass
+
     dashboard_total = args.total_jobs if args.total_jobs > 0 else n_calls
-    start_dashboard(total_jobs=dashboard_total, clear_events=args.clear_events)
 
     print(f"T3 Experiment — {len(cases)} cases x {len(conditions)} conditions = {n_calls} LLM calls")
     print(f"  Model: {args.model}")
     print(f"  Parallel: {args.parallel}")
     print(f"  Log: {log_path}")
-    print(f"  Dashboard: logs/live_metrics_dashboard.txt")
 
     results = run_all(cases, args.model, conditions,
                       max_workers=args.parallel, quiet=args.quiet)
     print_results(results, conditions, args.model)
-
-    # Stop dashboard and write final snapshot
-    stop_dashboard()
 
     # Verify log integrity — failed writes INVALIDATE the run
     from execution import get_run_logger

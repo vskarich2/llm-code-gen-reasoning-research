@@ -1,355 +1,380 @@
-"""Live streaming metrics dashboard for T3 ablation experiments.
+"""Live metrics for T3 ablation experiments — process-based architecture.
 
 Architecture:
-  - Workers write events to logs/events.jsonl (append-only, one JSON per line)
-  - Aggregator thread reads events, computes metrics, writes dashboard
-  - Dashboard written atomically via temp file + rename
+  - Each worker process writes events to its own events.jsonl via emit_event()
+  - A separate dashboard process (scripts/update_dashboards.py) scans run dirs
+    every 30 seconds, aggregates events, and writes per-model dashboards
+  - No shared mutable state. No threads. No queues. No sinks.
 
-Usage:
-  # In runner.py — start before run, stop after:
-  from live_metrics import start_dashboard, stop_dashboard, emit_event
-  start_dashboard(total_jobs=N)
-  ...  # emit_event() called from execution pipeline
-  stop_dashboard()
-
-  # Monitor from terminal:
-  watch -n5 cat logs/live_metrics_dashboard.txt
+Key functions:
+  emit_event()              — validate + write one event (worker process)
+  read_events_safe()        — read events from a single file (skip corrupt lines)
+  aggregate_model_events()  — discover + read all events for a model
+  compute_metrics()         — pure function: events list → metrics dict
+  compute_trial_progress()  — per-trial completion status
+  write_dashboard()         — atomic dashboard file write
 """
 
+import glob
 import json
 import logging
 import os
-import threading
-import time
-from collections import Counter, defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from statistics import mean, median, stdev
 
 _log = logging.getLogger("t3.live_metrics")
 
-BASE_DIR = Path(__file__).parent
-EVENTS_PATH = BASE_DIR / "logs" / "events.jsonl"
-DASHBOARD_PATH = BASE_DIR / "logs" / "live_metrics_dashboard.txt"
-DASHBOARD_TMP = BASE_DIR / "logs" / "live_metrics_dashboard.tmp"
+# ============================================================
+# EVENT SCHEMA
+# ============================================================
 
-REFRESH_INTERVAL = 30  # seconds
+REQUIRED_EVENT_KEYS = {"model", "trial", "run_id", "case_id", "condition", "timestamp"}
+
+FIELD_TYPES = {
+    "model": str,
+    "trial": int,
+    "run_id": str,
+    "case_id": str,
+    "condition": str,
+    "timestamp": str,
+}
 
 
 # ============================================================
-# EVENT EMITTER (called from worker threads)
+# EVENT EMITTER (called from worker processes)
 # ============================================================
 
-_events_lock = threading.Lock()
+def emit_event(event: dict, events_path: Path) -> None:
+    """Validate and write one event to events_path. Durable (fsync).
 
-
-def emit_event(event: dict) -> None:
-    """Append one event to the events log. Thread-safe.
-
-    Required fields: case_id, model, condition, pass.
-    All other fields are optional but recommended.
+    Opens/closes file per call. No buffered I/O. Raw OS calls.
+    Raises ValueError on schema/type violation (hard crash of worker).
     """
+    # Inject timestamp
     event["timestamp"] = datetime.now().isoformat()
+
+    # Validate required keys
+    missing = REQUIRED_EVENT_KEYS - event.keys()
+    if missing:
+        raise ValueError(f"Event missing required keys: {missing}")
+
+    # Validate field types
+    for key, expected_type in FIELD_TYPES.items():
+        if not isinstance(event[key], expected_type):
+            raise ValueError(
+                f"Event field '{key}' must be {expected_type.__name__}, "
+                f"got {type(event[key]).__name__}"
+            )
+
     line = json.dumps(event, default=str) + "\n"
-    with _events_lock:
-        try:
-            with open(EVENTS_PATH, "a", encoding="utf-8") as f:
-                f.write(line)
-        except OSError as e:
-            _log.error("EVENT WRITE FAILED: %s", e)
+    fd = os.open(str(events_path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, line.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 # ============================================================
-# AGGREGATOR STATE
+# SAFE EVENT FILE READER
 # ============================================================
 
-class MetricsState:
-    """In-memory aggregation of all events."""
+def read_events_safe(events_path: Path) -> list[dict]:
+    """Read all valid events from a JSONL file. Skip corrupt/incomplete lines.
 
-    def __init__(self, total_jobs: int = 0):
-        self.total_jobs = total_jobs
-        self.start_time = time.monotonic()
-        self.events: list[dict] = []
-        self.file_offset = 0  # byte offset for incremental reads
+    - Reads entire file as a snapshot (f.read())
+    - Splits on newline boundaries
+    - Each line parsed independently; JSONDecodeError → skip
+    - Never crashes due to malformed input
+    """
+    if not events_path.exists():
+        return []
 
-    def ingest_new_events(self) -> int:
-        """Read new events from JSONL since last read. Returns count of new events."""
-        if not EVENTS_PATH.exists():
-            return 0
-        new_count = 0
+    try:
+        with open(events_path, "r", encoding="utf-8") as f:
+            raw = f.read()
+    except OSError as e:
+        _log.error("Failed to read %s: %s", events_path, e)
+        return []
+
+    events = []
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
         try:
-            with open(EVENTS_PATH, "r", encoding="utf-8") as f:
-                f.seek(self.file_offset)
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        ev = json.loads(line)
-                        self.events.append(ev)
-                        new_count += 1
-                    except (json.JSONDecodeError, TypeError):
-                        _log.warning("Skipping malformed event line")
-                self.file_offset = f.tell()
-        except OSError as e:
-            _log.error("Failed to read events: %s", e)
-        return new_count
+            event = json.loads(line)
+            events.append(event)
+        except json.JSONDecodeError:
+            # Incomplete trailing line or corrupted — skip silently.
+            # Will be picked up next cycle if mid-write.
+            continue
+    return events
 
-    def compute(self) -> dict:
-        """Compute all metrics from current state. Returns flat dict."""
-        evts = self.events
-        n = len(evts)
 
-        # Derive elapsed from event timestamps (survives across runner restarts)
-        if evts:
-            from datetime import datetime as _dt
+# ============================================================
+# RUN DIRECTORY DISCOVERY + AGGREGATION
+# ============================================================
+
+def aggregate_model_events(model: str, ablation_dir: Path) -> list[dict]:
+    """Discover all run directories for a model and read their events.
+
+    - Skips directories without events.jsonl
+    - Returns flat list of all valid events across all trials
+    """
+    pattern = str(ablation_dir / f"run_{model}_t*")
+    dirs = sorted(glob.glob(pattern))
+
+    all_events = []
+    for d in dirs:
+        d_path = Path(d)
+        events_path = d_path / "events.jsonl"
+        if not events_path.exists():
+            # Directory exists but no events file yet — skip
+            continue
+        events = read_events_safe(events_path)
+        all_events.extend(events)
+
+    return all_events
+
+
+# ============================================================
+# TRIAL PROGRESS
+# ============================================================
+
+def compute_trial_progress(model: str, ablation_dir: Path, n_trials: int) -> list[dict]:
+    """Compute per-trial completion status for a model.
+
+    Returns list of dicts with: trial, actual, expected, status.
+    """
+    pattern = str(ablation_dir / f"run_{model}_t*")
+    dirs = sorted(glob.glob(pattern))
+
+    progress = []
+    for d in dirs:
+        d_path = Path(d)
+        events_path = d_path / "events.jsonl"
+        metadata_path = d_path / "metadata.json"
+
+        # Extract trial number from directory name
+        dir_name = d_path.name
+        try:
+            # Format: run_{model}_t{trial}_{uuid}
+            parts = dir_name.split("_t")
+            trial_part = parts[-1].split("_")[0]
+            trial = int(trial_part)
+        except (IndexError, ValueError):
+            trial = -1
+
+        if not events_path.exists():
+            continue
+
+        events = read_events_safe(events_path)
+        actual = len(events)
+
+        # Read expected from metadata
+        expected = 0
+        metadata_error = None
+        if metadata_path.exists():
             try:
-                first_ts = _dt.fromisoformat(evts[0]["timestamp"])
-                last_ts = _dt.fromisoformat(evts[-1]["timestamp"])
-                elapsed = (last_ts - first_ts).total_seconds()
-            except (KeyError, ValueError):
-                elapsed = time.monotonic() - self.start_time
+                with open(metadata_path) as f:
+                    metadata = json.load(f)
+                expected = metadata.get("total_jobs", 0)
+            except (json.JSONDecodeError, OSError) as e:
+                metadata_error = str(e)
+
+        if metadata_error:
+            status = "ERROR"
+        elif expected > 0 and actual >= expected:
+            status = "COMPLETE"
+        elif actual > 0:
+            status = "IN_PROGRESS"
         else:
-            elapsed = time.monotonic() - self.start_time
+            status = "NOT_STARTED"
 
-        m = {}
+        progress.append({
+            "trial": trial,
+            "actual": actual,
+            "expected": expected,
+            "status": status,
+            "metadata_error": metadata_error,
+        })
 
-        # --- PROGRESS ---
-        m["total_jobs"] = self.total_jobs
-        m["completed_jobs"] = n
-        m["percent_complete"] = round(100 * n / self.total_jobs, 2) if self.total_jobs > 0 else 0
-        m["elapsed_seconds"] = round(elapsed, 1)
-        m["elapsed_display"] = str(timedelta(seconds=int(elapsed)))
-        jps = n / elapsed if elapsed > 0 else 0
-        m["jobs_per_second"] = round(jps, 3)
-        remaining = (self.total_jobs - n) / jps if jps > 0 else 0
-        m["estimated_remaining"] = str(timedelta(seconds=int(remaining)))
+    return progress
 
-        if n == 0:
-            return m
 
-        # --- OUTCOMES ---
-        passes = [e for e in evts if e.get("pass")]
-        fails = [e for e in evts if not e.get("pass")]
-        m["pass_rate"] = round(100 * len(passes) / n, 2)
-        m["fail_rate"] = round(100 * len(fails) / n, 2)
+# ============================================================
+# METRICS COMPUTATION (pure function)
+# ============================================================
 
-        attempts = [e.get("num_attempts", 1) for e in evts]
-        m["avg_attempts"] = round(mean(attempts), 2) if attempts else 0
-        m["median_attempts"] = median(attempts) if attempts else 0
+def compute_metrics(events: list[dict], total_jobs: int) -> dict:
+    """Compute all dashboard metrics from a flat event list.
 
-        first_try = [e for e in evts if e.get("num_attempts", 1) == 1 and e.get("pass")]
-        m["first_try_success_rate"] = round(100 * len(first_try) / n, 2)
-        retry_success = [e for e in passes if e.get("num_attempts", 1) > 1]
-        m["retry_success_rate"] = round(100 * len(retry_success) / n, 2)
+    Pure function — no side effects, no state.
+    Events must all be for the same model (asserted).
 
-        # --- REASONING / EXECUTION ---
-        rc = [e for e in evts if e.get("reasoning_correct")]
-        cc = [e for e in evts if e.get("code_correct")]
-        m["reasoning_correct_rate"] = round(100 * len(rc) / n, 2)
-        m["code_correct_rate"] = round(100 * len(cc) / n, 2)
+    NOTE: Metrics are computed at the EVENT LEVEL (not case-aggregated).
+    These may differ from paper results which use case-level aggregation.
+    """
+    m = {}
+    n = len(events)
+    m["total_jobs"] = total_jobs
+    m["completed_jobs"] = n
+    m["percent_complete"] = round(100 * n / total_jobs, 2) if total_jobs > 0 else 0
 
-        # --- ALIGNMENT / LEG ---
-        aligned = [e for e in evts if e.get("reasoning_correct") and e.get("code_correct")]
-        misaligned = [e for e in evts if e.get("reasoning_correct") != e.get("code_correct")
-                      and e.get("reasoning_correct") is not None]
-        m["alignment_rate"] = round(100 * len(aligned) / n, 2)
-        m["misalignment_rate"] = round(100 * len(misaligned) / n, 2)
-
-        leg = [e for e in evts if e.get("reasoning_correct") and not e.get("code_correct")]
-        m["leg_rate"] = round(100 * len(leg) / n, 2)
-        m["leg_count"] = len(leg)
-
-        lucky = [e for e in evts if not e.get("reasoning_correct") and e.get("code_correct")]
-        m["lucky_fix_rate"] = round(100 * len(lucky) / n, 2)
-        m["lucky_fix_count"] = len(lucky)
-
-        true_success = [e for e in evts if e.get("reasoning_correct") and e.get("code_correct")]
-        true_failure = [e for e in evts if not e.get("reasoning_correct") and not e.get("code_correct")]
-        m["true_success_count"] = len(true_success)
-        m["true_failure_count"] = len(true_failure)
-
-        # --- FAILURE BREAKDOWN ---
-        ft_counts = Counter(e.get("failure_type", "UNKNOWN") for e in fails)
-        m["failure_type_counts"] = dict(ft_counts.most_common(20))
-
-        # --- MODEL BREAKDOWN (rich per-model stats) ---
-        models = sorted(set(e.get("model", "?") for e in evts))
-        model_stats = {}
-        for mdl in models:
-            me = [e for e in evts if e.get("model") == mdl]
-            mn = len(me)
-            if mn == 0:
-                continue
-            mp = [e for e in me if e.get("pass")]
-            mf = [e for e in me if not e.get("pass")]
-            m_rc = [e for e in me if e.get("reasoning_correct")]
-            m_cc = [e for e in me if e.get("code_correct")]
-            m_true_success = [e for e in me if e.get("reasoning_correct") and e.get("code_correct")]
-            m_leg = [e for e in me if e.get("reasoning_correct") and not e.get("code_correct")]
-            m_lucky = [e for e in me if not e.get("reasoning_correct") and e.get("code_correct")]
-            m_true_failure = [e for e in me if not e.get("reasoning_correct") and not e.get("code_correct")]
-            m_aligned = [e for e in me if e.get("reasoning_correct") and e.get("code_correct")]
-            m_misaligned = [e for e in me if e.get("reasoning_correct") != e.get("code_correct")
-                           and e.get("reasoning_correct") is not None]
-            m_attempts = [e.get("num_attempts", 1) for e in me]
-
-            # Per-condition stats for this model
-            m_conditions = sorted(set(e.get("condition", "?") for e in me))
-            m_cond_stats = {}
-            for cond in m_conditions:
-                ce = [e for e in me if e.get("condition") == cond]
-                cn = len(ce)
-                if cn == 0:
-                    continue
-                cp = [e for e in ce if e.get("pass")]
-                cl = [e for e in ce if e.get("reasoning_correct") and not e.get("code_correct")]
-                m_cond_stats[cond] = {
-                    "n": cn,
-                    "pass_rate": round(100 * len(cp) / cn, 2),
-                    "leg_rate": round(100 * len(cl) / cn, 2),
-                }
-
-            # Per-case stats for this model (for top-5 hardest)
-            m_cases = sorted(set(e.get("case_id", "?") for e in me))
-            m_case_stats = {}
-            for cid in m_cases:
-                ce = [e for e in me if e.get("case_id") == cid]
-                cn = len(ce)
-                if cn == 0:
-                    continue
-                cp = [e for e in ce if e.get("pass")]
-                m_case_stats[cid] = {
-                    "n": cn,
-                    "pass_rate": round(100 * len(cp) / cn, 2),
-                }
-            m_hardest5 = []
-            if m_case_stats:
-                by_hard = sorted(m_case_stats.items(), key=lambda x: x[1]["pass_rate"])
-                m_hardest5 = [(k, v["pass_rate"]) for k, v in by_hard[:5]]
-
-            # Failure type breakdown for this model
-            m_ft_counts = Counter(e.get("failure_type", "UNKNOWN") for e in mf)
-
-            model_stats[mdl] = {
-                "n": mn,
-                "pass_rate": round(100 * len(mp) / mn, 2),
-                "fail_rate": round(100 * len(mf) / mn, 2),
-                "reasoning_correct_rate": round(100 * len(m_rc) / mn, 2),
-                "code_correct_rate": round(100 * len(m_cc) / mn, 2),
-                "true_success_count": len(m_true_success),
-                "leg_count": len(m_leg),
-                "leg_rate": round(100 * len(m_leg) / mn, 2),
-                "lucky_fix_count": len(m_lucky),
-                "lucky_fix_rate": round(100 * len(m_lucky) / mn, 2),
-                "true_failure_count": len(m_true_failure),
-                "alignment_rate": round(100 * len(m_aligned) / mn, 2),
-                "misalignment_rate": round(100 * len(m_misaligned) / mn, 2),
-                "avg_attempts": round(mean(m_attempts), 2),
-                "median_attempts": median(m_attempts),
-                "condition_stats": m_cond_stats,
-                "hardest5": m_hardest5,
-                "failure_type_counts": dict(m_ft_counts.most_common(10)),
-            }
-        m["model_stats"] = model_stats
-
-        # --- CONDITION COMPARISON ---
-        conditions = sorted(set(e.get("condition", "?") for e in evts))
-        cond_stats = {}
-        for cond in conditions:
-            ce = [e for e in evts if e.get("condition") == cond]
-            cn = len(ce)
-            if cn == 0:
-                continue
-            cp = [e for e in ce if e.get("pass")]
-            cl = [e for e in ce if e.get("reasoning_correct") and not e.get("code_correct")]
-            cond_stats[cond] = {
-                "n": cn,
-                "pass_rate": round(100 * len(cp) / cn, 2),
-                "leg_rate": round(100 * len(cl) / cn, 2),
-            }
-        m["condition_stats"] = cond_stats
-
-        # Baseline vs intervention delta
-        bl = cond_stats.get("baseline", {})
-        if bl:
-            non_bl = [c for c in cond_stats if c != "baseline"]
-            if non_bl:
-                avg_int_pass = mean(cond_stats[c]["pass_rate"] for c in non_bl)
-                avg_int_leg = mean(cond_stats[c]["leg_rate"] for c in non_bl)
-                m["baseline_pass_rate"] = bl["pass_rate"]
-                m["intervention_pass_rate"] = round(avg_int_pass, 2)
-                m["delta_pass_rate"] = round(avg_int_pass - bl["pass_rate"], 2)
-                m["baseline_leg_rate"] = bl["leg_rate"]
-                m["intervention_leg_rate"] = round(avg_int_leg, 2)
-                m["delta_leg_rate"] = round(avg_int_leg - bl["leg_rate"], 2)
-
-        # --- CASE-LEVEL ---
-        cases = sorted(set(e.get("case_id", "?") for e in evts))
-        case_stats = {}
-        for cid in cases:
-            ce = [e for e in evts if e.get("case_id") == cid]
-            cn = len(ce)
-            if cn == 0:
-                continue
-            cp = [e for e in ce if e.get("pass")]
-            cl = [e for e in ce if e.get("reasoning_correct") and not e.get("code_correct")]
-            clf = [e for e in ce if not e.get("reasoning_correct") and e.get("code_correct")]
-            case_stats[cid] = {
-                "n": cn,
-                "pass_rate": round(100 * len(cp) / cn, 2),
-                "leg_rate": round(100 * len(cl) / cn, 2),
-                "lucky_fix_rate": round(100 * len(clf) / cn, 2),
-                "avg_attempts": round(mean(e.get("num_attempts", 1) for e in ce), 2),
-            }
-        m["case_stats"] = case_stats
-
-        # --- TOP-K INSIGHTS ---
-        if case_stats:
-            by_leg = sorted(case_stats.items(), key=lambda x: x[1]["leg_rate"], reverse=True)
-            by_lucky = sorted(case_stats.items(), key=lambda x: x[1]["lucky_fix_rate"], reverse=True)
-            by_hard = sorted(case_stats.items(), key=lambda x: x[1]["pass_rate"])
-            by_easy = sorted(case_stats.items(), key=lambda x: x[1]["pass_rate"], reverse=True)
-            m["top5_leg"] = [(k, v["leg_rate"]) for k, v in by_leg[:5]]
-            m["top5_lucky"] = [(k, v["lucky_fix_rate"]) for k, v in by_lucky[:5]]
-            m["hardest5"] = [(k, v["pass_rate"]) for k, v in by_hard[:5]]
-            m["easiest5"] = [(k, v["pass_rate"]) for k, v in by_easy[:5]]
-
-        # --- STABILITY (across repeats) ---
-        case_cond_repeats = defaultdict(list)
-        for e in evts:
-            key = (e.get("case_id"), e.get("condition"))
-            case_cond_repeats[key].append(1 if e.get("pass") else 0)
-        pass_variances = []
-        disagree_count = 0
-        for key, results in case_cond_repeats.items():
-            if len(results) >= 2:
-                pass_variances.append(stdev(results))
-                if len(set(results)) > 1:
-                    disagree_count += 1
-        if pass_variances:
-            m["variance_pass_rate"] = round(mean(pass_variances), 4)
-        m["repeat_disagreement_count"] = disagree_count
-
-        # --- PERFORMANCE ---
-        times = [e.get("elapsed_seconds") for e in evts if e.get("elapsed_seconds") is not None]
-        if times:
-            m["avg_time_per_job"] = round(mean(times), 2)
-
-        # --- RECENT ACTIVITY ---
-        m["recent"] = evts[-10:]
-
+    if n == 0:
         return m
 
+    # Enforce model purity
+    models_seen = set(e.get("model") for e in events)
+    assert len(models_seen) <= 1, (
+        f"compute_metrics received events from multiple models: {models_seen}"
+    )
+
+    # Enforce required metric fields
+    for e in events:
+        if "pass" not in e:
+            raise RuntimeError(
+                f"Missing 'pass' field in event: case_id={e.get('case_id')}, "
+                f"condition={e.get('condition')}, trial={e.get('trial')}"
+            )
+
+    # --- PER-CONDITION METRICS ---
+    conditions = sorted(set(e.get("condition", "?") for e in events))
+
+    cond_metrics = {}
+    for cond in conditions:
+        ce = [e for e in events if e.get("condition") == cond]
+        cn = len(ce)
+        if cn == 0:
+            continue
+
+        pass_rate = sum(1 for e in ce if e.get("pass")) / cn
+
+        # LEG: reasoning_correct AND NOT code_correct
+        leg_count = sum(
+            1 for e in ce
+            if e.get("reasoning_correct") is True and e.get("code_correct") is not True
+        )
+        leg_rate = leg_count / cn
+
+        # Lucky fix: NOT reasoning_correct AND code_correct
+        lucky_count = sum(
+            1 for e in ce
+            if e.get("reasoning_correct") is not True and e.get("code_correct") is True
+        )
+        lucky_rate = lucky_count / cn
+
+        # Exec|Reasoning: P(code_correct | reasoning_correct)
+        reasoning_correct_events = [e for e in ce if e.get("reasoning_correct") is True]
+        if reasoning_correct_events:
+            exec_reasoning = sum(
+                1 for e in reasoning_correct_events if e.get("code_correct") is True
+            ) / len(reasoning_correct_events)
+        else:
+            exec_reasoning = None
+
+        cond_metrics[cond] = {
+            "n": cn,
+            "pass_rate": round(pass_rate, 4),
+            "leg_rate": round(leg_rate, 4),
+            "lucky_fix_rate": round(lucky_rate, 4),
+            "exec_reasoning": round(exec_reasoning, 4) if exec_reasoning is not None else None,
+        }
+
+    m["condition_metrics"] = cond_metrics
+
+    # --- DELTAS (baseline vs leg_reduction) ---
+    bl = cond_metrics.get("baseline", {})
+    lr = cond_metrics.get("leg_reduction", {})
+    if bl and lr:
+        m["delta_pass"] = round(lr["pass_rate"] - bl["pass_rate"], 4)
+        m["delta_leg"] = round(lr["leg_rate"] - bl["leg_rate"], 4)
+        m["delta_lucky"] = round(lr["lucky_fix_rate"] - bl["lucky_fix_rate"], 4)
+
+    # --- CI STATUS ---
+    min_n = min(cm["n"] for cm in cond_metrics.values()) if cond_metrics else 0
+    m["ci_status"] = "CI NOT STABLE" if min_n < 10 else "SE computed"
+
+    # --- CASE STABILITY ---
+    # Per (case_id, condition): count distinct pass values across trials
+    from collections import defaultdict
+    case_cond_passes = defaultdict(set)
+    for e in events:
+        key = (e.get("case_id"), e.get("condition"))
+        case_cond_passes[key].add(bool(e.get("pass")))
+
+    disagreements = sum(1 for vals in case_cond_passes.values() if len(vals) > 1)
+    stable = sum(1 for vals in case_cond_passes.values() if len(vals) == 1)
+    m["stable_cases"] = stable
+    m["unstable_cases"] = disagreements
+
+    # --- REGIME CLASSIFICATION ---
+    overall_leg = sum(
+        1 for e in events
+        if e.get("reasoning_correct") is True and e.get("code_correct") is not True
+    ) / n
+    delta_pass = m.get("delta_pass", 0)
+
+    if overall_leg > 0.15:
+        m["regime"] = "EXECUTION-LIMITED"
+    elif delta_pass > 0.05 and overall_leg < 0.10:
+        m["regime"] = "ALIGNED"
+    else:
+        m["regime"] = "MIXED"
+
+    # --- FIGURE READINESS ---
+    # (set by dashboard from trial_progress, not computed here)
+    m["figure_readiness"] = "NOT READY"
+
+    # --- TOP CASES ---
+    case_stats = defaultdict(lambda: {"pass": [], "leg": [], "lucky": []})
+    for e in events:
+        cid = e.get("case_id", "?")
+        case_stats[cid]["pass"].append(1 if e.get("pass") else 0)
+        is_leg = 1 if (e.get("reasoning_correct") is True and e.get("code_correct") is not True) else 0
+        case_stats[cid]["leg"].append(is_leg)
+        is_lucky = 1 if (e.get("reasoning_correct") is not True and e.get("code_correct") is True) else 0
+        case_stats[cid]["lucky"].append(is_lucky)
+
+    # Sort case_ids for deterministic ordering
+    sorted_cases = sorted(case_stats.keys())
+
+    def _mean(lst):
+        return sum(lst) / len(lst) if lst else 0
+
+    case_leg_rates = [(cid, _mean(case_stats[cid]["leg"])) for cid in sorted_cases]
+    case_lucky_rates = [(cid, _mean(case_stats[cid]["lucky"])) for cid in sorted_cases]
+
+    # Intervention delta per case
+    case_deltas = []
+    for cid in sorted_cases:
+        bl_events = [e for e in events if e.get("case_id") == cid and e.get("condition") == "baseline"]
+        lr_events = [e for e in events if e.get("case_id") == cid and e.get("condition") == "leg_reduction"]
+        if bl_events and lr_events:
+            bl_pass = sum(1 for e in bl_events if e.get("pass")) / len(bl_events)
+            lr_pass = sum(1 for e in lr_events if e.get("pass")) / len(lr_events)
+            case_deltas.append((cid, round(lr_pass - bl_pass, 4)))
+
+    m["top5_leg"] = sorted(case_leg_rates, key=lambda x: -x[1])[:5]
+    m["top5_lucky"] = sorted(case_lucky_rates, key=lambda x: -x[1])[:5]
+    m["top5_delta"] = sorted(case_deltas, key=lambda x: -x[1])[:5]
+
+    # --- OVERALL RATES ---
+    m["pass_rate"] = round(sum(1 for e in events if e.get("pass")) / n, 4)
+    m["leg_rate"] = round(overall_leg, 4)
+
+    return m
+
 
 # ============================================================
-# DASHBOARD WRITER
+# FORMATTING HELPERS
 # ============================================================
 
 def _fmt_pct(val, width=8):
     if val is None:
         return "   N/A".ljust(width)
-    return f"{val:>{width}.2f}%"
+    return f"{val * 100:>{width}.2f}%"
 
 
 def _fmt_num(val, width=8):
@@ -358,10 +383,14 @@ def _fmt_num(val, width=8):
     return f"{val:>{width}}"
 
 
-def write_dashboard(metrics: dict) -> None:
-    """Write the dashboard to a temp file, then atomic rename."""
+# ============================================================
+# DASHBOARD WRITER
+# ============================================================
+
+def write_dashboard(metrics: dict, dashboard_path: Path) -> None:
+    """Write dashboard to file atomically (temp + fsync + replace)."""
     lines = []
-    w = lines.append  # shorthand
+    w = lines.append
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     w("=" * 72)
@@ -369,324 +398,115 @@ def write_dashboard(metrics: dict) -> None:
     w(f"  Last updated: {now}")
     w("=" * 72)
     w("")
+    w("  NOTE: Metrics are computed at the EVENT LEVEL (not case-aggregated).")
+    w("  These may differ from paper results which use case-level aggregation.")
+    w("")
 
     # --- PROGRESS ---
     w("[PROGRESS]")
-    w(f"  Completed:  {metrics.get('completed_jobs', 0)} / {metrics.get('total_jobs', '?')} eval calls"
-      f"  ({metrics.get('percent_complete', 0):.1f}%)")
-    w(f"  Elapsed:    {metrics.get('elapsed_display', '?')}")
-    w(f"  Remaining:  {metrics.get('estimated_remaining', '?')}")
-    w(f"  Speed:      {metrics.get('jobs_per_second', 0):.3f} eval calls/sec")
+    completed = metrics.get("completed_jobs", 0)
+    total = metrics.get("total_jobs", "?")
+    pct = metrics.get("percent_complete", 0)
+    w(f"  Completed:  {completed} / {total} eval calls  ({pct:.1f}%)")
     w("")
 
-    if metrics.get("completed_jobs", 0) == 0:
+    # --- TRIAL PROGRESS ---
+    trial_progress = metrics.get("trial_progress", [])
+    if trial_progress:
+        complete_count = sum(1 for t in trial_progress if t["status"] == "COMPLETE")
+        total_trials = len(trial_progress)
+        w(f"  Completed trials: {complete_count} / {total_trials}")
+        for t in sorted(trial_progress, key=lambda x: x["trial"]):
+            status = t["status"]
+            actual = t["actual"]
+            expected = t["expected"]
+            w(f"    Trial {t['trial']}: {actual:>3}/{expected} {status}")
+        w("")
+
+    if completed == 0:
         w("  (no events yet)")
-        _write_atomic(lines)
+        w("")
+        w("=" * 72)
+        _write_atomic(lines, dashboard_path)
         return
-
-    # ==================================================================
-    # TOTAL — ALL MODELS
-    # ==================================================================
-    w("=" * 72)
-    w("  [TOTAL — ALL MODELS]")
-    w("=" * 72)
-    w("")
-
-    # --- CORE METRICS ---
-    w("  [CORE METRICS]")
-    w(f"    Pass rate:          {_fmt_pct(metrics.get('pass_rate'))}")
-    w(f"      -- % of attempts where execution test passed")
-    w(f"    Fail rate:          {_fmt_pct(metrics.get('fail_rate'))}")
-    w(f"      -- % of attempts where execution test failed")
-    w(f"    First-try success:  {_fmt_pct(metrics.get('first_try_success_rate'))}")
-    w(f"    Retry success:      {_fmt_pct(metrics.get('retry_success_rate'))}")
-    w(f"    Avg attempts:       {metrics.get('avg_attempts', 'N/A')}")
-    w(f"    Median attempts:    {metrics.get('median_attempts', 'N/A')}")
-    w("")
-
-    # --- REASONING / EXECUTION ---
-    w("  [REASONING / EXECUTION]")
-    w(f"    Reasoning correct:  {_fmt_pct(metrics.get('reasoning_correct_rate'))}")
-    w(f"      -- % where LLM classifier judged reasoning identified the correct mechanism")
-    w(f"    Code correct:       {_fmt_pct(metrics.get('code_correct_rate'))}")
-    w(f"      -- % where execution test passed (ground truth)")
-    w("")
-
-    # --- LEG + ALIGNMENT ---
-    w("  [LEG + ALIGNMENT]")
-    w(f"    True success:       {metrics.get('true_success_count', 0):>6}")
-    w(f"      -- Both reasoning and code correct")
-    w(f"    LEG:                {metrics.get('leg_count', 0):>6}  ({_fmt_pct(metrics.get('leg_rate')).strip()})")
-    w(f"      -- % where reasoning was correct but code failed (Latent Execution Gap)")
-    w(f"    Lucky fix:          {metrics.get('lucky_fix_count', 0):>6}  ({_fmt_pct(metrics.get('lucky_fix_rate')).strip()})")
-    w(f"      -- % where code passed despite incorrect reasoning")
-    w(f"    True failure:       {metrics.get('true_failure_count', 0):>6}")
-    w(f"      -- Both reasoning and code wrong")
-    w(f"    Alignment rate:     {_fmt_pct(metrics.get('alignment_rate'))}")
-    w(f"      -- % where reasoning and code agree (both right or both wrong)")
-    w(f"    Misalignment rate:  {_fmt_pct(metrics.get('misalignment_rate'))}")
-    w("")
 
     # --- CONDITION COMPARISON ---
-    cond_stats = metrics.get("condition_stats", {})
-    if cond_stats:
-        w("  [CONDITION COMPARISON]")
-        w(f"    {'Condition':<28} {'N':>5} {'Pass%':>8} {'LEG%':>8}")
-        w(f"    {'─' * 52}")
-        for cond, cs in sorted(cond_stats.items()):
-            w(f"    {cond:<28} {cs['n']:>5} {cs['pass_rate']:>7.2f}% {cs['leg_rate']:>7.2f}%")
-        if "delta_pass_rate" in metrics:
-            w("")
-            w(f"    Baseline pass:      {metrics.get('baseline_pass_rate', 'N/A')}%")
-            w(f"    Intervention pass:  {metrics.get('intervention_pass_rate', 'N/A')}%")
-            w(f"    Delta pass:         {metrics.get('delta_pass_rate', 'N/A'):+.2f}%")
-            w(f"    Delta LEG:          {metrics.get('delta_leg_rate', 'N/A'):+.2f}%")
+    cond_metrics = metrics.get("condition_metrics", {})
+    if cond_metrics:
+        w("[CONDITION COMPARISON]")
+        w(f"  {'Condition':<20} {'N':>5} {'Pass':>8} {'LEG':>8} {'Lucky':>8} {'E|R':>8}")
+        w(f"  {'─' * 60}")
+        for cond, cm in sorted(cond_metrics.items()):
+            er = f"{cm['exec_reasoning']:.4f}" if cm["exec_reasoning"] is not None else "N/A"
+            w(f"  {cond:<20} {cm['n']:>5} {cm['pass_rate']:>7.4f} {cm['leg_rate']:>7.4f} "
+              f"{cm['lucky_fix_rate']:>7.4f} {er:>8}")
         w("")
 
-    # --- MODEL SUMMARY TABLE ---
-    model_stats = metrics.get("model_stats", {})
-    if model_stats:
-        w("  [MODEL SUMMARY TABLE]")
-        w(f"    {'Model':<24} {'N':>5} {'Pass%':>8} {'LEG%':>8} {'Align%':>8} {'Avg Att':>8}")
-        w(f"    {'─' * 66}")
-        for mdl, ms in sorted(model_stats.items()):
-            w(f"    {mdl:<24} {ms['n']:>5} {ms['pass_rate']:>7.2f}% {ms['leg_rate']:>7.2f}%"
-              f" {ms['alignment_rate']:>7.2f}% {ms['avg_attempts']:>7.2f}")
+    # --- DELTAS ---
+    if "delta_pass" in metrics:
+        w("[DELTAS (leg_reduction - baseline)]")
+        w(f"  Pass:  {metrics['delta_pass']:+.4f}")
+        w(f"  LEG:   {metrics['delta_leg']:+.4f}")
+        w(f"  Lucky: {metrics['delta_lucky']:+.4f}")
         w("")
 
-    # --- FAILURE TYPES ---
-    ft = metrics.get("failure_type_counts", {})
-    if ft:
-        w("  [FAILURE TYPE BREAKDOWN]")
-        for ftype, count in sorted(ft.items(), key=lambda x: -x[1]):
-            w(f"    {str(ftype or 'UNKNOWN'):<32} {count:>5}")
-        w("")
-
-    # --- TOP CASES ---
-    if metrics.get("top5_leg"):
-        w("  [TOP 5 — Highest LEG Rate]")
-        for cid, rate in metrics["top5_leg"]:
-            w(f"    {cid:<36} {rate:>6.1f}%")
-        w("")
-
-    if metrics.get("hardest5"):
-        w("  [TOP 5 — Hardest Cases (lowest pass rate)]")
-        for cid, rate in metrics["hardest5"]:
-            w(f"    {cid:<36} {rate:>6.1f}%")
-        w("")
-
-    if metrics.get("easiest5"):
-        w("  [TOP 5 — Easiest Cases (highest pass rate)]")
-        for cid, rate in metrics["easiest5"]:
-            w(f"    {cid:<36} {rate:>6.1f}%")
-        w("")
-
-    if metrics.get("top5_lucky"):
-        w("  [TOP 5 — Highest Lucky Fix Rate]")
-        for cid, rate in metrics["top5_lucky"]:
-            w(f"    {cid:<36} {rate:>6.1f}%")
-        w("")
+    # --- CI STATUS ---
+    w(f"[CI STATUS] {metrics.get('ci_status', 'N/A')}")
+    w("")
 
     # --- STABILITY ---
-    if "variance_pass_rate" in metrics or "repeat_disagreement_count" in metrics:
-        w("  [STABILITY]")
-        if "variance_pass_rate" in metrics:
-            w(f"    Pass rate stdev (across repeats): {metrics['variance_pass_rate']:.4f}")
-        w(f"    Repeat disagreements:             {metrics.get('repeat_disagreement_count', 0)}")
-        w("")
+    w("[CASE STABILITY]")
+    w(f"  Stable cases:   {metrics.get('stable_cases', 0)}")
+    w(f"  Unstable cases: {metrics.get('unstable_cases', 0)}")
+    w("")
 
-    # --- PERFORMANCE ---
-    if "avg_time_per_job" in metrics:
-        w("  [PERFORMANCE]")
-        w(f"    Avg time per eval:  {metrics['avg_time_per_job']:.2f}s")
-        w("")
+    # --- REGIME ---
+    w(f"[REGIME CLASSIFICATION] {metrics.get('regime', 'N/A')}")
+    w("")
 
-    # ==================================================================
-    # PER-MODEL SECTIONS
-    # ==================================================================
-    if model_stats:
-        for mdl, ms in sorted(model_stats.items()):
-            w("=" * 72)
-            w(f"  [MODEL: {mdl}]")
-            w("=" * 72)
+    # --- TOP CASES ---
+    for label, key in [("LEG Rate", "top5_leg"), ("Lucky Fix Rate", "top5_lucky"),
+                       ("Intervention Delta", "top5_delta")]:
+        top = metrics.get(key, [])
+        if top:
+            w(f"[TOP 5 — {label}]")
+            for cid, val in top:
+                w(f"  {cid:<36} {val:>8.4f}")
             w("")
 
-            mn = ms["n"]
+    # --- FIGURE READINESS ---
+    w(f"[FIGURE READINESS] {metrics.get('figure_readiness', 'NOT READY')}")
+    w("")
 
-            # --- CORE METRICS ---
-            w("  [CORE METRICS]")
-            w(f"    N (eval calls):     {_fmt_num(mn)}")
-            w(f"    Pass rate:          {_fmt_pct(ms.get('pass_rate'))}")
-            w(f"      -- % of attempts where execution test passed")
-            w(f"    Fail rate:          {_fmt_pct(ms.get('fail_rate'))}")
-            w(f"      -- % of attempts where execution test failed")
-            w(f"    Avg attempts:       {ms.get('avg_attempts', 'N/A')}")
-            w(f"    Median attempts:    {ms.get('median_attempts', 'N/A')}")
-            w("")
-
-            # --- REASONING / EXECUTION ---
-            w("  [REASONING / EXECUTION]")
-            w(f"    Reasoning correct:  {_fmt_pct(ms.get('reasoning_correct_rate'))}")
-            w(f"      -- % where LLM classifier judged reasoning identified the correct mechanism")
-            w(f"    Code correct:       {_fmt_pct(ms.get('code_correct_rate'))}")
-            w(f"      -- % where execution test passed (ground truth)")
-            w("")
-
-            # --- LEG + ALIGNMENT ---
-            w("  [LEG + ALIGNMENT]")
-            w(f"    True success:       {ms.get('true_success_count', 0):>6}")
-            w(f"      -- Both reasoning and code correct")
-            w(f"    LEG:                {ms.get('leg_count', 0):>6}  ({_fmt_pct(ms.get('leg_rate')).strip()})")
-            w(f"      -- % where reasoning was correct but code failed (Latent Execution Gap)")
-            w(f"    Lucky fix:          {ms.get('lucky_fix_count', 0):>6}  ({_fmt_pct(ms.get('lucky_fix_rate')).strip()})")
-            w(f"      -- % where code passed despite incorrect reasoning")
-            w(f"    True failure:       {ms.get('true_failure_count', 0):>6}")
-            w(f"      -- Both reasoning and code wrong")
-            w(f"    Alignment rate:     {_fmt_pct(ms.get('alignment_rate'))}")
-            w(f"      -- % where reasoning and code agree (both right or both wrong)")
-            w(f"    Misalignment rate:  {_fmt_pct(ms.get('misalignment_rate'))}")
-            w("")
-
-            # --- CONDITION COMPARISON (per model) ---
-            m_cond = ms.get("condition_stats", {})
-            if m_cond:
-                w("  [CONDITION COMPARISON]")
-                w(f"    {'Condition':<28} {'N':>5} {'Pass%':>8} {'LEG%':>8}")
-                w(f"    {'─' * 52}")
-                for cond, cs in sorted(m_cond.items()):
-                    w(f"    {cond:<28} {cs['n']:>5} {cs['pass_rate']:>7.2f}% {cs['leg_rate']:>7.2f}%")
-                w("")
-
-            # --- FAILURE TYPES (per model) ---
-            m_ft = ms.get("failure_type_counts", {})
-            if m_ft:
-                w("  [FAILURE TYPE BREAKDOWN]")
-                for ftype, count in sorted(m_ft.items(), key=lambda x: -x[1]):
-                    w(f"    {str(ftype or 'UNKNOWN'):<32} {count:>5}")
-                w("")
-
-            # --- TOP 5 HARDEST (per model) ---
-            m_hardest = ms.get("hardest5", [])
-            if m_hardest:
-                w("  [TOP 5 — Hardest Cases (lowest pass rate)]")
-                for cid, rate in m_hardest:
-                    w(f"    {cid:<36} {rate:>6.1f}%")
-                w("")
-
-    # ==================================================================
-    # CASE-LEVEL DETAIL
-    # ==================================================================
-    case_stats = metrics.get("case_stats", {})
-    if case_stats:
-        w("=" * 72)
-        w("  [CASE-LEVEL DETAIL]")
-        w("=" * 72)
-        w(f"  {'Case':<36} {'N':>4} {'Pass%':>7} {'LEG%':>7} {'Lucky%':>7} {'Att':>5}")
-        w(f"  {'─' * 70}")
-        for cid, cs in sorted(case_stats.items()):
-            w(f"  {cid:<36} {cs['n']:>4} {cs['pass_rate']:>6.1f}% {cs['leg_rate']:>6.1f}%"
-              f" {cs['lucky_fix_rate']:>6.1f}% {cs['avg_attempts']:>5.1f}")
-        w("")
-
-    # ==================================================================
-    # RECENT ACTIVITY
-    # ==================================================================
-    recent = metrics.get("recent", [])
-    if recent:
-        w("=" * 72)
-        w("  [RECENT ACTIVITY (last 10)]")
-        w("=" * 72)
-        for e in recent[-10:]:
-            ts = e.get("timestamp", "?")[-8:]  # HH:MM:SS
-            cid = e.get("case_id", "?")[:24]
-            mdl = e.get("model", "?")[:16]
-            cond = e.get("condition", "?")[:16]
-            p = "PASS" if e.get("pass") else "FAIL"
-            rc = "R:Y" if e.get("reasoning_correct") else "R:N"
-            cc = "C:Y" if e.get("code_correct") else "C:N"
-            w(f"  {ts}  {cid:<24} {mdl:<16} {cond:<16} {p:<4} {rc} {cc}")
-        w("")
+    # --- PAPER FIGURES + STATS PREVIEW ---
+    w("[PAPER FIGURES + STATS PREVIEW]")
+    if cond_metrics:
+        for cond, cm in sorted(cond_metrics.items()):
+            w(f"  {cond}:")
+            w(f"    Pass rate:  {cm['pass_rate']:.4f}")
+            w(f"    LEG rate:   {cm['leg_rate']:.4f}")
+            w(f"    Lucky fix:  {cm['lucky_fix_rate']:.4f}")
+            er_str = f"{cm['exec_reasoning']:.4f}" if cm['exec_reasoning'] is not None else "N/A"
+            w(f"    Exec|Reas:  {er_str}")
+    w("")
 
     w("=" * 72)
-    w(f"  END — {metrics.get('completed_jobs', 0)}/{metrics.get('total_jobs', '?')} eval calls")
+    w(f"  END — {completed}/{total} eval calls")
     w("=" * 72)
 
-    _write_atomic(lines)
+    _write_atomic(lines, dashboard_path)
 
 
-def _write_atomic(lines: list[str]) -> None:
-    """Write lines to temp file, then atomic rename to dashboard path."""
-    DASHBOARD_PATH.parent.mkdir(parents=True, exist_ok=True)
+def _write_atomic(lines: list[str], dashboard_path: Path) -> None:
+    """Write lines to temp file, fsync, then atomic replace."""
+    dashboard_path.parent.mkdir(parents=True, exist_ok=True)
     content = "\n".join(lines) + "\n"
+    tmp_path = dashboard_path.with_suffix(".tmp")
     try:
-        with open(DASHBOARD_TMP, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(content)
-        os.replace(str(DASHBOARD_TMP), str(DASHBOARD_PATH))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(str(tmp_path), str(dashboard_path))
     except OSError as e:
         _log.error("Dashboard write failed: %s", e)
-
-
-# ============================================================
-# AGGREGATOR THREAD
-# ============================================================
-
-_aggregator_thread: threading.Thread | None = None
-_aggregator_stop = threading.Event()
-_metrics_state: MetricsState | None = None
-
-
-def _aggregator_loop():
-    """Main loop: read events, compute metrics, write dashboard."""
-    state = _metrics_state
-    if state is None:
-        return
-    while not _aggregator_stop.is_set():
-        try:
-            new = state.ingest_new_events()
-            metrics = state.compute()
-            write_dashboard(metrics)
-            if new > 0:
-                _log.info("Dashboard updated: %d new events, %d total",
-                          new, len(state.events))
-        except Exception as e:
-            _log.error("Aggregator error: %s", e, exc_info=True)
-        _aggregator_stop.wait(timeout=REFRESH_INTERVAL)
-    # Final update
-    try:
-        state.ingest_new_events()
-        metrics = state.compute()
-        write_dashboard(metrics)
-    except Exception:
-        pass
-
-
-def start_dashboard(total_jobs: int = 0, clear_events: bool = False) -> None:
-    """Start the live metrics dashboard aggregator thread.
-
-    Call ONCE before the experiment starts.
-    Set clear_events=True only for the first run in a multi-run ablation.
-    """
-    global _aggregator_thread, _metrics_state
-
-    EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if clear_events and EVENTS_PATH.exists():
-        EVENTS_PATH.unlink()
-
-    _metrics_state = MetricsState(total_jobs=total_jobs)
-    _aggregator_stop.clear()
-    _aggregator_thread = threading.Thread(
-        target=_aggregator_loop, name="metrics-aggregator", daemon=True
-    )
-    _aggregator_thread.start()
-    _log.info("Live metrics dashboard started (total_jobs=%d, refresh=%ds)",
-              total_jobs, REFRESH_INTERVAL)
-
-
-def stop_dashboard() -> None:
-    """Stop the aggregator thread and write final dashboard."""
-    global _aggregator_thread
-    _aggregator_stop.set()
-    if _aggregator_thread is not None:
-        _aggregator_thread.join(timeout=10)
-        _aggregator_thread = None
-    _log.info("Live metrics dashboard stopped")
