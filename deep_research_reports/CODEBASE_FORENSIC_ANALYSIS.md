@@ -480,7 +480,7 @@ The same default value (`crit_user_enumerated.jinja`) was independently defined 
         "intent": "string — what the developer/agent is trying to accomplish",
         "assumptions": ["list of assumptions being made"],
         "dependencies_considered": ["list of downstream consumers checked"],
-        "dependencies_not_considered": ["(filled post-hoc by audit)"]
+        "dependencies_not_considered": ["(filled post-hoc by reasoning_evaluator_audit)"]
     },
     "diff": {
         "file": "multi_agent/runner.py",

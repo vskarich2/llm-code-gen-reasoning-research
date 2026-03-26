@@ -1,8 +1,8 @@
-"""Payment processor with caching and audit trail.
+"""Payment processor with caching and reasoning_evaluator_audit trail.
 
 Caching is intentional: repeated charges for the same txn_id
 return the cached result without re-charging. However, every
-call to charge() must still be recorded in the audit log.
+call to charge() must still be recorded in the reasoning_evaluator_audit log.
 """
 
 from ledger import record, get_count, reset_ledger
@@ -15,7 +15,7 @@ def charge(txn_id, amount):
     """Charge the given amount. Uses cache to avoid double-charging.
 
     Caching is correct (no double-charge), but EVERY call — cached
-    or not — must be logged in the audit system for compliance.
+    or not — must be logged in the reasoning_evaluator_audit system for compliance.
     """
     # BUG: early return on cached path skips log_charge()
     if txn_id in _charge_cache:

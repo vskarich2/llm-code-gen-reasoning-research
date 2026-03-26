@@ -1,4 +1,4 @@
-"""Order service: reserve -> audit -> pay -> notify."""
+"""Order service: reserve -> reasoning_evaluator_audit -> pay -> notify."""
 
 from inventory import reserve, release
 from payment import process, add_audit_entry, remove_audit_entry
@@ -17,9 +17,9 @@ def reset():
 
 
 def place_order(product_id, qty, price):
-    """Place order: reserve inventory, log audit, process payment, notify.
+    """Place order: reserve inventory, log reasoning_evaluator_audit, process payment, notify.
 
-    If payment fails, must release inventory AND remove audit entry.
+    If payment fails, must release inventory AND remove reasoning_evaluator_audit entry.
     """
     order_id = f"ORD-{product_id}-{qty}"
     reserve(product_id, qty)
@@ -28,7 +28,7 @@ def place_order(product_id, qty, price):
         result = process(qty * price, order_id)
     except ValueError:
         release(product_id, qty)  # FIX: rollback reservation
-        remove_audit_entry(order_id)  # FIX: rollback audit entry
+        remove_audit_entry(order_id)  # FIX: rollback reasoning_evaluator_audit entry
         raise
     _notifications.append({"order_id": order_id, "status": "confirmed"})
     return {"status": "confirmed", "payment": result}

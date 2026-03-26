@@ -4,7 +4,7 @@ Validates infrastructure before large experiment runs:
 1. Parsing produces non-empty reasoning (>= 4/5 cases)
 2. Classifier responds with non-empty output (all cases)
 3. Classifier output parses to YES/NO verdict (>= 4/5 cases)
-4. All audit log fields are present (all cases)
+4. All reasoning_evaluator_audit log fields are present (all cases)
 5. eval_model_actual matches eval_model_intended (all cases)
 
 Usage:

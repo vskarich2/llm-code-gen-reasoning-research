@@ -10,7 +10,7 @@
 
 DIAGNOSTIC_NUDGES = {
     "HIDDEN_DEPENDENCY": """
-STOP. Before returning your answer, perform a dependency audit:
+STOP. Before returning your answer, perform a dependency reasoning_evaluator_audit:
 
 1. In cache_writer.py, there are two similarly-named write helpers:
    - sync_user_to_cache() calls cache_put() — ALWAYS overwrites
@@ -68,7 +68,7 @@ STOP. Before returning your answer, reason about the failure window:
 4. Correct fixes: try/except with rollback, compute-then-assign,
    or any mechanism ensuring the invariant holds on exception.
 
-Do NOT just add logging, retries, or audit calls.
+Do NOT just add logging, retries, or reasoning_evaluator_audit calls.
 Explain what invariant you are protecting.
 """,
 
@@ -156,7 +156,7 @@ MANDATORY CONSTRAINTS — you must follow ALL of these:
    that fails still leaves the invariant violated.
 
 4. You may NOT rely on record_transfer_attempt, emit_transfer_event,
-   emit_failure_alert, or any audit/ledger call as a consistency
+   emit_failure_alert, or any reasoning_evaluator_audit/ledger call as a consistency
    mechanism. They are observability, not correctness.
 
 5. The ONLY acceptable patterns are:

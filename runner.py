@@ -65,7 +65,7 @@ REPAIR_LOOP_MAX_ATTEMPTS = 2
 # LOAD CASES
 # ============================================================
 
-def load_cases(case_id: str | None = None, cases_file: str = "cases.json") -> list[dict]:
+def load_cases(case_id: str, cases_file: str) -> list[dict]:
     cases_path = BASE_DIR / cases_file
     cases = json.loads(cases_path.read_text(encoding="utf-8"))
     for case in cases:
@@ -422,7 +422,7 @@ def _run_ablation_mode(args):
     trial = args.trial
     run_id = args.run_id
 
-    conditions = [c.strip() for c in args.conditions.split(",")] if args.conditions else ALL_CONDITIONS
+    conditions = [c.strip() for c in args.conditions.split(",")] if args.conditions else [ALL_CONDITIONS]
     for c in conditions:
         if c not in VALID_CONDITIONS:
             raise ValueError(f"Invalid condition {c!r}")
@@ -480,6 +480,10 @@ def _run_ablation_mode(args):
     # Step 4: Set ablation context for event emission
     set_ablation_context(events_path=events_path, trial=trial, run_id=run_id)
 
+    # Step 4.5: Initialize call-level logger
+    from call_logger import init_call_logger, close_call_logger
+    init_call_logger(run_dir)
+
     # Step 5: Initialize run logger
     log_path = init_run_log(model, log_dir=run_dir)
 
@@ -505,6 +509,11 @@ def _run_ablation_mode(args):
         print(f"\n  RUN INVALID: {reason}")
 
     close_run_log()
+
+    # Step 7.5: Close call logger and record count
+    from call_logger import close_call_logger, get_call_count
+    total_calls = close_call_logger()
+    print(f"  Call log: {total_calls} LLM calls logged to {run_dir}/calls/")
 
     # Step 8: Write completion marker to metadata
     events_written = len([line for line in open(events_path) if line.strip()])
@@ -558,12 +567,7 @@ def main():
         cli_overrides["models.generation"] = [{"name": args.model, "temperature": 0.0, "max_tokens": 4096, "top_p": 1.0}]
     if args.cases:
         cli_overrides["cases.source"] = args.cases
-    if args.parallel is not None:
-        import logging as _warn_log
-        _warn_log.getLogger("t3.runner").warning(
-            "--parallel is DEPRECATED and ignored. Execution is always serial. "
-            "Use process-level parallelism (multiple runner.py invocations)."
-        )
+
     config = load_config(args.config, cli_overrides if cli_overrides else None)
 
     print(f"CONFIG LOADED: {args.config} (sha={config._config_sha256})")
@@ -607,6 +611,12 @@ def main():
 
     # Initialize per-run log file
     log_path = init_run_log(model)
+
+    # Initialize call-level logger (legacy mode: write to logs/ directory)
+    from call_logger import init_call_logger
+    legacy_call_dir = Path(str(log_path).replace(".jsonl", "_calls"))
+    legacy_call_dir.mkdir(parents=True, exist_ok=True)
+    init_call_logger(legacy_call_dir)
 
     # Start live metrics dashboard (legacy — uses old thread-based path for backward compat)
     # In ablation mode, dashboard is a separate process (scripts/update_dashboards.py)

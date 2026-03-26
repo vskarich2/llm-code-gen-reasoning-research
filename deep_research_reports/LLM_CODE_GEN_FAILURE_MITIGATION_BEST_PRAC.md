@@ -640,8 +640,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: pip-audit
-        uses: pypa/gh-action-pip-audit@v1
+      - name: pip-reasoning_evaluator_audit
+        uses: pypa/gh-action-pip-reasoning_evaluator_audit@v1
         with:
           inputs: requirements.txt
 
@@ -736,7 +736,7 @@ Below extends your earlier schema with prompt and tool evidence:
       "semgrep": [{ "rule_id": "python-bare-except", "count": 1 }],
       "codeql": [{ "query_suite": "security-and-quality", "alerts": 0 }],
       "secrets": [{ "tool": "detect-secrets", "findings": 0 }],
-      "deps": [{ "tool": "pip-audit", "vulns": 0 }]
+      "deps": [{ "tool": "pip-reasoning_evaluator_audit", "vulns": 0 }]
     },
     "outcomes": {
       "build": "pass|fail",

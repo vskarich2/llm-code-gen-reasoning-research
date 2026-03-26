@@ -1,6 +1,6 @@
 """Tests for effect_order family (hidden_dependency).
 
-Invariant: side effects (snapshot/emit/audit) must happen per-item,
+Invariant: side effects (snapshot/emit/reasoning_evaluator_audit) must happen per-item,
            not once at batch end.
 """
 
@@ -80,12 +80,12 @@ def test_c(mod):
 
     if len(audit) != len(items):
         return False, [
-            f"expected {len(items)} audit entries (one per item), got {len(audit)}"
+            f"expected {len(items)} reasoning_evaluator_audit entries (one per item), got {len(audit)}"
         ]
 
     audit_ids = [a["item_id"] for a in audit]
     expected_ids = [i["id"] for i in items]
     if audit_ids != expected_ids:
-        return False, [f"audit ids {audit_ids} != expected {expected_ids}"]
+        return False, [f"reasoning_evaluator_audit ids {audit_ids} != expected {expected_ids}"]
 
-    return True, ["one audit entry per item"]
+    return True, ["one reasoning_evaluator_audit entry per item"]

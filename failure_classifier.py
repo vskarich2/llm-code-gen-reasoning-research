@@ -32,7 +32,7 @@ _CRITIQUE_KEYWORDS = {
     "PARTIAL_STATE_UPDATE": ["partial", "incomplete", "subset", "some but not all", "both"],
     "INVARIANT_VIOLATION": ["invariant", "conserv", "balance", "consistent", "atomic", "rollback"],
     "RETRY_LOGIC_BUG": ["retry", "duplic", "idempot", "repeat", "twice", "already"],
-    "LOGGING_INCONSISTENCY": ["log", "side effect", "record", "audit", "trace"],
+    "LOGGING_INCONSISTENCY": ["log", "side effect", "record", "reasoning_evaluator_audit", "trace"],
     "EDGE_CASE_MISSED": ["edge", "boundary", "null", "empty", "zero", "none"],
 }
 

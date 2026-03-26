@@ -69,7 +69,7 @@ def test_b(mod):
 
 
 def test_c(mod):
-    """Level C: failed payment must release inventory AND clean audit log."""
+    """Level C: failed payment must release inventory AND clean reasoning_evaluator_audit log."""
     # Reset module state
     if hasattr(mod, "reset"):
         mod.reset()
@@ -100,12 +100,12 @@ def test_c(mod):
             f"(reservation not rolled back)"
         ]
 
-    # Check audit log cleaned
+    # Check reasoning_evaluator_audit log cleaned
     audit = mod.get_audit_log()
     if len(audit) != 0:
         return False, [
             f"audit_log has {len(audit)} entries after failed order, expected 0 "
-            f"(audit entry not removed on rollback)"
+            f"(reasoning_evaluator_audit entry not removed on rollback)"
         ]
 
-    return True, ["inventory released and audit log cleaned after payment failure"]
+    return True, ["inventory released and reasoning_evaluator_audit log cleaned after payment failure"]

@@ -1,4 +1,4 @@
-"""Simple payment processor with audit ledger."""
+"""Simple payment processor with reasoning_evaluator_audit ledger."""
 
 _ledger = []
 
@@ -7,7 +7,7 @@ def process_payment(amount, description="payment"):
     """Process a payment and record it in the ledger.
 
     All payments — including zero-amount — must be recorded in the
-    ledger for audit compliance. Zero-amount payments are recorded
+    ledger for reasoning_evaluator_audit compliance. Zero-amount payments are recorded
     with status 'skipped' but still appear in the ledger.
     """
     # FIX: record ledger entry before returning for zero-amount

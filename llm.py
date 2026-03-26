@@ -86,6 +86,10 @@ def call_model(prompt: str, model: str, raw: bool = False,
                file_paths: list[str] | None = None) -> str:
     """Call an LLM. Falls back to mock if no API key is set.
 
+    Every call is logged via call_logger.emit_call() — the ONLY call-level
+    logging path. Callers set context via call_logger.set_call_context()
+    BEFORE calling this function.
+
     Args:
         model: Model name. MUST be provided by caller (from config).
         raw: If True, send prompt as-is without appending JSON output instruction.
@@ -111,16 +115,38 @@ def call_model(prompt: str, model: str, raw: bool = False,
             )
             _mock_warning_emitted = True
         from llm_mock import mock_call
-        return mock_call(full_prompt)
+        t0 = _time.monotonic()
+        result = mock_call(full_prompt)
+        elapsed = _time.monotonic() - t0
+        _emit_call_log(model, full_prompt, result, elapsed, error=None)
+        return result
 
     _llm_log.debug("API_CALL_START model=%s prompt_len=%d raw=%s",
                     model, len(full_prompt), raw)
     t0 = _time.monotonic()
-    result = _openai_call(full_prompt, model, api_key)
+    error = None
+    try:
+        result = _openai_call(full_prompt, model, api_key)
+    except Exception as e:
+        elapsed = _time.monotonic() - t0
+        _emit_call_log(model, full_prompt, "", elapsed, error=str(e))
+        raise
     elapsed = _time.monotonic() - t0
     _llm_log.debug("API_CALL_END model=%s elapsed=%.1fs response_len=%d",
                     model, elapsed, len(result))
+    _emit_call_log(model, full_prompt, result, elapsed, error=None)
     return result
+
+
+def _emit_call_log(model: str, prompt: str, response: str,
+                   elapsed: float, error: str | None) -> None:
+    """Emit call log. Never raises — logging failure must not kill the run."""
+    try:
+        from call_logger import emit_call
+        emit_call(model=model, prompt_raw=prompt, response_raw=response,
+                  elapsed_seconds=elapsed, error=error)
+    except Exception as e:
+        _llm_log.debug("Call log emission skipped: %s", e)
 
 
 def get_model_config() -> dict:

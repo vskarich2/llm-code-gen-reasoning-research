@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 BASE_DIR = Path(__file__).parent.parent
 
-# Source files to audit (exclude test files, benchmark content, venv)
+# Source files to reasoning_evaluator_audit (exclude test files, benchmark content, venv)
 SOURCE_FILES = [
     "runner.py", "execution.py", "llm.py", "evaluator.py",
     "parse.py", "retry_harness.py", "contract.py", "diff_gate.py",

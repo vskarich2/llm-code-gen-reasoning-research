@@ -1,4 +1,4 @@
-"""Transaction ledger for audit tracking."""
+"""Transaction ledger for reasoning_evaluator_audit tracking."""
 
 _entries = []
 

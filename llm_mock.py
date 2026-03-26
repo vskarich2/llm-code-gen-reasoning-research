@@ -145,7 +145,7 @@ def _mock_invariant(nudged, guardrail):
             "        raise\n",
         )
     return _json_resp(
-        "Added error handling and audit logging.",
+        "Added error handling and reasoning_evaluator_audit logging.",
         "def execute_transfer(sender, receiver, amount):\n"
         "    validate_transfer(sender, amount)\n"
         "    sender.balance -= amount\n"

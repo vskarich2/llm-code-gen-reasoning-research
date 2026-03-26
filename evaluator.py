@@ -244,6 +244,9 @@ def llm_classify(case: dict, code: str, reasoning: str,
     model = eval_model or _get_eval_model()
 
     try:
+        from call_logger import set_call_context
+        set_call_context(phase="classifier", case_id=case.get("id", "?"),
+                         condition=case.get("_condition", "?"))
         raw = call_model(prompt, model=model, raw=True)
         parsed = parse_classify_output(raw)
         return {

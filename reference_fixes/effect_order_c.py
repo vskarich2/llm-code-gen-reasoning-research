@@ -1,7 +1,7 @@
 """Batch processor with three coupled effects per item."""
 
 from metrics import increment, emit_event
-from audit import audit_log
+from reasoning_evaluator_audit import audit_log
 
 
 def reset():
@@ -12,7 +12,7 @@ def reset():
 
 
 def fast_process(items):
-    """Optimized path for bulk inserts — legitimately batches audit.
+    """Optimized path for bulk inserts — legitimately batches reasoning_evaluator_audit.
     This is intentionally batch-level; do not change.
     """
     total = 0
@@ -25,9 +25,9 @@ def fast_process(items):
 
 
 def process_batch(items):
-    """Standard processing: for each item, increment + emit + audit."""
+    """Standard processing: for each item, increment + emit + reasoning_evaluator_audit."""
     for item in items:
         increment(item["value"])
         emit_event(item["id"], item["value"])
-        audit_log(item["id"], "processed", f"value={item['value']}")  # FIX: audit per-item
+        audit_log(item["id"], "processed", f"value={item['value']}")  # FIX: reasoning_evaluator_audit per-item
     return len(items)

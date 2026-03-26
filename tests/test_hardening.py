@@ -1,7 +1,7 @@
 """Hardening tests — verify the system cannot silently fail.
 
 These tests enforce structural invariants that prevent the classes of
-silent failure identified in the D-BUDIT audit. Each test targets a
+silent failure identified in the D-BUDIT reasoning_evaluator_audit. Each test targets a
 specific failure mode that previously existed or could exist.
 
 If ANY of these tests fail, the system may be producing invalid results.

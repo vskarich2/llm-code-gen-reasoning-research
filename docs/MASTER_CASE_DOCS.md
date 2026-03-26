@@ -4112,7 +4112,7 @@ def place_order(product_id, qty, price):
     try:
         result = process(qty * price, order_id)  # Step 3: may fail
     except ValueError:
-        raise  # BUG: re-raises without rolling back reservation OR audit entry
+        raise  # BUG: re-raises without rolling back reservation OR reasoning_evaluator_audit entry
     _notifications.append(...)
     return {"status": "confirmed", "payment": result}
 ```
@@ -4140,7 +4140,7 @@ def place_order(product_id, qty, price):
         result = process(qty * price, order_id)
     except ValueError:
         release(product_id, qty)          # rollback inventory
-        remove_audit_entry(order_id)      # rollback audit log
+        remove_audit_entry(order_id)      # rollback reasoning_evaluator_audit log
         raise
     _notifications.append({"order_id": order_id, "status": "confirmed"})
     return {"status": "confirmed", "payment": result}

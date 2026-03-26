@@ -11,6 +11,7 @@ from pathlib import Path
 _exec_log = logging.getLogger("t3.execution")
 
 from llm import call_model, get_model_config
+from call_logger import set_call_context
 from parse import parse_model_response
 from evaluator import evaluate_output
 from prompts import build_base_prompt
@@ -511,11 +512,17 @@ def _propagate_observability(parsed: dict, ev: dict) -> None:
 
 
 def _attempt_and_evaluate(case: dict, model: str, prompt: str,
-                          file_paths: list[str] | None = None) -> tuple[str, dict, dict]:
+                          file_paths: list[str] | None = None,
+                          call_phase: str = "generation",
+                          call_condition: str = "",
+                          call_attempt: int = 0) -> tuple[str, dict, dict]:
     """Thin wrapper: call_model + evaluate_case. Used by run_single and run_repair_loop.
 
     Will be removed once all callers migrate to calling call_model + evaluate_case directly.
     """
+    set_call_context(phase=call_phase, case_id=case["id"],
+                     condition=call_condition, attempt_index=call_attempt)
+    case["_condition"] = call_condition  # propagate to classifier context
     raw_output = call_model(prompt, model=model, file_paths=file_paths)
     parsed, ev = evaluate_case(case, raw_output)
     return raw_output, parsed, ev
@@ -534,7 +541,9 @@ def run_single(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
     token_budget = _get_token_budget(model)
     token_budget_exceeded = prompt_tokens > token_budget
 
-    raw_output, parsed, ev = _attempt_and_evaluate(case, model, prompt, file_paths=file_paths)
+    raw_output, parsed, ev = _attempt_and_evaluate(
+        case, model, prompt, file_paths=file_paths,
+        call_phase="generation", call_condition=condition, call_attempt=0)
 
     ev["operator_used"] = op_used
     ev["condition"] = condition
@@ -586,7 +595,9 @@ def run_repair_loop(case: dict, model: str) -> tuple[str, str, dict]:
 
     # Attempt 1
     prompt, _ = build_prompt(case, "repair_loop")
-    raw_output, parsed, ev = _attempt_and_evaluate(case, model, prompt)
+    raw_output, parsed, ev = _attempt_and_evaluate(
+        case, model, prompt,
+        call_phase="generation", call_condition="repair_loop", call_attempt=0)
     attempts.append({"attempt": 1, "pass": ev["pass"], "score": ev["score"],
                      "reasons": ev.get("reasons", [])})
 
@@ -601,7 +612,9 @@ def run_repair_loop(case: dict, model: str) -> tuple[str, str, dict]:
     # Attempt 2: feed errors back
     error_reasons = "; ".join(ev.get("reasons", [])[:3])
     repair_prompt = prompt + f"\n\nYour previous attempt FAILED with:\n{error_reasons}\n\nFix and return corrected code."
-    raw_2, parsed_2, ev2 = _attempt_and_evaluate(case, model, repair_prompt)
+    raw_2, parsed_2, ev2 = _attempt_and_evaluate(
+        case, model, repair_prompt,
+        call_phase="generation", call_condition="repair_loop", call_attempt=1)
     attempts.append({"attempt": 2, "pass": ev2["pass"], "score": ev2["score"],
                      "reasons": ev2.get("reasons", [])})
 
@@ -636,6 +649,8 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
 
     # Step 1: Elicit contract (raw=True to avoid JSON output instruction override)
     contract_prompt = build_contract_prompt(task, code_files)
+    set_call_context(phase="generation", case_id=cid, condition="contract_gated",
+                     attempt_index=0, step="contract_elicit")
     contract_raw = call_model(contract_prompt, model=model, raw=True)
     contract = parse_contract(contract_raw)
 
@@ -647,6 +662,8 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
 
     # Step 2: Generate code conditioned on contract
     code_prompt = build_code_from_contract_prompt(task, code_files, contract)
+    set_call_context(phase="generation", case_id=cid, condition="contract_gated",
+                     attempt_index=0, step="code_gen")
     code_raw = call_model(code_prompt, model=model)
 
     # Step 3: Gate validation (extraction-only, NOT evaluation)
@@ -661,6 +678,8 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
         # Step 4: Retry with violations
         _log.info("Gate failed for %s (%d violations) — retrying", cid, len(gate_1["violations"]))
         retry_prompt = build_retry_prompt(task, code_files, contract, gate_1["violations"])
+        set_call_context(phase="generation", case_id=cid, condition="contract_gated",
+                         attempt_index=1, step="code_retry")
         retry_raw = call_model(retry_prompt, model=model)
         retry_code = extract_code_from_raw(retry_raw)
 
@@ -670,6 +689,7 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
         final_code_raw = retry_raw
 
     # Step 5: Evaluate FINAL output through canonical pipeline
+    case["_condition"] = "contract_gated"
     parsed, ev = evaluate_case(case, final_code_raw)
 
     # Phase 1 observability
@@ -696,6 +716,7 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
 
 def _fallback_run(case, model, contract_raw):
     """Fallback when contract parsing fails — CGE DID NOT EXECUTE."""
+    case["_condition"] = "contract_gated"
     parsed, ev = evaluate_case(case, contract_raw)
     _propagate_observability(parsed, ev)
 
@@ -734,9 +755,12 @@ def run_leg_reduction(case: dict, model: str) -> tuple[str, str, dict]:
 
     # Build prompt and make ONE LLM call (raw=True, prompt has its own schema)
     prompt = build_leg_reduction_prompt(task, code_files)
+    set_call_context(phase="generation", case_id=cid, condition="leg_reduction",
+                     attempt_index=0)
     raw_output = call_model(prompt, model=model, raw=True)
 
     # Evaluate through canonical pipeline with LEG parser
+    case["_condition"] = "leg_reduction"
     parsed, ev = evaluate_case(case, raw_output, parser="leg")
 
     # Phase 1 observability
@@ -865,10 +889,10 @@ class RunLogger:
                 "num_attempts": ev.get("num_attempts"),
             },
             # ── AUDIT FIELDS (plan v6 Section 8.3) ──
-            # All 21 fields required for measurement repair audit.
+            # All 21 fields required for measurement repair reasoning_evaluator_audit.
             # Fields not yet implemented (Fix C / Phase 1) are set to None.
-            "audit": {
-                "experiment_id": None,  # Set by caller during audit experiments
+            "reasoning_evaluator_audit": {
+                "experiment_id": None,  # Set by caller during reasoning_evaluator_audit experiments
                 "case_id": case_id,
                 "condition": condition,
                 "raw_model_output": raw_output,
@@ -877,7 +901,7 @@ class RunLogger:
                 "normalized_representation": None,  # Fix C / Phase 1
                 "extraction_method": None,  # Fix C / Phase 1
                 "extraction_failed": None,  # Fix C / Phase 1
-                "extraction_e1_correct": None,  # Phase 1 audit
+                "extraction_e1_correct": None,  # Phase 1 reasoning_evaluator_audit
                 "parse_error": parse_error,
                 "parse_category": ev.get("parse_category"),
                 "recovery_method": recovery_method,

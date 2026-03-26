@@ -249,23 +249,24 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
         if cn == 0:
             continue
 
+        # PRIMARY METRIC: pass rate (from code execution — trustworthy)
         pass_rate = sum(1 for e in ce if e.get("pass")) / cn
 
-        # LEG: reasoning_correct AND NOT code_correct
+        # SECONDARY: reasoning-derived metrics (UNRELIABLE — classifier disqualified
+        # per Phase 0 reasoning_evaluator_audit. Kept for informational purposes only. Do NOT use for
+        # scientific conclusions.)
         leg_count = sum(
             1 for e in ce
             if e.get("reasoning_correct") is True and e.get("code_correct") is not True
         )
         leg_rate = leg_count / cn
 
-        # Lucky fix: NOT reasoning_correct AND code_correct
         lucky_count = sum(
             1 for e in ce
             if e.get("reasoning_correct") is not True and e.get("code_correct") is True
         )
         lucky_rate = lucky_count / cn
 
-        # Exec|Reasoning: P(code_correct | reasoning_correct)
         reasoning_correct_events = [e for e in ce if e.get("reasoning_correct") is True]
         if reasoning_correct_events:
             exec_reasoning = sum(
@@ -274,12 +275,17 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
         else:
             exec_reasoning = None
 
+        # Count how many events have reasoning_correct=None (parse failures / gated)
+        rc_none = sum(1 for e in ce if e.get("reasoning_correct") is None)
+
         cond_metrics[cond] = {
             "n": cn,
             "pass_rate": round(pass_rate, 4),
+            # Reasoning-derived (UNRELIABLE — see reasoning_evaluator_audit/phase0_report.md)
             "leg_rate": round(leg_rate, 4),
             "lucky_fix_rate": round(lucky_rate, 4),
             "exec_reasoning": round(exec_reasoning, 4) if exec_reasoning is not None else None,
+            "reasoning_unknown": rc_none,
         }
 
     m["condition_metrics"] = cond_metrics
@@ -310,18 +316,18 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
     m["unstable_cases"] = disagreements
 
     # --- REGIME CLASSIFICATION ---
-    overall_leg = sum(
-        1 for e in events
-        if e.get("reasoning_correct") is True and e.get("code_correct") is not True
-    ) / n
+    # Based on code_correct only (reasoning classifier is unreliable)
     delta_pass = m.get("delta_pass", 0)
+    overall_pass = m.get("pass_rate", 0)
 
-    if overall_leg > 0.15:
-        m["regime"] = "EXECUTION-LIMITED"
-    elif delta_pass > 0.05 and overall_leg < 0.10:
-        m["regime"] = "ALIGNED"
+    if overall_pass < 0.5:
+        m["regime"] = "LOW-PASS"
+    elif abs(delta_pass) < 0.05:
+        m["regime"] = "NEUTRAL"
+    elif delta_pass > 0.05:
+        m["regime"] = "INTERVENTION-HELPS"
     else:
-        m["regime"] = "MIXED"
+        m["regime"] = "INTERVENTION-HURTS"
 
     # --- FIGURE READINESS ---
     # (set by dashboard from trial_progress, not computed here)
@@ -464,10 +470,12 @@ def write_dashboard(metrics: dict, dashboard_path: Path) -> None:
     cond_metrics = metrics.get("condition_metrics", {})
     if cond_metrics:
         w("[CONDITION COMPARISON]")
-        w("  Pass  = both reasoning and code correct (full solve)")
-        w("  LEG   = reasoning correct but code wrong (Looks-good Error Gap)")
-        w("  Lucky = code correct but reasoning wrong (lucky fix)")
-        w("  E|R   = P(code correct | reasoning correct) — execution fidelity")
+        w("  Pass  = code passes execution tests (PRIMARY — trustworthy)")
+        w("  LEG   = reasoning correct but code wrong (UNRELIABLE — classifier disqualified)")
+        w("  Lucky = code correct but reasoning wrong (UNRELIABLE — classifier disqualified)")
+        w("  E|R   = P(code correct | reasoning correct) (UNRELIABLE)")
+        w("  NOTE: LEG/Lucky/E|R depend on reasoning classifier which failed Phase 0 controls.")
+        w("        See reasoning_evaluator_audit/phase0_report.md. Only Pass rate is scientifically valid.")
         w("")
         w(f"  {'Condition':<20} {'N':>5} {'Pass':>8} {'LEG':>8} {'Lucky':>8} {'E|R':>8}")
         w(f"  {'─' * 60}")
@@ -481,10 +489,9 @@ def write_dashboard(metrics: dict, dashboard_path: Path) -> None:
     if "delta_pass" in metrics:
         w("[DELTAS (leg_reduction - baseline)]")
         w("  How much the leg_reduction intervention changed each rate vs baseline.")
-        w("  Negative LEG delta = intervention is reducing the error gap (good).")
-        w(f"  Pass:  {metrics['delta_pass']:+.4f}")
-        w(f"  LEG:   {metrics['delta_leg']:+.4f}")
-        w(f"  Lucky: {metrics['delta_lucky']:+.4f}")
+        w(f"  Pass:  {metrics['delta_pass']:+.4f}  (PRIMARY — trustworthy)")
+        w(f"  LEG:   {metrics['delta_leg']:+.4f}  (UNRELIABLE)")
+        w(f"  Lucky: {metrics['delta_lucky']:+.4f}  (UNRELIABLE)")
         w("")
 
     # --- CI STATUS ---

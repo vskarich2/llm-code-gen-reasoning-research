@@ -15,6 +15,9 @@ import pytest
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
 
+from experiment_config import load_config
+load_config(BASE / "configs" / "default.yaml")
+
 from reconstructor import reconstruct_strict
 
 
@@ -28,50 +31,43 @@ def _load_case(case_id):
 
 
 class TestRegressionWiringBug:
-    """Verify the system detects reintroduction of the original wiring bug."""
+    """Verify the system detects reintroduction of the original wiring bug.
 
-    def test_removed_wiring_triggers_invariant(self):
-        """If parsed['code'] is not set after SUCCESS reconstruction,
-        the invariant assertion must fire."""
-        case = _load_case("alias_config_a")
-        ref_code = (BASE / "reference_fixes" / "alias_config_a.py").read_text()
+    The invariant assert in execution.py:_attempt_and_evaluate catches the bug
+    at the wiring site. The evaluator handles all-UNCHANGED (SUCCESS + empty code)
+    gracefully by letting exec_evaluate fail it with ran=False.
+    """
 
-        # Simulate reconstruction
-        bug_file = case["code_files"][0]
-        manifest = case["code_files_contents"]
-        manifest_paths = list(manifest.keys())
-        model_files = {bug_file: ref_code}
-        recon = reconstruct_strict(manifest_paths, manifest, model_files)
-        assert recon.status == "SUCCESS"
-
-        # Simulate THE BUG: reconstruction succeeds but code stays None
-        parsed = {"code": None, "_reconstruction_status": "SUCCESS"}
-
-        # The evaluator belt-and-suspenders check must catch this
-        from evaluator import evaluate_output
-        with pytest.raises(RuntimeError, match="WIRING BUG"):
-            evaluate_output(case, {
-                "code": None,
-                "reasoning": "test",
-                "raw_output": "test",
-                "parse_error": None,
-                "_raw_fallback": False,
-                "_reconstruction_status": "SUCCESS",
-            })
-
-    def test_empty_code_after_success_triggers_invariant(self):
-        """Empty string code after SUCCESS reconstruction must also be caught."""
+    def test_empty_code_after_success_fails_execution(self):
+        """SUCCESS reconstruction with empty code → exec_evaluate returns pass=False, ran=False.
+        This is the correct behavior: the model marked all files UNCHANGED (no fix attempted)."""
         case = _load_case("alias_config_a")
         from evaluator import evaluate_output
-        with pytest.raises(RuntimeError, match="WIRING BUG"):
-            evaluate_output(case, {
-                "code": "",
-                "reasoning": "test",
-                "raw_output": "test",
-                "parse_error": None,
-                "_raw_fallback": False,
-                "_reconstruction_status": "SUCCESS",
-            })
+        result = evaluate_output(case, {
+            "code": "",
+            "reasoning": "test",
+            "raw_output": "test",
+            "parse_error": None,
+            "_raw_fallback": False,
+            "_reconstruction_status": "SUCCESS",
+        })
+        assert result["pass"] is False, "Empty code after reconstruction must fail"
+        assert result["execution"]["ran"] is False
+
+    def test_reconstruction_wiring_exists(self):
+        """The changed-files-only wiring in _do_reconstruction must exist.
+        If this code is removed, the original 0% pass rate bug returns."""
+        import inspect
+        from execution import _do_reconstruction
+        source = inspect.getsource(_do_reconstruction)
+        assert "changed_files" in source, (
+            "The changed-files-only wiring is missing from _do_reconstruction. "
+            "This is the fix for the 0% pass rate bug."
+        )
+        assert 'parsed["code"]' in source, (
+            "parsed['code'] assignment is missing from _do_reconstruction. "
+            "Without this, reconstructed code never reaches the evaluator."
+        )
 
 
 class TestRegressionSmokeGate:

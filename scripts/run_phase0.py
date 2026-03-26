@@ -3,7 +3,7 @@
 
 Runs P0-0 through P0-7, P0-PROMPT, and P0-STAB per plan v6.
 Each experiment calls the reasoning classifier with controlled inputs
-and records full 21-field audit logs.
+and records full 21-field reasoning_evaluator_audit logs.
 
 Usage:
     .venv/bin/python scripts/run_phase0.py --config configs/default.yaml
@@ -32,7 +32,7 @@ from validate_cases_v2 import load_reference_code, load_case_code
 
 
 BASE = Path(__file__).resolve().parents[1]
-AUDIT_DIR = BASE / "audit"
+AUDIT_DIR = BASE / "reasoning_evaluator_audit"
 RESULTS_DIR = AUDIT_DIR / "phase0_results"
 
 
@@ -90,7 +90,7 @@ def _get_lr_raw_response(case_id, run_dir=None):
 
 
 def _classify(case, code, reasoning, experiment_id):
-    """Run classifier and return full result with audit fields."""
+    """Run classifier and return full result with reasoning_evaluator_audit fields."""
     result = llm_classify(case, code, reasoning)
     result["experiment_id"] = experiment_id
     result["case_id"] = case["id"]
@@ -105,7 +105,7 @@ def _log_result(results, result):
 
 
 def _save_results(experiment_id, results):
-    """Save experiment results to audit/phase0_results/."""
+    """Save experiment results to reasoning_evaluator_audit/phase0_results/."""
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     path = RESULTS_DIR / f"{experiment_id}.json"
     with open(path, "w") as f:
@@ -205,7 +205,7 @@ def run_p0_1(cases_subset=None, dry_run=False):
 
 def run_p0_2(dry_run=False):
     """Control: 5 terse but semantically correct reasoning -> all must be YES."""
-    # Use cases we KNOW are terse-correct from the forensic audit
+    # Use cases we KNOW are terse-correct from the forensic reasoning_evaluator_audit
     control_cases = [
         ("alias_config_a", "create_config returns a reference to DEFAULTS instead of a copy, so caller mutations corrupt shared state."),
         ("mutable_default_a", "enqueue uses a mutable default argument (queue=[]), so the same list accumulates across calls."),

@@ -46,7 +46,7 @@ def deposit(account, amount):
 
 def withdraw(account, amount):
     _balances[account] = _balances.get(account, 0) - amount
-    # BUG: no audit entry for withdrawal
+    # BUG: no reasoning_evaluator_audit entry for withdrawal
 
 def get_balance(account):
     return _balances.get(account, 0)

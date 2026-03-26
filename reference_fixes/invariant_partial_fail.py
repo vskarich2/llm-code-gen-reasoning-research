@@ -1,7 +1,7 @@
 import random
 from models import Account
 from ledger import record_debit, record_credit, record_transfer_attempt
-from audit import emit_transfer_event, emit_failure_alert
+from reasoning_evaluator_audit import emit_transfer_event, emit_failure_alert
 
 
 def validate_transfer(sender, amount):

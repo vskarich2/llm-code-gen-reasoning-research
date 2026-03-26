@@ -20,7 +20,7 @@ def create_invoice(customer, items):
     }
 
     if is_enabled("audit_mode"):
-        invoice["audit"] = True
+        invoice["reasoning_evaluator_audit"] = True
         _invoices.append(invoice)
 
     return invoice

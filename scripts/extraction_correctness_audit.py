@@ -1,10 +1,10 @@
-"""Extraction correctness audit script for Fix C validation.
+"""Extraction correctness reasoning_evaluator_audit script for Fix C validation.
 
 Compares extracted E1 (root_cause) against manually annotated E1
-for locked audit cases. Required for Go/No-Go item 13.
+for locked reasoning_evaluator_audit cases. Required for Go/No-Go item 13.
 
 Usage:
-    python scripts/extraction_correctness_audit.py --annotations audit/e1_annotations.json
+    python scripts/extraction_correctness_audit.py --annotations reasoning_evaluator_audit/e1_annotations.json
 
 annotations JSON format:
 [

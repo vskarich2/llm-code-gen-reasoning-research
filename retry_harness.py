@@ -1045,6 +1045,8 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
     # Contract (elicited upfront, used only on k>0)
     contract = None
     if use_contract:
+        set_call_context(phase="generation", case_id=case["id"],
+                         condition=condition, attempt_index=0, step="elicit_contract")
         contract = _elicit_contract(case, model)
         model_call_count += 1
 
@@ -1079,6 +1081,9 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
             )
 
         iter_start = time.monotonic()
+        from call_logger import set_call_context
+        set_call_context(phase="generation", case_id=case["id"],
+                         condition=condition, attempt_index=k)
         raw = call_model(prompt, model=model)
         model_call_count += 1
         iter_elapsed = time.monotonic() - iter_start
@@ -1088,6 +1093,7 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
 
         # --- Evaluate through canonical pipeline ---
         from execution import evaluate_case, _propagate_observability
+        case["_condition"] = condition
         parsed_result, ev = evaluate_case(case, raw)
         _propagate_observability(parsed_result, ev)
 
@@ -1114,6 +1120,8 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
         # --- Critique (only on failure, not on last iteration) ---
         critique = None
         if not ev["pass"] and k < max_iterations - 1:
+            set_call_context(phase="critique", case_id=case["id"],
+                             condition=condition, attempt_index=k)
             critique = _call_critique(model, code_k, error_obj, ev)
             model_call_count += 1
 

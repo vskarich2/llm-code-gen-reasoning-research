@@ -306,9 +306,9 @@ class TestHoldoutIntegrity:
     """Verify holdout, locked, and phase0 case sets don't overlap."""
 
     def test_no_overlap(self):
-        holdout = json.load(open("audit/holdout_set.json"))
-        locked = json.load(open("audit/locked_audit_set.json"))
-        phase0 = json.load(open("audit/phase0_case_set.json"))
+        holdout = json.load(open("reasoning_evaluator_audit/holdout_set.json"))
+        locked = json.load(open("reasoning_evaluator_audit/locked_audit_set.json"))
+        phase0 = json.load(open("reasoning_evaluator_audit/phase0_case_set.json"))
 
         h_ids = {c["case_id"] for c in holdout}
         l_ids = {c["case_id"] for c in locked}
@@ -318,9 +318,9 @@ class TestHoldoutIntegrity:
         assert len(h_ids & p_ids) == 0, f"Holdout/phase0 overlap: {h_ids & p_ids}"
 
     def test_exhaustive(self):
-        holdout = json.load(open("audit/holdout_set.json"))
-        locked = json.load(open("audit/locked_audit_set.json"))
-        phase0 = json.load(open("audit/phase0_case_set.json"))
+        holdout = json.load(open("reasoning_evaluator_audit/holdout_set.json"))
+        locked = json.load(open("reasoning_evaluator_audit/locked_audit_set.json"))
+        phase0 = json.load(open("reasoning_evaluator_audit/phase0_case_set.json"))
         cases = json.load(open("cases_v2.json"))
 
         all_audit = {c["case_id"] for c in holdout + locked + phase0}
@@ -328,9 +328,9 @@ class TestHoldoutIntegrity:
         assert all_audit == all_cases, f"Missing: {all_cases - all_audit}"
 
     def test_holdout_size(self):
-        holdout = json.load(open("audit/holdout_set.json"))
+        holdout = json.load(open("reasoning_evaluator_audit/holdout_set.json"))
         assert len(holdout) == 8
 
     def test_locked_size(self):
-        locked = json.load(open("audit/locked_audit_set.json"))
+        locked = json.load(open("reasoning_evaluator_audit/locked_audit_set.json"))
         assert len(locked) == 30

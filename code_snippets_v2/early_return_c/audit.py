@@ -4,7 +4,7 @@ _log = []
 
 
 def log_charge(txn_id, amount, source="direct"):
-    """Record a charge event for audit purposes."""
+    """Record a charge event for reasoning_evaluator_audit purposes."""
     _log.append({
         "txn_id": txn_id,
         "amount": amount,
@@ -18,10 +18,10 @@ def verify_completeness(expected_count):
 
 
 def get_log():
-    """Return a copy of the audit log."""
+    """Return a copy of the reasoning_evaluator_audit log."""
     return list(_log)
 
 
 def reset_audit():
-    """Clear all audit log entries."""
+    """Clear all reasoning_evaluator_audit log entries."""
     _log.clear()

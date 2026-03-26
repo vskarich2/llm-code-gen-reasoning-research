@@ -12,7 +12,7 @@ def reset():
 
 
 def fast_process(items):
-    """Optimized path for bulk inserts — legitimately batches audit.
+    """Optimized path for bulk inserts — legitimately batches reasoning_evaluator_audit.
     This is intentionally batch-level; do not change.
     """
     total = 0
@@ -25,7 +25,7 @@ def fast_process(items):
 
 
 def process_batch(items):
-    """Standard processing: for each item, increment + emit + audit."""
+    """Standard processing: for each item, increment + emit + reasoning_evaluator_audit."""
     for item in items:
         increment(item["value"])
         emit_event(item["id"], item["value"])

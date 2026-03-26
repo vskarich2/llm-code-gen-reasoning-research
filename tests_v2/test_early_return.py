@@ -1,6 +1,6 @@
 """Tests for early_return family (hidden_dependency).
 
-Invariant: Every payment call must produce a corresponding audit/ledger entry,
+Invariant: Every payment call must produce a corresponding reasoning_evaluator_audit/ledger entry,
            even on early-return paths (zero-amount, duplicate, cached).
 """
 
@@ -79,7 +79,7 @@ def test_b(mod):
 
 
 def test_c(mod):
-    """Level C: cached charge must still create an audit log entry."""
+    """Level C: cached charge must still create an reasoning_evaluator_audit log entry."""
     # Reset module state
     if hasattr(mod, "_charge_cache"):
         mod._charge_cache.clear()
@@ -93,7 +93,7 @@ def test_c(mod):
     if charge is None:
         return False, ["charge not found"]
     if verify_audit is None:
-        return False, ["verify_completeness (audit.verify_completeness) not found"]
+        return False, ["verify_completeness (reasoning_evaluator_audit.verify_completeness) not found"]
 
     try:
         # First call: direct charge (logged)
@@ -117,8 +117,8 @@ def test_c(mod):
             log = get_log()
         return False, [
             f"verify_completeness(3) returned False. Three calls to charge() "
-            f"(including one cached) should produce 3 audit entries. "
+            f"(including one cached) should produce 3 reasoning_evaluator_audit entries. "
             f"Audit log: {log}"
         ]
 
-    return True, ["cached charge correctly recorded in audit log"]
+    return True, ["cached charge correctly recorded in reasoning_evaluator_audit log"]

@@ -14,7 +14,7 @@ from nudges.operators import NudgeOperator, register
 def _dependency_check_diagnostic(base: str) -> str:
     return base + """
 
-Before finalizing your answer, perform a dependency audit:
+Before finalizing your answer, perform a dependency reasoning_evaluator_audit:
 
 1. For every function you plan to modify, list ALL its side effects
    (writes to shared state, caches, databases, module-level dicts).
