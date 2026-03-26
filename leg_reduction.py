@@ -172,11 +172,19 @@ def _extract_json(raw: str) -> str | None:
 # VALIDATION HELPERS
 # ============================================================
 
-def _fail(msg: str) -> dict:
-    """Return an invalid result with parse_error set."""
+def _extraction_fail(msg: str) -> dict:
+    """Return a result for TRUE code extraction failure.
+
+    parse_error is set because no code could be extracted.
+    code_extracted=False. This blocks execution.
+    """
     return {
         "parse_error": msg,
         "valid": False,
+        "code_extracted": False,
+        "schema_compliant": False,
+        "schema_violations": [msg],
+        "extraction_source": None,
         "bug_diagnosis": "",
         "plan_steps": [],
         "revision_history": [],
@@ -187,6 +195,11 @@ def _fail(msg: str) -> dict:
         "leg_reduction_exceeded_max_revisions": False,
         "validation_errors": [msg],
     }
+
+
+def _fail(msg: str) -> dict:
+    """Legacy wrapper — routes to _extraction_fail."""
+    return _extraction_fail(msg)
 
 
 def _validate_verification_entry(v, idx, prefix):
@@ -256,63 +269,107 @@ def _validate_change_entry(ch, idx, prefix):
 # ============================================================
 
 def parse_leg_reduction_output(raw: str) -> dict:
-    """Parse LEG-reduction response with full revision trace validation.
+    """Parse LEG-reduction response: extraction then validation.
 
-    Validates:
-    - All required fields present and correctly typed
-    - Revision history ordered and consistent
-    - No no-op revisions (code_before == code_after with no changes)
-    - No fake iterations (changes without prior issues)
-    - Top-level verification == last revision's verification
-    - internal_revisions == len(revision_history) - 1
-    - Revision 0: changes_made is null
-    - If multiple revisions: revision 0 must have failures
+    PHASE 1 — CODE EXTRACTION (never blocked by metadata):
+    - Extract JSON, extract code field
+    - If code is present and non-empty: code_extracted=True, parse_error=None
+    - If code cannot be extracted: try restricted fallback
+    - If fallback fails: code_extracted=False, parse_error set
 
-    Returns dict with valid=True/False, all extracted fields, and validation_errors list.
+    PHASE 2 — METADATA VALIDATION (informational, never blocks execution):
+    - Validate revision_history, verification, consistency
+    - Violations go to schema_violations, NOT parse_error
+    - schema_compliant=True only if zero violations
+
+    Returns dict with code, code_extracted, schema_compliant, schema_violations,
+    extraction_source, and all LEG metadata fields.
     """
     if not raw or not raw.strip():
-        return _fail("SEVERE: empty response")
+        return _extraction_fail("SEVERE: empty response")
+
+    # ── PHASE 1: CODE EXTRACTION ──
 
     json_str = _extract_json(raw)
-    if json_str is None:
-        return _fail("no_json_object_found")
+    json_extraction_failed = json_str is None
 
-    try:
-        parsed = json.loads(json_str)
-    except (json.JSONDecodeError, TypeError) as e:
-        return _fail(f"json_decode_error: {e}")
+    parsed = None
+    if not json_extraction_failed:
+        try:
+            parsed = json.loads(json_str)
+        except (json.JSONDecodeError, TypeError):
+            json_extraction_failed = True
 
-    if not isinstance(parsed, dict):
-        return _fail(f"not_a_dict: got {type(parsed).__name__}")
+    if parsed is not None and not isinstance(parsed, dict):
+        json_extraction_failed = True
+        parsed = None
+
+    # Extract code from JSON if available
+    code = ""
+    bug_diagnosis = ""
+    extraction_source = "strict"
+
+    if parsed is not None:
+        raw_code = parsed.get("code")
+        if isinstance(raw_code, str) and raw_code.strip():
+            code = raw_code
+        raw_diag = parsed.get("bug_diagnosis")
+        if isinstance(raw_diag, str) and raw_diag.strip():
+            bug_diagnosis = raw_diag
+
+    # RESTRICTED FALLBACK: if JSON extraction failed or code field missing/empty
+    if not code.strip():
+        if json_extraction_failed or parsed is None or not parsed.get("code"):
+            from parse import parse_model_response
+            fallback = parse_model_response(raw)
+            fallback_code = fallback.get("code") or ""
+            if isinstance(fallback_code, str) and fallback_code.strip():
+                code = fallback_code
+                extraction_source = "fallback"
+                _log.info("LEG restricted fallback recovered code (len=%d)", len(code))
+                if not bug_diagnosis:
+                    bug_diagnosis = fallback.get("reasoning") or ""
+
+    # If still no code: hard extraction failure
+    if not code.strip():
+        return _extraction_fail(
+            "no_json_object_found" if json_extraction_failed
+            else "code must be non-empty string"
+        )
+
+    # Code extraction succeeded
+    code_extracted = True
+
+    # Extract remaining fields with safe defaults (metadata — optional)
+    plan_steps = parsed.get("plan_steps", []) if parsed else []
+    revision_history = parsed.get("revision_history", []) if parsed else []
+    verification = parsed.get("verification", []) if parsed else []
+    internal_revisions = parsed.get("internal_revisions", 0) if parsed else 0
+
+    if not isinstance(plan_steps, list):
+        plan_steps = []
+    if not isinstance(revision_history, list):
+        revision_history = []
+    if not isinstance(verification, list):
+        verification = []
+    if not isinstance(internal_revisions, int):
+        internal_revisions = 0
+
+    # ── PHASE 2: METADATA VALIDATION (informational only) ──
 
     errors = []
 
-    # --- Top-level required fields ---
-    for key in ("bug_diagnosis", "plan_steps", "revision_history",
-                "verification", "code", "internal_revisions"):
-        if key not in parsed:
-            return _fail(f"missing_required_field: {key}")
-
-    bug_diagnosis = parsed["bug_diagnosis"]
-    plan_steps = parsed["plan_steps"]
-    revision_history = parsed["revision_history"]
-    verification = parsed["verification"]
-    code = parsed["code"]
-    internal_revisions = parsed["internal_revisions"]
-
-    # --- Type checks ---
+    # Type/presence checks on metadata (record violations, never abort)
     if not isinstance(bug_diagnosis, str) or not bug_diagnosis.strip():
-        return _fail("bug_diagnosis must be non-empty string")
-    if not isinstance(plan_steps, list) or len(plan_steps) == 0:
-        return _fail("plan_steps must be non-empty list")
-    if not isinstance(revision_history, list) or len(revision_history) == 0:
-        return _fail("revision_history must be non-empty list")
-    if not isinstance(verification, list) or len(verification) == 0:
-        return _fail("verification must be non-empty list")
-    if not isinstance(code, str) or not code.strip():
-        return _fail("code must be non-empty string")
-    if not isinstance(internal_revisions, int) or internal_revisions < 0:
-        return _fail(f"internal_revisions must be non-negative int, got {internal_revisions!r}")
+        errors.append("bug_diagnosis must be non-empty string")
+    if len(plan_steps) == 0:
+        errors.append("plan_steps is empty or missing")
+    if len(revision_history) == 0:
+        errors.append("revision_history is empty or missing")
+    if len(verification) == 0:
+        errors.append("verification is empty or missing")
+    if internal_revisions < 0:
+        errors.append(f"internal_revisions must be non-negative int, got {internal_revisions!r}")
 
     # --- Plan steps ---
     for i, step in enumerate(plan_steps):
@@ -427,16 +484,20 @@ def parse_leg_reduction_output(raw: str) -> dict:
                             f"but previous revision had no issues or failures"
                         )
 
-    # --- Consistency: internal_revisions == len(revision_history) - 1 ---
-    expected_revisions = len(revision_history) - 1
-    if internal_revisions != expected_revisions:
-        errors.append(
-            f"internal_revisions={internal_revisions} but revision_history has "
-            f"{len(revision_history)} entries (expected {expected_revisions})"
-        )
+    # --- Consistency checks (only if revision_history is non-empty) ---
+    if not revision_history:
+        errors.append("revision_history is empty — skipping consistency checks")
+    else:
+        # internal_revisions == len(revision_history) - 1
+        expected_revisions = len(revision_history) - 1
+        if internal_revisions != expected_revisions:
+            errors.append(
+                f"internal_revisions={internal_revisions} but revision_history has "
+                f"{len(revision_history)} entries (expected {expected_revisions})"
+            )
 
     # --- Consistency: top-level verification == last revision's verification ---
-    last_rev_verification = revision_history[-1].get("verification", [])
+    last_rev_verification = revision_history[-1].get("verification", []) if revision_history else []
     if len(verification) != len(last_rev_verification):
         errors.append(
             f"top-level verification has {len(verification)} entries but "
@@ -458,8 +519,8 @@ def parse_leg_reduction_output(raw: str) -> dict:
                 break
 
     # --- Top-level code == last revision code_after ---
-    last_code_after = revision_history[-1].get("code_after", "")
-    if code.strip() != last_code_after.strip():
+    last_code_after = revision_history[-1].get("code_after", "") if revision_history else ""
+    if revision_history and code.strip() != last_code_after.strip():
         errors.append(
             "top-level code does not match revision_history[-1].code_after"
         )
@@ -493,11 +554,18 @@ def parse_leg_reduction_output(raw: str) -> dict:
     validity_score = round(1.0 - (len(violations) / max_possible), 3)
 
     result = {
-        "parse_error": None,
+        # PHASE 1 result: code extraction
+        "parse_error": None,               # None because code WAS extracted
+        "code_extracted": code_extracted,
+        "extraction_source": extraction_source,
+        # PHASE 2 result: metadata validation
         "valid": len(errors) == 0,
-        "validation_errors": errors,
+        "schema_compliant": len(errors) == 0,
+        "schema_violations": errors,
+        "validation_errors": errors,       # backward compat alias
         "violations": violations,
         "validity_score": validity_score,
+        # Extracted fields
         "bug_diagnosis": bug_diagnosis,
         "plan_steps": plan_steps,
         "revision_history": revision_history,
@@ -509,8 +577,9 @@ def parse_leg_reduction_output(raw: str) -> dict:
     }
 
     if errors:
-        result["parse_error"] = f"validation_errors({len(errors)}): {'; '.join(errors[:3])}"
-        _log.info("LEG-reduction violations (%d, validity=%.2f): %s",
+        # Metadata errors go to schema_violations, NOT parse_error.
+        # parse_error stays None because code extraction succeeded.
+        _log.info("LEG-reduction schema violations (%d, validity=%.2f): %s",
                   len(errors), validity_score, errors[:3])
 
     if not all_verified:

@@ -168,50 +168,269 @@ def _try_code_block(raw: str) -> dict | None:
     return None
 
 
-def parse_model_response(raw: str) -> dict:
-    """Parse model response into {reasoning, code, confidence, parse_error}.
+def _try_file_dict(raw: str) -> dict | None:
+    """Tier 0: JSON with 'files' dict (new multi-file format).
 
-    Tries 3 tiers: direct JSON → JSON substring → code block → raw fallback.
+    Expected format: {"reasoning": "...", "files": {"path": "content|UNCHANGED"}}
+    """
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict) and "files" in parsed:
+            files = parsed["files"]
+            if isinstance(files, dict) and all(isinstance(v, str) for v in files.values()):
+                reasoning = parsed.get("reasoning", "")
+                if reasoning is not None and not isinstance(reasoning, str):
+                    reasoning = str(reasoning)
+                return {
+                    "reasoning": reasoning or "",
+                    "code": None,
+                    "files": files,
+                    "confidence": parsed.get("confidence"),
+                    "parse_error": None,
+                    "response_format": "file_dict",
+                }
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return None
+
+
+def _try_file_dict_lenient(raw: str) -> dict | None:
+    """Tier 0b: Handle file-dict JSON with literal newlines in string values.
+
+    Models (especially nano) return {"reasoning": "...", "files": {"path": "code"}}
+    with literal unescaped newlines inside the code strings. json.loads() rejects this.
+    This tier extracts reasoning and files via regex, analogous to _try_json_lenient
+    for code-key format.
+    """
+    if not raw.strip().startswith("{") or '"files"' not in raw:
+        return None
+
+    try:
+        # Extract reasoning (before "files" key)
+        reasoning = ""
+        reasoning_match = re.search(
+            r'"reasoning"\s*:\s*"(.*?)"\s*,\s*"files"',
+            raw, re.DOTALL
+        )
+        if reasoning_match:
+            reasoning = reasoning_match.group(1).replace("\\n", "\n").replace('\\"', '"')
+
+        # Extract the files dict content: everything between "files": { and the final }
+        files_match = re.search(r'"files"\s*:\s*\{(.*)\}\s*\}', raw, re.DOTALL)
+        if not files_match:
+            return None
+
+        files_content = files_match.group(1)
+
+        # Parse individual file entries: "path": "content" or "path": "UNCHANGED"
+        files = {}
+        # Split on pattern: "path": "
+        entries = re.finditer(r'"([^"]+)"\s*:\s*"((?:[^"\\]|\\.)*)(?:"|$)', files_content, re.DOTALL)
+        for m in entries:
+            path = m.group(1)
+            content = m.group(2)
+            # Unescape JSON string escapes
+            content = content.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"')
+            files[path] = content
+
+        if not files:
+            return None
+
+        log.warning(
+            "Used lenient file-dict parser for malformed response (len=%d, %d files)",
+            len(raw), len(files)
+        )
+        return {
+            "reasoning": reasoning,
+            "code": None,
+            "files": files,
+            "confidence": None,
+            "parse_error": "lenient-file-dict: extracted from malformed JSON",
+            "response_format": "file_dict_lenient",
+        }
+    except Exception:
+        pass
+    return None
+
+
+def _try_code_dict(raw: str) -> dict | None:
+    """Tier 1a: JSON with 'code' as dict (model used code key for per-file output)."""
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict) and "code" in parsed and isinstance(parsed["code"], dict):
+            files = parsed["code"]
+            if all(isinstance(v, str) for v in files.values()):
+                reasoning = parsed.get("reasoning", "")
+                if reasoning is not None and not isinstance(reasoning, str):
+                    reasoning = str(reasoning)
+                log.info(
+                    "code_dict response: 'code' key is dict with %d files (%s)",
+                    len(files), ", ".join(list(files.keys())[:4])
+                )
+                return {
+                    "reasoning": reasoning or "",
+                    "code": None,
+                    "files": files,
+                    "confidence": parsed.get("confidence"),
+                    "parse_error": None,
+                    "response_format": "code_dict",
+                }
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return None
+
+
+def parse_model_response(raw: str) -> dict:
+    """Parse model response into {reasoning, code, files, confidence, parse_error, response_format}.
+
+    Tiers: file_dict → code_dict → JSON direct → JSON lenient → JSON substring → code block → raw fallback.
     Never raises. Logs SEVERE warnings for type mismatches and empty fields.
+
+    New fields added:
+      - response_format: str identifying which parser tier succeeded
+      - files: dict | None — per-file content when model returns file-dict format
     """
     if not raw or not raw.strip():
         log.warning("SEVERE: model returned empty response")
         return {
             "reasoning": "",
             "code": "",
+            "files": None,
             "confidence": None,
             "parse_error": "SEVERE: empty model response",
+            "response_format": "empty",
+            # Observability fields (Phase 1)
+            "code_present": False,
+            "code_empty_reason": "model_no_output",
+            "parse_tier": -1,
+            "parse_repaired": False,
+            "parse_repair_type": None,
+            "data_lineage": ["raw_output_received", "parse_failed:empty_response"],
         }
 
+    lineage = ["raw_output_received"]
+
+    # Tier 0a: file-dict format (strict JSON)
+    result = _try_file_dict(raw)
+    if result:
+        result["parse_tier"] = 0
+        result["parse_repaired"] = False
+        result["parse_repair_type"] = None
+        # file_dict: code=None, code_present depends on reconstruction
+        result["code_present"] = False
+        result["code_empty_reason"] = None  # set after reconstruction
+        lineage.append("parse_tier_0a_file_dict_matched")
+        result["data_lineage"] = lineage
+        return result
+
+    # Tier 0b: file-dict format (lenient — handles literal newlines in strings)
+    result = _try_file_dict_lenient(raw)
+    if result:
+        result["parse_tier"] = 1
+        result["parse_repaired"] = True
+        result["parse_repair_type"] = "lenient_file_dict"
+        result["code_present"] = False
+        result["code_empty_reason"] = None
+        lineage.append("parse_tier_0b_file_dict_lenient_matched")
+        lineage.append("parse_repair:lenient_file_dict")
+        result["data_lineage"] = lineage
+        return result
+
+    # Tier 1a: code-as-dict (model put per-file dict in "code" key)
+    result = _try_code_dict(raw)
+    if result:
+        result["parse_tier"] = 2
+        result["parse_repaired"] = False
+        result["parse_repair_type"] = None
+        result["code_present"] = False
+        result["code_empty_reason"] = None
+        lineage.append("parse_tier_1a_code_dict_matched")
+        result["data_lineage"] = lineage
+        return result
+
+    # Tier 1b: direct JSON with code-as-string
     result = _try_json_direct(raw)
     if result:
+        result["response_format"] = "json_direct"
+        result.setdefault("files", None)
+        result["parse_tier"] = 3
+        result["parse_repaired"] = False
+        result["parse_repair_type"] = None
+        code = result.get("code", "")
+        result["code_present"] = bool(code and code.strip() and len(code.strip()) >= 10)
+        result["code_empty_reason"] = None if result["code_present"] else "no_code_field"
+        lineage.append("parse_tier_1b_json_direct_matched")
+        result["data_lineage"] = lineage
         return result
 
+    # Tier 1c: lenient JSON
     result = _try_json_lenient(raw)
     if result:
+        result["response_format"] = "json_lenient"
+        result.setdefault("files", None)
+        result["parse_tier"] = 4
+        result["parse_repaired"] = True
+        result["parse_repair_type"] = "lenient_json"
+        code = result.get("code", "")
+        result["code_present"] = bool(code and code.strip() and len(code.strip()) >= 10)
+        result["code_empty_reason"] = None if result["code_present"] else "parse_failure"
+        lineage.append("parse_tier_1c_json_lenient_matched")
+        lineage.append("parse_repair:lenient_json")
+        result["data_lineage"] = lineage
         return result
 
+    # Tier 2: JSON substring
     result = _try_json_substring(raw)
     if result:
+        result["response_format"] = "json_substring"
+        result.setdefault("files", None)
+        result["parse_tier"] = 5
+        result["parse_repaired"] = False
+        result["parse_repair_type"] = None
+        code = result.get("code", "")
+        result["code_present"] = bool(code and code.strip() and len(code.strip()) >= 10)
+        result["code_empty_reason"] = None if result["code_present"] else "parse_failure"
+        lineage.append("parse_tier_2_json_substring_matched")
+        result["data_lineage"] = lineage
         return result
 
+    # Tier 3: code block
     result = _try_code_block(raw)
     if result:
+        result["response_format"] = "code_block"
+        result.setdefault("files", None)
+        result["parse_tier"] = 6
+        result["parse_repaired"] = False
+        result["parse_repair_type"] = None
+        code = result.get("code", "")
+        result["code_present"] = bool(code and code.strip() and len(code.strip()) >= 10)
+        result["code_empty_reason"] = None if result["code_present"] else "parse_failure"
+        lineage.append("parse_tier_3_code_block_matched")
+        result["data_lineage"] = lineage
         return result
 
-    # Raw fallback — ALL downstream consumers MUST see this flag
+    # Tier 4: Raw fallback — ALL downstream consumers MUST see this flag
     log.warning(
         "RAW FALLBACK: No JSON or code blocks found in model output (len=%d). "
         "Using raw text as code. This is NOT a model code failure — "
         "this is a PARSE failure. First 100 chars: %r",
         len(raw), raw[:100]
     )
+    lineage.append("parse_tier_4_raw_fallback")
     return {
         "reasoning": "",
         "code": raw.strip(),
+        "files": None,
         "confidence": None,
         "parse_error": "SEVERE: raw_fallback — no code blocks found, entire response used as code",
         "_raw_fallback": True,
+        "response_format": "raw_fallback",
+        "code_present": False,
+        "code_empty_reason": "filtered_invalid",
+        "parse_tier": 7,
+        "parse_repaired": False,
+        "parse_repair_type": None,
+        "data_lineage": lineage,
     }
 
 
@@ -394,11 +613,7 @@ def extract_all_code_blocks(output: str) -> list[tuple[str, str]]:
 # IMPORT STRIPPING
 # ============================================================
 
-STDLIB_MODULES = frozenset({
-    "os", "sys", "re", "json", "time", "random", "hashlib", "threading",
-    "math", "functools", "itertools", "collections", "typing", "pathlib",
-    "dataclasses", "abc", "copy", "tempfile", "importlib", "textwrap",
-})
+from _stdlib import STDLIB_MODULES
 
 
 def strip_local_imports(code: str) -> str:

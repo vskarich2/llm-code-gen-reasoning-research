@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 
 CASES="cases_v2.json"
 CONDITIONS="baseline,leg_reduction"
-MODELS=("gpt-5.4-mini" "gpt-5-mini" "gpt-4o-mini")
+MODELS=("gpt-5-mini" "gpt-4o-mini")
 
 SMOKE=false
 if [ "${1:-}" = "--smoke" ]; then
@@ -27,20 +27,19 @@ fi
 
 if [ "$SMOKE" = true ]; then
     TRIALS=1
-    # Use first 3 cases only for smoke test
-    CASE_FILTER="--case-id alias_config_a"
-    # We'll run 3 separate processes, one per model, each with 1 case
-    # For a proper smoke test, we run 3 cases — but --case-id only takes one.
-    # Instead, use a small cases file or run without filter and accept full cases.
-    # For now: run all cases but only 1 trial. The smoke test e2e will verify counts.
-    CASE_FILTER=""
-    echo "=== SMOKE TEST MODE ==="
+    CASE_FILTER="--max-cases 3"
+    echo "=== SMOKE TEST MODE (3 cases, 1 trial) ==="
 else
     TRIALS=8
     CASE_FILTER=""
 fi
 
-N_CASES=$(.venv/bin/python -c "import json; print(len(json.loads(open('$CASES').read())))")
+ALL_CASES=$(.venv/bin/python -c "import json; print(len(json.loads(open('$CASES').read())))")
+if [ "$SMOKE" = true ]; then
+    N_CASES=3
+else
+    N_CASES=$ALL_CASES
+fi
 N_CONDS=$(echo "$CONDITIONS" | tr ',' '\n' | wc -l | tr -d ' ')
 N_MODELS=${#MODELS[@]}
 TOTAL_PER_RUN=$((N_CASES * N_CONDS))
@@ -65,6 +64,71 @@ echo
 
 ABLATION_DIR="logs/ablation_runs"
 mkdir -p "$ABLATION_DIR"
+
+# ============================================================
+# COST PROTECTION GATE
+# ============================================================
+
+echo "=== COST PROTECTION GATE ==="
+
+# Step 1: Evaluator sanity ($0, <1s)
+echo "  Checking evaluator sanity..."
+.venv/bin/python -c "
+import sys
+sys.path.insert(0, '.')
+from runner import load_cases
+from exec_eval import exec_evaluate
+from validate_cases_v2 import load_reference_code
+cases = load_cases(cases_file='$CASES')
+canary = next(c for c in cases if c['id'] == 'alias_config_a')
+ref = load_reference_code(canary)
+result = exec_evaluate(canary, ref)
+if not result['pass']:
+    print(f'EVALUATOR BROKEN: reference fix fails. reasons={result.get(\"reasons\", [])}')
+    sys.exit(1)
+print('  Evaluator sanity: PASS')
+" || { echo "COST PROTECTION FAILED: evaluator is broken"; exit 1; }
+
+# Step 2: Gate run (1 model × 5 cases, ~$0.02)
+GATE_DIR=$(mktemp -d "${ABLATION_DIR}/gate_XXXXXX")
+GATE_UUID=$(uuidgen | tr '[:upper:]' '[:lower:]' | cut -c1-8)
+
+echo "  Running gate: 1 model × 5 cases..."
+.venv/bin/python runner.py \
+    --model "${MODELS[0]}" \
+    --trial 0 \
+    --run-id "$GATE_UUID" \
+    --run-dir "$GATE_DIR" \
+    --cases "$CASES" \
+    --conditions "$CONDITIONS" \
+    --total-jobs 10 \
+    --max-cases 5 \
+    --quiet \
+    > "$GATE_DIR/runner_output.txt" 2>&1
+
+GATE_EXIT=$?
+if [ $GATE_EXIT -ne 0 ]; then
+    echo "  COST PROTECTION FAILED: gate run exited with code $GATE_EXIT"
+    tail -20 "$GATE_DIR/runner_output.txt"
+    rm -rf "$GATE_DIR"
+    exit 1
+fi
+
+# Step 3: Validate gate results
+.venv/bin/python scripts/validate_smoke.py \
+    --run-dir "$GATE_DIR" \
+    --cases "$CASES" \
+    --canary alias_config_a \
+    --verbose
+
+VALIDATE_EXIT=$?
+rm -rf "$GATE_DIR"
+if [ $VALIDATE_EXIT -ne 0 ]; then
+    echo "COST PROTECTION GATE FAILED — refusing to proceed with full ablation"
+    exit 1
+fi
+echo "=== Cost protection gate PASSED ==="
+echo
 
 MANIFEST=$(mktemp)
 trap "rm -f $MANIFEST" EXIT

@@ -139,8 +139,48 @@ def parse_classify_output(raw: str) -> dict:
     return result
 
 
+def _get_eval_model() -> str:
+    """Get evaluator model from config. No hardcoded fallback."""
+    from experiment_config import get_config
+    return get_config().models.evaluator.name
+
+
+def classify_parse_category(reasoning: str, parse_error: str | None,
+                             raw_fallback: bool = False) -> str:
+    """Determine parse category for reasoning input.
+
+    Returns one of: CLEAN, REASONING_LOST, CODE_LOST, PARTIAL_JSON_RECOVERED,
+    MALFORMED_BUT_RECOVERED, STRUCTURE_MISSING.
+    """
+    if not parse_error and reasoning and reasoning.strip():
+        return "CLEAN"
+    if parse_error and (not reasoning or not reasoning.strip()):
+        if "STRUCTURE_MISSING" in str(parse_error) or "schema" in str(parse_error).lower():
+            return "STRUCTURE_MISSING"
+        if raw_fallback:
+            return "CODE_LOST"
+        return "REASONING_LOST"
+    if parse_error and reasoning and reasoning.strip():
+        if "lenient" in str(parse_error):
+            return "PARTIAL_JSON_RECOVERED"
+        return "MALFORMED_BUT_RECOVERED"
+    if not parse_error and (not reasoning or not reasoning.strip()):
+        # No parse error but empty reasoning: this is genuine empty reasoning
+        # (model chose not to explain), NOT a parse failure. Classify normally.
+        return "CLEAN"
+    return "CLEAN"
+
+
+# Categories where classification is disallowed (reasoning is unrecoverable)
+_CLASSIFICATION_DISALLOWED = frozenset({
+    "REASONING_LOST", "CODE_LOST", "STRUCTURE_MISSING",
+})
+
+
 def llm_classify(case: dict, code: str, reasoning: str,
-                 eval_model: str | None = None) -> dict:
+                 eval_model: str | None = None,
+                 parse_error: str | None = None,
+                 raw_fallback: bool = False) -> dict:
     """Run the LLM reasoning classifier on an attempt.
 
     Evaluates ONLY reasoning correctness. Does NOT judge code correctness.
@@ -148,27 +188,62 @@ def llm_classify(case: dict, code: str, reasoning: str,
 
     The prompt deliberately excludes execution results to prevent bias.
 
+    PARSE GATE (Fix D): If reasoning is empty/missing due to a parse failure,
+    classification is skipped and reasoning_correct=None is returned. Parse
+    failures MUST NOT produce reasoning_correct=False.
+
     Args:
         case: benchmark case dict (has "task", "failure_mode", "id")
         code: extracted code from the model's response
         reasoning: extracted reasoning from the model's response
         eval_model: model to use for classifier. If None, uses default.
+        parse_error: parse error from upstream parsing, if any.
+        raw_fallback: True if the response hit the raw_fallback parser tier.
 
     Returns dict with:
-        reasoning_correct: bool or None (None only on parse failure)
+        reasoning_correct: bool or None (None on parse failure OR reasoning lost)
         failure_type: str or None
         classify_raw: str or None
         classify_parse_error: str or None
+        eval_model_actual: str — the model actually used for classification
+        parse_category: str — the parse category of the reasoning input
     """
+    # Determine parse category
+    parse_cat = classify_parse_category(reasoning, parse_error, raw_fallback)
+
+    # PARSE GATE: if reasoning is unrecoverable, do NOT classify.
+    # Return None instead of False. This is a correctness fix.
+    if parse_cat in _CLASSIFICATION_DISALLOWED:
+        _log.warning(
+            "PARSE GATE: skipping classification for case %s — "
+            "parse_category=%s, parse_error=%s, reasoning empty=%s",
+            case.get("id", "?"), parse_cat, parse_error,
+            not (reasoning and reasoning.strip()),
+        )
+        return {
+            "reasoning_correct": None,
+            "failure_type": None,
+            "classify_raw": None,
+            "classify_parse_error": f"GATED:{parse_cat}",
+            "classifier_prompt": None,
+            "eval_model_actual": None,
+            "parse_category": parse_cat,
+        }
+
+    # Truncation limits from config
+    from experiment_config import get_config
+    eval_cfg = get_config().models.evaluator
     prompt = _CLASSIFY_PROMPT.format(
         failure_types=", ".join(sorted(FAILURE_TYPE_SET)),
-        task=case.get("task", "")[:800],
-        code=(code or "")[:2000],
-        reasoning=(reasoning or "")[:1000],
+        task=case.get("task", "")[:eval_cfg.max_task_chars],
+        code=(code or "")[:eval_cfg.max_code_chars],
+        reasoning=(reasoning or "")[:eval_cfg.max_reasoning_chars],
     )
 
+    # Evaluator model from config — no hardcoded fallback
+    model = eval_model or _get_eval_model()
+
     try:
-        model = eval_model or "gpt-4.1-nano"
         raw = call_model(prompt, model=model, raw=True)
         parsed = parse_classify_output(raw)
         return {
@@ -176,6 +251,9 @@ def llm_classify(case: dict, code: str, reasoning: str,
             "failure_type": parsed["failure_type"],
             "classify_raw": raw,
             "classify_parse_error": parsed["parse_error"],
+            "classifier_prompt": prompt,
+            "eval_model_actual": model,
+            "parse_category": parse_cat,
         }
     except Exception as e:
         _log.error("LLM classifier call failed: %s", e)
@@ -184,6 +262,9 @@ def llm_classify(case: dict, code: str, reasoning: str,
             "failure_type": None,
             "classify_raw": None,
             "classify_parse_error": f"exception:{e}",
+            "classifier_prompt": prompt,
+            "eval_model_actual": model,
+            "parse_category": parse_cat,
         }
 
 
@@ -442,12 +523,27 @@ def evaluate_output(case: dict, parsed: dict, eval_model: str | None = None) -> 
     reasoning = parsed["reasoning"]
     raw_output = parsed["raw_output"]
 
+    # All-UNCHANGED is a legal reconstruction outcome: SUCCESS + empty code.
+    # The model believes original code is correct. exec_evaluate will handle it
+    # (empty code → "no extractable code" → pass=False).
+    if parsed.get("_reconstruction_status") == "SUCCESS" and (not code or not code.strip()):
+        _log.info(
+            "RECONSTRUCTION SUCCESS with empty code for case %s — "
+            "model marked all files UNCHANGED.",
+            case.get("id", "?"),
+        )
+
     # Step 1: execution-based behavioral test — SOLE authority for code correctness
     result = exec_evaluate(case, code)
     exec_pass = result["pass"]
 
     # Step 2: LLM reasoning classifier — ONLY judges reasoning, NOT code
-    classify = llm_classify(case, code, reasoning, eval_model=eval_model)
+    # Pass parse_error and _raw_fallback for the parse gate (Fix D)
+    classify = llm_classify(
+        case, code, reasoning, eval_model=eval_model,
+        parse_error=parsed.get("parse_error"),
+        raw_fallback=parsed.get("_raw_fallback", False),
+    )
 
     # code_correct comes from EXECUTION, never from classifier
     result["code_correct"] = exec_pass
@@ -455,6 +551,10 @@ def evaluate_output(case: dict, parsed: dict, eval_model: str | None = None) -> 
     result["failure_type"] = classify["failure_type"]
     result["classify_raw"] = classify["classify_raw"]
     result["classify_parse_error"] = classify["classify_parse_error"]
+    result["classifier_prompt"] = classify.get("classifier_prompt")
+    result["eval_model_intended"] = eval_model
+    result["eval_model_actual"] = classify.get("eval_model_actual")
+    result["parse_category"] = classify.get("parse_category")
 
     # Classifier's code opinion — logged for diagnostics only, NEVER used in metrics
     classifier_code_correct = classify.get("classifier_code_correct")  # None (no longer produced)

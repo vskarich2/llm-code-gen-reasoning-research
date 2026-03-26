@@ -25,12 +25,8 @@ from types import ModuleType
 
 BASE = Path(__file__).parent
 
-# Stdlib modules for import stripping (subset — covers what cases use)
-_STDLIB = {
-    "os", "sys", "json", "re", "math", "copy", "collections", "functools",
-    "itertools", "typing", "pathlib", "datetime", "abc", "dataclasses",
-    "enum", "logging", "hashlib", "random", "io", "string", "textwrap",
-}
+# Canonical stdlib list — single source of truth
+from _stdlib import STDLIB_MODULES as _STDLIB
 
 
 def _strip_local_imports(code: str) -> str:

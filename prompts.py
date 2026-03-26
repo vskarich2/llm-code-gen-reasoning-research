@@ -223,7 +223,24 @@ build_nudged_prompt = build_diagnostic_prompt
 
 
 def _format_code_files(code_files: dict[str, str]) -> str:
+    """Format code files with explicit numbered delimiters (V2 format)."""
+    return _format_code_files_v2(code_files)
+
+
+def _format_code_files_v1(code_files: dict[str, str]) -> str:
+    """Legacy format: === path === delimiters."""
     parts = []
     for path, contents in code_files.items():
         parts.append(f"=== {path} ===\n```python\n{contents}\n```")
+    return "\n\n".join(parts)
+
+
+def _format_code_files_v2(code_files: dict[str, str]) -> str:
+    """V2 format: numbered FILE delimiters with full relative paths."""
+    from pathlib import Path
+    n = len(code_files)
+    parts = []
+    parts.append(f"## Codebase ({n} file{'s' if n != 1 else ''})")
+    for i, (path, contents) in enumerate(code_files.items(), 1):
+        parts.append(f"### FILE {i}/{n}: {path} ###\n```python\n{contents}\n```")
     return "\n\n".join(parts)

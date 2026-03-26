@@ -368,6 +368,36 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
 
 
 # ============================================================
+# DASHBOARD GUARDS
+# ============================================================
+
+def validate_metrics(metrics: dict, model: str) -> list[str]:
+    """Post-computation validation. Returns list of warnings.
+
+    Raises RuntimeError for degenerate metrics that indicate pipeline failure.
+    """
+    completed = metrics.get("completed_jobs", 0)
+    if completed < 10:
+        return []
+
+    errors = []
+    cond_metrics = metrics.get("condition_metrics", {})
+    all_zero_pass = all(cm.get("pass_rate", 0) == 0 for cm in cond_metrics.values())
+    if all_zero_pass and cond_metrics:
+        errors.append(
+            f"pass_rate == 0 across ALL conditions for {model} "
+            f"({completed} events). Pipeline is likely broken."
+        )
+
+    if metrics.get("pass_rate", 0) == 0:
+        errors.append(
+            f"overall pass_rate == 0 for {model} ({completed} evals)."
+        )
+
+    return errors
+
+
+# ============================================================
 # FORMATTING HELPERS
 # ============================================================
 
@@ -434,6 +464,11 @@ def write_dashboard(metrics: dict, dashboard_path: Path) -> None:
     cond_metrics = metrics.get("condition_metrics", {})
     if cond_metrics:
         w("[CONDITION COMPARISON]")
+        w("  Pass  = both reasoning and code correct (full solve)")
+        w("  LEG   = reasoning correct but code wrong (Looks-good Error Gap)")
+        w("  Lucky = code correct but reasoning wrong (lucky fix)")
+        w("  E|R   = P(code correct | reasoning correct) — execution fidelity")
+        w("")
         w(f"  {'Condition':<20} {'N':>5} {'Pass':>8} {'LEG':>8} {'Lucky':>8} {'E|R':>8}")
         w(f"  {'─' * 60}")
         for cond, cm in sorted(cond_metrics.items()):
@@ -445,6 +480,8 @@ def write_dashboard(metrics: dict, dashboard_path: Path) -> None:
     # --- DELTAS ---
     if "delta_pass" in metrics:
         w("[DELTAS (leg_reduction - baseline)]")
+        w("  How much the leg_reduction intervention changed each rate vs baseline.")
+        w("  Negative LEG delta = intervention is reducing the error gap (good).")
         w(f"  Pass:  {metrics['delta_pass']:+.4f}")
         w(f"  LEG:   {metrics['delta_leg']:+.4f}")
         w(f"  Lucky: {metrics['delta_lucky']:+.4f}")
@@ -452,30 +489,46 @@ def write_dashboard(metrics: dict, dashboard_path: Path) -> None:
 
     # --- CI STATUS ---
     w(f"[CI STATUS] {metrics.get('ci_status', 'N/A')}")
+    w("  Whether enough samples exist per condition to compute standard errors.")
+    w("  'SE computed' = ≥10 events per condition. 'CI NOT STABLE' = <10.")
     w("")
 
     # --- STABILITY ---
     w("[CASE STABILITY]")
+    w("  A case is 'stable' if it passes or fails consistently across all trials.")
+    w("  'Unstable' = mixed pass/fail across trials (nondeterministic).")
     w(f"  Stable cases:   {metrics.get('stable_cases', 0)}")
     w(f"  Unstable cases: {metrics.get('unstable_cases', 0)}")
     w("")
 
     # --- REGIME ---
     w(f"[REGIME CLASSIFICATION] {metrics.get('regime', 'N/A')}")
+    w("  EXECUTION-LIMITED = LEG >15%: models reason correctly but fail to produce")
+    w("    correct code. The bottleneck is code generation, not understanding.")
+    w("  ALIGNED = LEG <10% and pass delta >5%: reasoning and code quality track.")
+    w("  MIXED = neither pattern dominates.")
     w("")
 
     # --- TOP CASES ---
-    for label, key in [("LEG Rate", "top5_leg"), ("Lucky Fix Rate", "top5_lucky"),
-                       ("Intervention Delta", "top5_delta")]:
+    for label, key, desc in [
+        ("LEG Rate", "top5_leg",
+         "Cases with the highest reasoning-correct-but-code-wrong rate."),
+        ("Lucky Fix Rate", "top5_lucky",
+         "Cases with the highest code-correct-but-reasoning-wrong rate."),
+        ("Intervention Delta", "top5_delta",
+         "Cases where leg_reduction improved pass rate the most vs baseline."),
+    ]:
         top = metrics.get(key, [])
         if top:
             w(f"[TOP 5 — {label}]")
+            w(f"  {desc}")
             for cid, val in top:
                 w(f"  {cid:<36} {val:>8.4f}")
             w("")
 
     # --- FIGURE READINESS ---
     w(f"[FIGURE READINESS] {metrics.get('figure_readiness', 'NOT READY')}")
+    w("  READY = all trials complete. PRELIMINARY = ≥1 trial done. NOT READY = none.")
     w("")
 
     # --- PAPER FIGURES + STATS PREVIEW ---

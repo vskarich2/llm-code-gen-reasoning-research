@@ -17,7 +17,6 @@ Run: .venv/bin/python -m pytest tests/test_run_logger.py -v
 import json
 import os
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -77,22 +76,12 @@ class TestRunLoggerClass:
         with pytest.raises(RuntimeError, match="MODEL MISMATCH"):
             logger.write("case1", "baseline", "model-b", "p", "o", _DUMMY_PARSED, _DUMMY_EV)
 
-    def test_write_from_other_thread_succeeds(self, tmp_path):
-        """Writing from a different thread must succeed (thread-safe via lock)."""
+    def test_serial_write_succeeds(self, tmp_path):
+        """Writing serially must succeed (no threads needed)."""
         logger = _make_logger(tmp_path)
-        result = []
-
-        def write_from_other_thread():
-            try:
-                logger.write("case1", "baseline", "test-model", "p", "o", _DUMMY_PARSED, _DUMMY_EV)
-                result.append("ok")
-            except RuntimeError as e:
-                result.append(f"error: {e}")
-
-        t = threading.Thread(target=write_from_other_thread)
-        t.start()
-        t.join()
-        assert result == ["ok"], f"Expected success, got: {result}"
+        logger.write("case1", "baseline", "test-model", "p", "o", _DUMMY_PARSED, _DUMMY_EV)
+        assert logger.writes_attempted == 3  # 3 files
+        assert logger.writes_failed == 0
 
     def test_writes_tracked(self, tmp_path):
         logger = _make_logger(tmp_path)

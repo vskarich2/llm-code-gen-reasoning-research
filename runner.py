@@ -5,14 +5,13 @@
 #       python runner.py --model gpt-4o-mini
 #       python runner.py --case-id l3_state_pipeline
 #       python runner.py --conditions baseline,diagnostic
-#       python runner.py --parallel 8
+#       (parallelism via separate processes, not --parallel flag)
 # ============================================================
 
 import argparse
 import json
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from execution import (
@@ -20,51 +19,14 @@ from execution import (
     run_leg_reduction,
     init_run_log, close_run_log, get_current_log_path, get_log_write_stats,
 )
+from constants import ALL_CONDITIONS, VALID_CONDITIONS, COND_LABELS, RETRY_CONDITIONS
 
 BASE_DIR = Path(__file__).parent
 
-# Model used for LEG evaluation (independent of generation model)
-LEG_EVAL_MODEL = "gpt-5-mini"
-
-ALL_CONDITIONS = [
-    "baseline", "diagnostic", "guardrail",
-    "guardrail_strict", "counterfactual", "reason_then_act",
-    "self_check", "counterfactual_check", "test_driven",
-    "repair_loop",
-    # SCM experiment conditions
-    "scm_descriptive", "scm_constrained", "scm_constrained_evidence",
-    "scm_constrained_evidence_minimal", "evidence_only", "length_matched_control",
-    # Reasoning interface conditions
-    "structured_reasoning", "free_form_reasoning", "branching_reasoning",
-    # Contract-Gated Execution
-    "contract_gated",
-    # Retry harness (trajectory probe)
-    "retry_no_contract", "retry_with_contract", "retry_adaptive",
-    "retry_alignment",
-    # LEG-reduction (intra-call self-correction)
-    "leg_reduction",
-]
-VALID_CONDITIONS = set(ALL_CONDITIONS)
-
-COND_LABELS = {
-    "baseline": "BL", "diagnostic": "DX", "guardrail": "GR",
-    "guardrail_strict": "GS", "counterfactual": "CF", "reason_then_act": "RA",
-    "self_check": "SC", "counterfactual_check": "CC", "test_driven": "TD",
-    "repair_loop": "RL",
-    "scm_descriptive": "SD", "scm_constrained": "SK", "scm_constrained_evidence": "SE",
-    "scm_constrained_evidence_minimal": "SM", "evidence_only": "EO", "length_matched_control": "LC",
-    "structured_reasoning": "SR", "free_form_reasoning": "FF", "branching_reasoning": "BR",
-    "contract_gated": "CG",
-    "retry_no_contract": "RN", "retry_with_contract": "RC", "retry_adaptive": "AD",
-    "retry_alignment": "AL",
-    "leg_reduction": "LR",
-}
-
-# INVARIANT: condition labels must be unique — duplicate labels corrupt results
-assert len(set(COND_LABELS.values())) == len(COND_LABELS), (
-    f"FATAL: Duplicate condition labels detected. "
-    f"Labels: {[v for v in COND_LABELS.values() if list(COND_LABELS.values()).count(v) > 1]}"
-)
+def _get_eval_model() -> str:
+    """Get evaluator model from config. No hardcoded fallback."""
+    from experiment_config import get_config
+    return get_config().models.evaluator.name
 
 COND_DESCRIPTIONS = {
     "baseline": "Baseline (terse)",
@@ -110,13 +72,73 @@ def load_cases(case_id: str | None = None, cases_file: str = "cases.json") -> li
         code_files = {}
         for rel_path in case["code_files"]:
             full_path = BASE_DIR / rel_path
-            code_files[rel_path] = full_path.read_text(encoding="utf-8").strip()
+            content = full_path.read_text(encoding="utf-8").strip()
+            assert content, (
+                f"PREFLIGHT: Empty file {rel_path} in case {case['id']}. "
+                f"Empty files are not allowed in the benchmark."
+            )
+            code_files[rel_path] = content
         case["code_files_contents"] = code_files
+        _validate_import_consistency(case)
     if case_id:
         cases = [c for c in cases if c["id"] == case_id]
         if not cases:
             raise ValueError(f"No case with id={case_id!r}")
     return cases
+
+
+def _validate_import_consistency(case: dict) -> None:
+    """Preflight: verify case files have consistent, supported import structure.
+
+    Checks:
+    1. All files in same directory
+    2. No duplicate basenames
+    3. All cross-file imports are flat sibling style (no relative, no package-qualified)
+    """
+    import ast
+    from collections import Counter
+
+    file_paths = case["code_files"]
+    cid = case["id"]
+
+    # CHECK 1: All files in same directory
+    parents = set(str(Path(f).parent) for f in file_paths)
+    assert len(parents) == 1, (
+        f"Case {cid}: files span multiple directories: {parents}. "
+        f"Benchmark requires all case files in a single directory."
+    )
+
+    # CHECK 2: No duplicate basenames
+    basenames = [Path(f).name for f in file_paths]
+    dupes = [b for b, c in Counter(basenames).items() if c > 1]
+    assert not dupes, (
+        f"Case {cid}: duplicate basenames: {dupes}. "
+        f"Flat sibling imports require unique basenames."
+    )
+
+    # CHECK 3: All cross-file imports are flat sibling style
+    sibling_modules = {Path(f).stem for f in file_paths}
+    for rel_path in file_paths:
+        content = case["code_files_contents"].get(rel_path, "")
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            continue  # syntax errors are caught later in the pipeline
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if node.level > 0:
+                    raise ValueError(
+                        f"Case {cid}: {rel_path} uses relative import "
+                        f"(level={node.level}). Not supported by benchmark."
+                    )
+                if node.module and "." in node.module:
+                    base = node.module.split(".")[0]
+                    if base in sibling_modules:
+                        raise ValueError(
+                            f"Case {cid}: {rel_path} uses qualified import "
+                            f"'from {node.module} import ...'. "
+                            f"Use flat sibling import instead."
+                        )
 
 
 def preflight_verify_tests(cases: list[dict]) -> None:
@@ -146,26 +168,27 @@ def preflight_verify_tests(cases: list[dict]) -> None:
 
 
 # ============================================================
-# RUN ALL — parallel or serial
+# RUN ALL — serial execution only
 # ============================================================
+# Parallelism is handled at the PROCESS level (e.g., shell scripts
+# launching separate runner.py processes per model/trial).
+# No threads. No ThreadPoolExecutor. No shared mutable state.
 
 def _run_one(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
-    import threading
-    tid = threading.current_thread().name
     cid = case["id"]
     _log = __import__("logging").getLogger("t3.runner")
-    _log.info("TASK_START thread=%s case=%s cond=%s", tid, cid, condition)
+    _log.info("TASK_START case=%s cond=%s", cid, condition)
     t0 = __import__("time").monotonic()
     try:
         result = _run_one_inner(case, model, condition)
         elapsed = __import__("time").monotonic() - t0
-        _log.info("TASK_END thread=%s case=%s cond=%s elapsed=%.1fs pass=%s",
-                   tid, cid, condition, elapsed, result[2].get("pass"))
+        _log.info("TASK_END case=%s cond=%s elapsed=%.1fs pass=%s",
+                   cid, condition, elapsed, result[2].get("pass"))
         return result
     except Exception as e:
         elapsed = __import__("time").monotonic() - t0
-        _log.error("TASK_FAILED thread=%s case=%s cond=%s elapsed=%.1fs error=%s",
-                    tid, cid, condition, elapsed, e)
+        _log.error("TASK_FAILED case=%s cond=%s elapsed=%.1fs error=%s",
+                    cid, condition, elapsed, e)
         raise
 
 
@@ -174,71 +197,32 @@ def _run_one_inner(case: dict, model: str, condition: str) -> tuple[str, str, di
         return run_repair_loop(case, model)
     if condition == "contract_gated":
         return run_contract_gated(case, model)
-    if condition == "retry_no_contract":
+    if condition in RETRY_CONDITIONS and condition != "repair_loop":
         from retry_harness import run_retry_harness
-        return run_retry_harness(case, model, use_contract=False, eval_model=LEG_EVAL_MODEL)
-    if condition == "retry_with_contract":
-        from retry_harness import run_retry_harness
-        return run_retry_harness(case, model, use_contract=True, eval_model=LEG_EVAL_MODEL)
-    if condition == "retry_adaptive":
-        from retry_harness import run_retry_harness
-        return run_retry_harness(case, model, use_contract=False, use_adaptive=True, eval_model=LEG_EVAL_MODEL)
-    if condition == "retry_alignment":
-        from retry_harness import run_retry_harness
-        return run_retry_harness(case, model, use_alignment=True, eval_model=LEG_EVAL_MODEL)
+        return run_retry_harness(case, model, condition=condition, eval_model=_get_eval_model())
     if condition == "leg_reduction":
         return run_leg_reduction(case, model)
     return run_single(case, model, condition)
 
 
 def run_all(cases: list[dict], model: str, conditions: list[str],
-            max_workers: int = 1, quiet: bool = False) -> list[dict]:
+            quiet: bool = False) -> list[dict]:
+    """Run all (case, condition) pairs sequentially. No threads.
+
+    Parallelism is achieved by launching multiple runner.py processes
+    externally (e.g., one per model/trial in a shell script).
+    """
     work = [(case, cond) for case in cases for cond in conditions]
     total = len(work)
     raw: dict[tuple[str, str], dict] = {}
 
     t0 = time.monotonic()
 
-    if max_workers <= 1:
-        for i, (case, cond) in enumerate(work):
-            cid, cn, ev = _run_one(case, model, cond)
-            raw[(cid, cn)] = ev
-            if not quiet:
-                _print_progress(i + 1, total, cid, cn, ev)
-    else:
+    for i, (case, cond) in enumerate(work):
+        cid, cn, ev = _run_one(case, model, cond)
+        raw[(cid, cn)] = ev
         if not quiet:
-            print(f"  Parallel execution: {max_workers} workers, {total} calls")
-        import logging as _logging
-        _plog = _logging.getLogger("t3.runner")
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {pool.submit(_run_one, case, model, cond): (case["id"], cond)
-                       for case, cond in work}
-            _plog.info("POOL_SUBMITTED %d futures, max_workers=%d", len(futures), max_workers)
-            done = 0
-            failed = 0
-            for fut in as_completed(futures):
-                cid_hint, cn_hint = futures[fut]
-                try:
-                    cid, cn, ev = fut.result()
-                except Exception as e:
-                    failed += 1
-                    _plog.error("TASK_EXCEPTION case=%s cond=%s: %s", cid_hint, cn_hint, e)
-                    raw[(cid_hint, cn_hint)] = {
-                        "pass": False, "score": 0.0,
-                        "reasons": [f"task_exception: {e}"],
-                        "failure_modes": [], "execution": {"status": "error", "ran": False},
-                    }
-                    done += 1
-                    if not quiet:
-                        print(f"  [{done:>3}/{total}] {cid_hint:<28} {cn_hint:<18} ERROR: {e}")
-                    continue
-                raw[(cid, cn)] = ev
-                done += 1
-                _plog.info("POOL_COMPLETED %d/%d case=%s cond=%s", done, total, cid, cn)
-                if not quiet:
-                    _print_progress(done, total, cid, cn, ev)
-            _plog.info("POOL_ALL_DONE %d/%d completed (%d failed)", done, total, failed)
-        _plog.info("POOL_SHUTDOWN executor exited cleanly")
+            _print_progress(i + 1, total, cid, cn, ev)
 
     elapsed = time.monotonic() - t0
     if not quiet:
@@ -350,6 +334,83 @@ def print_results(results: list[dict], conditions: list[str], model: str):
 # MAIN
 # ============================================================
 
+def _validate_experiment_config(cases, conditions, model):
+    """Validate experiment configuration before spending API calls."""
+    if len(cases) < 5 and not any(c["id"] == "alias_config_a" for c in cases[:3]):
+        # Allow small case sets for smoke tests if canary is present
+        pass
+    if not conditions:
+        raise RuntimeError("CONFIG ERROR: empty conditions list")
+    if len(set(conditions)) != len(conditions):
+        raise RuntimeError(f"CONFIG ERROR: duplicate conditions: {conditions}")
+    case_ids = [c["id"] for c in cases]
+    if len(set(case_ids)) != len(case_ids):
+        dupes = [cid for cid in set(case_ids) if case_ids.count(cid) > 1]
+        raise RuntimeError(f"CONFIG ERROR: duplicate case IDs: {dupes}")
+    for c in cases:
+        if not c.get("code_files"):
+            raise RuntimeError(f"CONFIG ERROR: case {c['id']} has no code_files")
+
+
+def _validate_execution_sanity(results, conditions):
+    """Post-run validation: execution sanity + result distribution guard.
+
+    WARNS on suspicious distributions but does NOT crash the run.
+    Data is already written to events.jsonl/run.jsonl — crashing here
+    destroys metadata (no end_time) without saving any data.
+    """
+    import logging as _logging
+    _guard_log = _logging.getLogger("t3.runner.sanity")
+    from collections import Counter
+
+    total = 0
+    ran_count = 0
+    pass_count = 0
+    categories = Counter()
+
+    for r in results:
+        for cond in conditions:
+            ev = r.get(cond, {})
+            total += 1
+            if ev.get("score", 0) > 0 or ev.get("pass"):
+                ran_count += 1
+            if ev.get("pass"):
+                pass_count += 1
+            cat = "pass" if ev.get("pass") else "fail"
+            categories[cat] += 1
+
+    if total == 0:
+        return
+
+    ran_rate = ran_count / total
+    pass_rate = pass_count / total
+
+    # All guards now WARN instead of crashing.
+    # The data is already persisted — crashing here only destroys metadata.
+    warnings = []
+
+    if ran_rate < 0.5 and total >= 10:
+        warnings.append(
+            f"SANITY WARNING: ran_rate={ran_rate:.1%} < 50%. "
+            f"Only {ran_count}/{total} evals executed code."
+        )
+
+    if pass_rate == 0 and total >= 10:
+        warnings.append(
+            f"SANITY WARNING: 0% pass rate across {total} evals. "
+            f"Distribution: {dict(categories)}."
+        )
+
+    if categories.get("fail", 0) == total and total >= 10:
+        warnings.append(
+            f"SANITY WARNING: all {total} evals failed. Zero passes."
+        )
+
+    for w in warnings:
+        _guard_log.warning(w)
+        print(f"  [!] {w}")
+
+
 def _run_ablation_mode(args):
     """Ablation mode: single (model, trial) run with isolated output directory."""
     import os
@@ -368,11 +429,18 @@ def _run_ablation_mode(args):
 
     cases = load_cases(case_id=args.case_id, cases_file=args.cases)
 
+    # Limit cases for smoke tests
+    if args.max_cases and args.max_cases > 0:
+        cases = cases[:args.max_cases]
+
     # PREFLIGHT: verify every case can be evaluated BEFORE spending API calls
     preflight_verify_tests(cases)
 
     from condition_registry import validate_run
     validate_run(cases, conditions)
+
+    # PREFLIGHT: config sanity
+    _validate_experiment_config(cases, conditions, model)
 
     n_calls = len(cases) * len(conditions)
     total_jobs = args.total_jobs if args.total_jobs > 0 else n_calls
@@ -419,9 +487,12 @@ def _run_ablation_mode(args):
     print(f"  Model: {model}, Trial: {trial}, Run ID: {run_id}")
     print(f"  Run dir: {run_dir}")
 
-    # Step 6: Run evaluations sequentially (no thread pool)
-    results = run_all(cases, model, conditions, max_workers=1, quiet=args.quiet)
+    # Step 6: Run evaluations sequentially
+    results = run_all(cases, model, conditions, quiet=args.quiet)
     print_results(results, conditions, model)
+
+    # Step 6.5: Execution sanity + result distribution guard
+    _validate_execution_sanity(results, conditions)
 
     # Step 7: Verify log integrity
     from execution import get_run_logger
@@ -451,12 +522,18 @@ def _run_ablation_mode(args):
 
 def main():
     parser = argparse.ArgumentParser(description="T3 multi-condition experiment")
-    parser.add_argument("--model", default="gpt-4.1-nano")
+    parser.add_argument("--config", default="configs/default.yaml",
+                        help="Path to experiment YAML config (REQUIRED)")
+    parser.add_argument("--model", help="Override: generation model name")
     parser.add_argument("--case-id", default=None)
-    parser.add_argument("--cases", default="cases.json",
-                        help="Path to cases JSON file (default: cases.json)")
-    parser.add_argument("--conditions", default=None)
-    parser.add_argument("--parallel", type=int, default=1)
+    parser.add_argument("--cases", default=None,
+                        help="Override: path to cases JSON file")
+    parser.add_argument("--conditions", default=None,
+                        help="Override: comma-separated condition names")
+    # --parallel removed: execution is always serial within a process.
+    # Parallelism is achieved by launching multiple runner.py processes.
+    parser.add_argument("--parallel", type=int, default=None,
+                        help="DEPRECATED — ignored. Parallelism is process-based.")
     parser.add_argument("--quiet", action="store_true")
     # Legacy mode args
     parser.add_argument("--clear-events", action="store_true",
@@ -470,7 +547,30 @@ def main():
                         help="Isolated output directory (ablation mode)")
     parser.add_argument("--run-id", default=None,
                         help="Unique run ID (ablation mode)")
+    parser.add_argument("--max-cases", type=int, default=None,
+                        help="Limit number of cases (for smoke tests)")
     args = parser.parse_args()
+
+    # ── LOAD CONFIG (single source of truth) ──
+    from experiment_config import load_config, get_config, config_to_dict
+    cli_overrides = {}
+    if args.model:
+        cli_overrides["models.generation"] = [{"name": args.model, "temperature": 0.0, "max_tokens": 4096, "top_p": 1.0}]
+    if args.cases:
+        cli_overrides["cases.source"] = args.cases
+    if args.parallel is not None:
+        import logging as _warn_log
+        _warn_log.getLogger("t3.runner").warning(
+            "--parallel is DEPRECATED and ignored. Execution is always serial. "
+            "Use process-level parallelism (multiple runner.py invocations)."
+        )
+    config = load_config(args.config, cli_overrides if cli_overrides else None)
+
+    print(f"CONFIG LOADED: {args.config} (sha={config._config_sha256})")
+    print(f"  Evaluator model: {config.models.evaluator.name}")
+    print(f"  Generation models: {[m.name for m in config.models.generation]}")
+    print(f"  Conditions: {list(config.conditions.keys())}")
+    print(f"  Output format: {config.execution.output_format}")
 
     # Route to ablation mode if --run-dir is provided
     if args.run_dir is not None:
@@ -481,13 +581,20 @@ def main():
         _run_ablation_mode(args)
         return
 
-    # Legacy mode (unchanged)
-    conditions = [c.strip() for c in args.conditions.split(",")] if args.conditions else ALL_CONDITIONS
+    # Determine model and conditions from config (CLI overrides applied above)
+    model = config.models.generation[0].name if not args.model else args.model
+    conditions = [c.strip() for c in args.conditions.split(",")] if args.conditions else list(config.conditions.keys())
     for c in conditions:
         if c not in VALID_CONDITIONS:
             raise ValueError(f"Invalid condition {c!r}")
 
-    cases = load_cases(case_id=args.case_id, cases_file=args.cases)
+    cases_file = args.cases or config.cases.source
+    cases = load_cases(case_id=args.case_id, cases_file=cases_file)
+
+    # Apply max_cases from config or CLI
+    max_cases = args.max_cases or config.cases.max_cases
+    if max_cases and max_cases > 0:
+        cases = cases[:max_cases]
 
     # PREFLIGHT: verify every case can be evaluated BEFORE spending API calls
     preflight_verify_tests(cases)
@@ -499,7 +606,7 @@ def main():
     n_calls = len(cases) * len(conditions)
 
     # Initialize per-run log file
-    log_path = init_run_log(args.model)
+    log_path = init_run_log(model)
 
     # Start live metrics dashboard (legacy — uses old thread-based path for backward compat)
     # In ablation mode, dashboard is a separate process (scripts/update_dashboards.py)
@@ -513,13 +620,11 @@ def main():
     dashboard_total = args.total_jobs if args.total_jobs > 0 else n_calls
 
     print(f"T3 Experiment — {len(cases)} cases x {len(conditions)} conditions = {n_calls} LLM calls")
-    print(f"  Model: {args.model}")
-    print(f"  Parallel: {args.parallel}")
+    print(f"  Model: {model}")
     print(f"  Log: {log_path}")
 
-    results = run_all(cases, args.model, conditions,
-                      max_workers=args.parallel, quiet=args.quiet)
-    print_results(results, conditions, args.model)
+    results = run_all(cases, model, conditions, quiet=args.quiet)
+    print_results(results, conditions, model)
 
     # Verify log integrity — failed writes INVALIDATE the run
     from execution import get_run_logger

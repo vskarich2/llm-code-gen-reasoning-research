@@ -27,7 +27,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from llm import call_model, get_model_config
-from parse import parse_model_response, parse_structured_output, extract_code
+from parse import extract_code
 from evaluator import evaluate_output, compute_alignment
 from prompts import build_base_prompt, _format_code_files
 
@@ -82,6 +82,67 @@ _GENERIC_WORDS = frozenset({
 # ============================================================
 # PURE HELPER FUNCTIONS
 # ============================================================
+
+def _select_best_code(strict_code: str, fallback_code: str
+                      ) -> tuple[str, str, bool, dict]:
+    """Select best code from strict and fallback extraction candidates.
+
+    Returns (selected_code, extraction_source, extraction_conflict, extraction_candidates).
+
+    Selection criteria (applied only when two DIFFERENT non-empty candidates):
+      C1: Syntax validity (ast.parse succeeds)
+      C2: Non-trivial (len >= 50 and contains 'def ' or 'class ')
+      C3: Length tiebreaker (longer wins)
+    """
+    import ast
+
+    candidates = []
+    if strict_code and strict_code.strip():
+        candidates.append(("strict", strict_code))
+    if fallback_code and fallback_code.strip() and fallback_code.strip() != strict_code.strip():
+        candidates.append(("fallback", fallback_code))
+
+    extraction_candidates = {src: len(code) for src, code in candidates}
+
+    if len(candidates) == 0:
+        return ("", "none", False, {})
+    if len(candidates) == 1:
+        return (candidates[0][1], candidates[0][0], False, extraction_candidates)
+
+    # Two different non-empty candidates — apply C1-C3
+    extraction_conflict = True
+
+    # C1: Filter to syntax-valid
+    valid = []
+    for src, code in candidates:
+        try:
+            ast.parse(code)
+            valid.append((src, code))
+        except SyntaxError:
+            pass
+
+    if len(valid) == 0:
+        return (candidates[0][1], candidates[0][0], True, extraction_candidates)
+    if len(valid) == 1:
+        return (valid[0][1], valid[0][0], True, extraction_candidates)
+
+    # C2: Filter to non-trivial
+    nontrivial = []
+    for src, code in valid:
+        has_def = 'def ' in code or 'class ' in code
+        long_enough = len(code.strip()) >= 50
+        if has_def and long_enough:
+            nontrivial.append((src, code))
+
+    if len(nontrivial) == 0:
+        return (valid[0][1], valid[0][0], True, extraction_candidates)
+    if len(nontrivial) == 1:
+        return (nontrivial[0][1], nontrivial[0][0], True, extraction_candidates)
+
+    # C3: Tiebreaker — longer code
+    best = max(nontrivial, key=lambda x: len(x[1]))
+    return (best[1], best[0], True, extraction_candidates)
+
 
 def _normalize(code: str) -> str:
     """Strip trailing whitespace per line and leading/trailing newlines."""
@@ -771,35 +832,6 @@ def _compute_critique_accuracy(trajectory):
 # LLM-TOUCHING FUNCTIONS
 # ============================================================
 
-def _safe_evaluate(case, parsed):
-    """Wrap evaluate_output — never crash, always return valid ev.
-
-    parsed is a canonical ParsedResponse dict with: code, reasoning, raw_output,
-    parse_error, _raw_fallback.
-    """
-    try:
-        return evaluate_output(case, parsed)
-    except Exception as e:
-        _log.error("evaluate_output CRASHED for %s: %s", case["id"], e)
-        return {
-            "pass": False,
-            "score": 0.0,
-            "reasons": [f"evaluator_error: {e}"],
-            "failure_modes": [case.get("failure_mode", "UNKNOWN")],
-            "execution": {
-                "status": "error", "ran": False,
-                "passed_tests": 0, "total_tests": 0,
-                "syntax_error": None, "runtime_error": True,
-                "error_message": f"evaluator_error: {e}",
-                "invariant_pass": None, "mutation_pass": None,
-            },
-            "identified_correct_issue": False,
-            "final_output_correct": False,
-            "reasoning_action_gap": False,
-            "_extracted_code": "",
-        }
-
-
 def _call_critique(model, code_k, error_obj, ev):
     """Separate model call for structured failure diagnosis.
 
@@ -1054,48 +1086,24 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
             _log.warning("SLOW ITERATION for %s: %.1fs at iteration %d",
                          case["id"], iter_elapsed, k)
 
-        # --- Parse (strict JSON, no regex fallback) ---
-        parsed = parse_structured_output(raw)
-        valid_schema = parsed["valid_schema"]
-        code_k = parsed["code"]
-        reasoning_k = parsed["reasoning"]
-        plan_steps = parsed["plan"]
+        # --- Evaluate through canonical pipeline ---
+        from execution import evaluate_case, _propagate_observability
+        parsed_result, ev = evaluate_case(case, raw)
+        _propagate_observability(parsed_result, ev)
 
-        # Fallback for code/reasoning extraction if strict parser failed
-        if not valid_schema:
-            legacy = parse_model_response(raw)
-            code_k = legacy.get("code") or ""
-            reasoning_k = legacy.get("reasoning") or ""
-            if not isinstance(code_k, str):
-                code_k = str(code_k)
-            if not isinstance(reasoning_k, str):
-                reasoning_k = str(reasoning_k)
+        code_k = parsed_result.get("code", "")
+        reasoning_k = parsed_result.get("reasoning", "")
+        valid_schema = parsed_result.get("response_format") in ("json_direct", "json_lenient")
 
-        # --- Build canonical ParsedResponse and execute ---
-        eval_parsed = {
-            "code": code_k,
-            "reasoning": reasoning_k,
-            "raw_output": raw,
-            "parse_error": parsed.get("parse_error"),
-            "_raw_fallback": not valid_schema and not code_k.strip(),
-        }
-        ev = _safe_evaluate(case, eval_parsed)
-
-        # --- Parse consistency check ---
-        exec_code = ev.get("_extracted_code", "")
-        if code_k.strip() and exec_code.strip():
-            if _normalize(code_k) != _normalize(exec_code):
-                _log.warning(
-                    "PARSE DIVERGENCE for %s iter %d: "
-                    "parsed.code (%d chars) != exec extracted code (%d chars)",
-                    case["id"], k, len(code_k), len(exec_code)
-                )
-        elif not code_k.strip() and ev.get("execution", {}).get("ran"):
-            _log.warning(
-                "PARSE DIVERGENCE for %s iter %d: "
-                "parsed.code empty but eval says ran=True",
-                case["id"], k
-            )
+        # Extract plan from raw JSON (metadata, not needed for evaluation)
+        plan_steps = []
+        try:
+            import json as _json
+            raw_json = _json.loads(raw) if raw.strip().startswith("{") else {}
+            if isinstance(raw_json, dict) and isinstance(raw_json.get("plan"), list):
+                plan_steps = raw_json["plan"]
+        except (ValueError, TypeError):
+            pass
 
         # --- Structured error ---
         error_obj = _build_error_object(ev)
@@ -1261,7 +1269,7 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
 
         # --- Log iteration ---
         _write_iteration_log(case, model, k, max_iterations, condition,
-                             prompt, raw, parsed, ev, entry)
+                             prompt, raw, parsed_result, ev, entry)
 
         # --- ANALYSIS logging (observations, NOT stop conditions) ---
         if k >= 2:
@@ -1508,9 +1516,17 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
         final_pass=ev["pass"],
         retry_summary=summary,
     )
-    ev["alignment"] = compute_alignment(
-        ev.get("identified_correct_issue", False),
-        ev.get("execution", {}).get("status", "failed"),
-    )
+    # alignment is already computed correctly by evaluate_output inside evaluate_case.
+    # Do NOT recompute — the previous version used wrong arguments.
+
+    # Write final iteration to run.jsonl and events.jsonl (V10 fix)
+    from execution import write_log, _emit_metrics_event
+    if trajectory:
+        # Use last iteration's data for logging
+        last_prompt = prompt  # loop variable from last iteration
+        last_raw = raw        # loop variable from last iteration
+        write_log(case["id"], condition, model, last_prompt, last_raw, parsed_result, ev)
+    _emit_metrics_event(case, model, condition, ev,
+                        elapsed_seconds=round(time.monotonic() - total_start, 2))
 
     return case["id"], condition, ev
