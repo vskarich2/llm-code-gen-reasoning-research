@@ -126,7 +126,7 @@ class TestRunLoggerNoLock:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             logger = RunLogger(
-                tmp_path / "a.jsonl", tmp_path / "b.jsonl", tmp_path / "c.jsonl",
+                tmp_path / "a.jsonl",
                 model="test", run_id="test",
             )
             assert not hasattr(logger, "_lock"), (

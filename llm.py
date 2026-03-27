@@ -45,7 +45,7 @@ RULES:
 - Return ONLY the JSON object, nothing else."""
 
 
-def _build_json_output_instruction_v2(file_paths: list[str] | None = None) -> str:
+def build_json_output_instruction_v2(file_paths: list[str] | None = None) -> str:
     """Build V2 output instruction with file entries matching the prompt."""
     if not file_paths:
         return _JSON_OUTPUT_INSTRUCTION_V1
@@ -102,7 +102,7 @@ def call_model(prompt: str, model: str, raw: bool = False,
     if raw:
         full_prompt = prompt
     elif output_fmt == "v2" and file_paths:
-        full_prompt = prompt + _build_json_output_instruction_v2(file_paths)
+        full_prompt = prompt + build_json_output_instruction_v2(file_paths)
     else:
         full_prompt = prompt + _JSON_OUTPUT_INSTRUCTION_V1
 

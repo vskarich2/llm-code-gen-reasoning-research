@@ -23,38 +23,38 @@ from constants import ALL_CONDITIONS, VALID_CONDITIONS, COND_LABELS, RETRY_CONDI
 
 BASE_DIR = Path(__file__).parent
 
-def _get_eval_model() -> str:
+def get_eval_model() -> str:
     """Get evaluator model from config. No hardcoded fallback."""
     from experiment_config import get_config
     return get_config().models.evaluator.name
 
-COND_DESCRIPTIONS = {
-    "baseline": "Baseline (terse)",
-    "diagnostic": "Diagnostic operator",
-    "guardrail": "Guardrail (soft)",
-    "guardrail_strict": "Guardrail (strict/hard)",
-    "counterfactual": "Counterfactual simulation",
-    "reason_then_act": "Reason-then-act",
-    "self_check": "Self-check (post-gen verify)",
-    "counterfactual_check": "Counterfactual failure check",
-    "test_driven": "Test-driven invariants",
-    "repair_loop": "Repair loop (2 attempts)",
-    "scm_descriptive": "SCM descriptive",
-    "scm_constrained": "SCM constrained",
-    "scm_constrained_evidence": "SCM evidence (full)",
-    "scm_constrained_evidence_minimal": "SCM evidence (minimal)",
-    "evidence_only": "Evidence only (no graph)",
-    "length_matched_control": "Length-matched control",
-    "structured_reasoning": "Structured reasoning",
-    "free_form_reasoning": "Free-form reasoning",
-    "branching_reasoning": "Branching reasoning (ToT-lite)",
-    "contract_gated": "Contract-Gated Execution",
-    "retry_no_contract": "Retry harness (no contract)",
-    "retry_with_contract": "Retry harness (with contract)",
-    "retry_adaptive": "Retry harness (adaptive hints)",
-    "retry_alignment": "Retry harness (plan-code alignment)",
-    "leg_reduction": "LEG-reduction (intra-call self-correction)",
-}
+COND_DESCRIPTIONS = [
+    "baseline",
+    "diagnostic",
+    "guardrail",
+    "guardrail_strict",
+    "counterfactual",
+    "reason_then_act",
+    "self_check",
+    "counterfactual_check",
+    "test_driven",
+    "repair_loop",
+    "scm_descriptive",
+    "scm_constrained",
+    "scm_constrained_evidence",
+    "scm_constrained_evidence_minimal",
+    "evidence_only",
+    "length_matched_control",
+    "structured_reasoning",
+    "free_form_reasoning",
+    "branching_reasoning",
+    "contract_gated",
+    "retry_no_contract",
+    "retry_with_contract",
+    "retry_adaptive",
+    "retry_alignment",
+    "leg_reduction"
+]
 
 REPAIR_LOOP_MAX_ATTEMPTS = 2
 
@@ -79,7 +79,7 @@ def load_cases(case_id: str, cases_file: str) -> list[dict]:
             )
             code_files[rel_path] = content
         case["code_files_contents"] = code_files
-        _validate_import_consistency(case)
+        validate_import_consistency(case)
     if case_id:
         cases = [c for c in cases if c["id"] == case_id]
         if not cases:
@@ -87,7 +87,8 @@ def load_cases(case_id: str, cases_file: str) -> list[dict]:
     return cases
 
 
-def _validate_import_consistency(case: dict) -> None:
+def validate_import_consistency(case: dict) -> None:
+
     """Preflight: verify case files have consistent, supported import structure.
 
     Checks:
@@ -199,7 +200,7 @@ def _run_one_inner(case: dict, model: str, condition: str) -> tuple[str, str, di
         return run_contract_gated(case, model)
     if condition in RETRY_CONDITIONS and condition != "repair_loop":
         from retry_harness import run_retry_harness
-        return run_retry_harness(case, model, condition=condition, eval_model=_get_eval_model())
+        return run_retry_harness(case, model, condition=condition, eval_model=get_eval_model())
     if condition == "leg_reduction":
         return run_leg_reduction(case, model)
     return run_single(case, model, condition)
@@ -334,7 +335,7 @@ def print_results(results: list[dict], conditions: list[str], model: str):
 # MAIN
 # ============================================================
 
-def _validate_experiment_config(cases, conditions, model):
+def validate_experiment_config(cases, conditions, model):
     """Validate experiment configuration before spending API calls."""
     if len(cases) < 5 and not any(c["id"] == "alias_config_a" for c in cases[:3]):
         # Allow small case sets for smoke tests if canary is present
@@ -352,7 +353,7 @@ def _validate_experiment_config(cases, conditions, model):
             raise RuntimeError(f"CONFIG ERROR: case {c['id']} has no code_files")
 
 
-def _validate_execution_sanity(results, conditions):
+def validate_execution_sanity(results, conditions):
     """Post-run validation: execution sanity + result distribution guard.
 
     WARNS on suspicious distributions but does NOT crash the run.
@@ -411,23 +412,44 @@ def _validate_execution_sanity(results, conditions):
         print(f"  [!] {w}")
 
 
-def _run_ablation_mode(args):
+def create_run_timestamp_dir(run_dir: Path) -> Path:
+    """Create a timestamp subdirectory inside run_dir. Called ONCE per run.
+
+    Format: YYYY-MM-DD_HH-MM-SS (sortable, human-readable).
+    Fails loudly if directory creation fails. Never recompute — call once,
+    pass the result to all downstream writers.
+
+    Returns the Path to the created timestamp directory.
+    """
+    timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+    ts_dir = run_dir / timestamp
+    ts_dir.mkdir(parents=True, exist_ok=False)
+    return ts_dir
+
+
+def run_ablation_mode(args):
     """Ablation mode: single (model, trial) run with isolated output directory."""
     import os
     import subprocess as _sp
     from execution import set_ablation_context
 
-    run_dir = Path(args.run_dir)
-    model = args.model
-    trial = args.trial
-    run_id = args.run_id
+    # All run parameters come from config — the single source of truth
+    from experiment_config import get_config as _get_config
+    _cfg = _get_config()
+    run_dir = Path(_cfg.run.run_dir)
+    trial = _cfg.run.trial
+    run_id = _cfg.run.run_id
+    model = _cfg.models.generation[0].name
 
-    conditions = [c.strip() for c in args.conditions.split(",")] if args.conditions else [ALL_CONDITIONS]
+    # Conditions and cases come from config ONLY — never from CLI in ablation mode
+    from experiment_config import get_config
+    conditions = list(get_config().conditions.keys())
     for c in conditions:
         if c not in VALID_CONDITIONS:
-            raise ValueError(f"Invalid condition {c!r}")
+            raise ValueError(f"Invalid condition {c!r} in config")
 
-    cases = load_cases(case_id=args.case_id, cases_file=args.cases)
+    cases_file = get_config().cases.source
+    cases = load_cases(case_id=args.case_id, cases_file=cases_file)
 
     # Limit cases for smoke tests
     if args.max_cases and args.max_cases > 0:
@@ -440,13 +462,17 @@ def _run_ablation_mode(args):
     validate_run(cases, conditions)
 
     # PREFLIGHT: config sanity
-    _validate_experiment_config(cases, conditions, model)
+    validate_experiment_config(cases, conditions, model)
 
     n_calls = len(cases) * len(conditions)
     total_jobs = args.total_jobs if args.total_jobs > 0 else n_calls
 
-    # Step 1: Create run directory
+    # Step 1: Create run directory and timestamp subdirectory
     run_dir.mkdir(parents=True, exist_ok=True)
+    ts_dir = create_run_timestamp_dir(run_dir)
+
+    # All outputs go into ts_dir from here on
+    output_dir = ts_dir
 
     # Step 2: Write metadata.json immediately
     try:
@@ -461,20 +487,21 @@ def _run_ablation_mode(args):
         "trial": trial,
         "run_id": run_id,
         "start_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "cases_file": args.cases,
+        "timestamp_dir": ts_dir.name,
+        "cases_file": cases_file,
         "conditions": conditions,
         "total_jobs": total_jobs,
         "command_line": sys.argv,
         "git_hash": git_hash,
     }
-    metadata_path = run_dir / "metadata.json"
+    metadata_path = output_dir / "metadata.json"
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
         f.flush()
         os.fsync(f.fileno())
 
     # Step 3: Touch events.jsonl
-    events_path = run_dir / "events.jsonl"
+    events_path = output_dir / "events.jsonl"
     events_path.touch()
 
     # Step 4: Set ablation context for event emission
@@ -482,21 +509,22 @@ def _run_ablation_mode(args):
 
     # Step 4.5: Initialize call-level logger
     from call_logger import init_call_logger, close_call_logger
-    init_call_logger(run_dir)
+    init_call_logger(output_dir)
 
     # Step 5: Initialize run logger
-    log_path = init_run_log(model, log_dir=run_dir)
+    log_path = init_run_log(model, log_dir=output_dir)
 
     print(f"T3 Ablation — {len(cases)} cases x {len(conditions)} conditions = {n_calls} evals")
     print(f"  Model: {model}, Trial: {trial}, Run ID: {run_id}")
     print(f"  Run dir: {run_dir}")
+    print(f"  Output:  {output_dir}")
 
     # Step 6: Run evaluations sequentially
     results = run_all(cases, model, conditions, quiet=args.quiet)
     print_results(results, conditions, model)
 
     # Step 6.5: Execution sanity + result distribution guard
-    _validate_execution_sanity(results, conditions)
+    validate_execution_sanity(results, conditions)
 
     # Step 7: Verify log integrity
     from execution import get_run_logger
@@ -513,7 +541,7 @@ def _run_ablation_mode(args):
     # Step 7.5: Close call logger and record count
     from call_logger import close_call_logger, get_call_count
     total_calls = close_call_logger()
-    print(f"  Call log: {total_calls} LLM calls logged to {run_dir}/calls/")
+    print(f"  Call log: {total_calls} LLM calls logged to {output_dir}/calls/")
 
     # Step 8: Write completion marker to metadata
     events_written = len([line for line in open(events_path) if line.strip()])
@@ -530,126 +558,50 @@ def _run_ablation_mode(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="T3 multi-condition experiment")
+    parser = argparse.ArgumentParser(description="T3 ablation experiment runner")
     parser.add_argument("--config", default="configs/default.yaml",
-                        help="Path to experiment YAML config (REQUIRED)")
-    parser.add_argument("--model", help="Override: generation model name")
-    parser.add_argument("--case-id", default=None)
-    parser.add_argument("--cases", default=None,
-                        help="Override: path to cases JSON file")
-    parser.add_argument("--conditions", default=None,
-                        help="Override: comma-separated condition names")
-    # --parallel removed: execution is always serial within a process.
-    # Parallelism is achieved by launching multiple runner.py processes.
-    parser.add_argument("--parallel", type=int, default=None,
-                        help="DEPRECATED — ignored. Parallelism is process-based.")
+                        help="Path to experiment YAML config (single source of truth)")
+    parser.add_argument("--case-id", default=None,
+                        help="Filter to a single case by ID")
     parser.add_argument("--quiet", action="store_true")
-    # Legacy mode args
-    parser.add_argument("--clear-events", action="store_true",
-                        help="Clear events.jsonl before this run (legacy mode)")
-    parser.add_argument("--total-jobs", type=int, default=0,
-                        help="Expected eval calls for this run")
-    # Ablation mode args
-    parser.add_argument("--trial", type=int, default=None,
-                        help="Trial number (ablation mode)")
-    parser.add_argument("--run-dir", default=None,
-                        help="Isolated output directory (ablation mode)")
-    parser.add_argument("--run-id", default=None,
-                        help="Unique run ID (ablation mode)")
     parser.add_argument("--max-cases", type=int, default=None,
                         help="Limit number of cases (for smoke tests)")
+    # Kept for detection — hard-fail if used
+    parser.add_argument("--model", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--cases", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--conditions", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--trial", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--run-dir", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--run-id", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--total-jobs", type=int, default=0, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
-    # ── LOAD CONFIG (single source of truth) ──
-    from experiment_config import load_config, get_config, config_to_dict
-    cli_overrides = {}
-    if args.model:
-        cli_overrides["models.generation"] = [{"name": args.model, "temperature": 0.0, "max_tokens": 4096, "top_p": 1.0}]
-    if args.cases:
-        cli_overrides["cases.source"] = args.cases
+    # ── ENFORCE: config is the single source of truth ──
+    _config_only_flags = {
+        "--model": args.model, "--cases": args.cases, "--conditions": args.conditions,
+        "--trial": args.trial, "--run-dir": args.run_dir, "--run-id": args.run_id,
+    }
+    violations = [flag for flag, val in _config_only_flags.items() if val is not None]
+    if violations:
+        raise ValueError(
+            f"ERROR: {', '.join(violations)} cannot be set via CLI. "
+            f"All run parameters come from the config YAML (--config). "
+            f"Edit the config file to change these values."
+        )
 
-    config = load_config(args.config, cli_overrides if cli_overrides else None)
+    # ── LOAD CONFIG (single source of truth) ──
+    from experiment_config import load_config
+    config = load_config(args.config)
 
     print(f"CONFIG LOADED: {args.config} (sha={config._config_sha256})")
     print(f"  Evaluator model: {config.models.evaluator.name}")
     print(f"  Generation models: {[m.name for m in config.models.generation]}")
     print(f"  Conditions: {list(config.conditions.keys())}")
     print(f"  Output format: {config.execution.output_format}")
+    print(f"  Run: trial={config.run.trial}, run_id={config.run.run_id}, run_dir={config.run.run_dir}")
 
-    # Route to ablation mode if --run-dir is provided
-    if args.run_dir is not None:
-        if args.trial is None:
-            raise ValueError("--trial is required in ablation mode (--run-dir provided)")
-        if args.run_id is None:
-            raise ValueError("--run-id is required in ablation mode (--run-dir provided)")
-        _run_ablation_mode(args)
-        return
-
-    # Determine model and conditions from config (CLI overrides applied above)
-    model = config.models.generation[0].name if not args.model else args.model
-    conditions = [c.strip() for c in args.conditions.split(",")] if args.conditions else list(config.conditions.keys())
-    for c in conditions:
-        if c not in VALID_CONDITIONS:
-            raise ValueError(f"Invalid condition {c!r}")
-
-    cases_file = args.cases or config.cases.source
-    cases = load_cases(case_id=args.case_id, cases_file=cases_file)
-
-    # Apply max_cases from config or CLI
-    max_cases = args.max_cases or config.cases.max_cases
-    if max_cases and max_cases > 0:
-        cases = cases[:max_cases]
-
-    # PREFLIGHT: verify every case can be evaluated BEFORE spending API calls
-    preflight_verify_tests(cases)
-
-    # PREFLIGHT: verify every (case, condition) pair is compatible
-    from condition_registry import validate_run
-    validate_run(cases, conditions)
-
-    n_calls = len(cases) * len(conditions)
-
-    # Initialize per-run log file
-    log_path = init_run_log(model)
-
-    # Initialize call-level logger (legacy mode: write to logs/ directory)
-    from call_logger import init_call_logger
-    legacy_call_dir = Path(str(log_path).replace(".jsonl", "_calls"))
-    legacy_call_dir.mkdir(parents=True, exist_ok=True)
-    init_call_logger(legacy_call_dir)
-
-    # Start live metrics dashboard (legacy — uses old thread-based path for backward compat)
-    # In ablation mode, dashboard is a separate process (scripts/update_dashboards.py)
-    try:
-        # Try to import legacy functions — they may not exist after rewrite
-        from live_metrics import emit_event  # noqa: F401
-        # Legacy dashboard not available in new architecture — skip
-    except ImportError:
-        pass
-
-    dashboard_total = args.total_jobs if args.total_jobs > 0 else n_calls
-
-    print(f"T3 Experiment — {len(cases)} cases x {len(conditions)} conditions = {n_calls} LLM calls")
-    print(f"  Model: {model}")
-    print(f"  Log: {log_path}")
-
-    results = run_all(cases, model, conditions, quiet=args.quiet)
-    print_results(results, conditions, model)
-
-    # Verify log integrity — failed writes INVALIDATE the run
-    from execution import get_run_logger
-    logger = get_run_logger()
-    valid, reason = logger.verify_integrity()
-    stats = logger.get_stats()
-    if valid:
-        print(f"\n  Log verified: {log_path} (run_id={stats['run_id']}, {stats['attempted']} writes OK)")
-    else:
-        print(f"\n  RUN INVALID: {reason}")
-        print(f"  Log: {log_path}")
-        print(f"  This run's data should NOT be used for analysis.")
-
-    # Close log to prevent bleed if another model runs in the same process
-    close_run_log()
+    # ── SINGLE EXECUTION PATH ──
+    run_ablation_mode(args)
 
 
 if __name__ == "__main__":

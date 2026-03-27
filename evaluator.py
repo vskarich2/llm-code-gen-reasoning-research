@@ -165,8 +165,6 @@ def classify_parse_category(reasoning: str, parse_error: str | None,
             return "PARTIAL_JSON_RECOVERED"
         return "MALFORMED_BUT_RECOVERED"
     if not parse_error and (not reasoning or not reasoning.strip()):
-        # No parse error but empty reasoning: this is genuine empty reasoning
-        # (model chose not to explain), NOT a parse failure. Classify normally.
         return "CLEAN"
     return "CLEAN"
 
@@ -323,7 +321,6 @@ from eval_cases import _has, _low  # noqa: F401
 
 # _REASONING_SIGNALS is retained ONLY for the retry_harness heuristic_signal
 # (which is logged but NOT used for classification decisions).
-# This will be removed in a future cleanup.
 _REASONING_SIGNALS = {
     "HIDDEN_DEPENDENCY": ["overwrite", "cache_put_if_absent.*different",
                           "not interchangeable", "stale", "live.*write",
@@ -560,11 +557,10 @@ def evaluate_output(case: dict, parsed: dict, eval_model: str | None = None) -> 
     result["parse_category"] = classify.get("parse_category")
 
     # Classifier's code opinion — logged for diagnostics only, NEVER used in metrics
-    classifier_code_correct = classify.get("classifier_code_correct")  # None (no longer produced)
+    classifier_code_correct = classify.get("classifier_code_correct")
     result["classifier_code_correct"] = classifier_code_correct
 
-    # Disagreement detection (for analysis — classifier no longer judges code,
-    # so this will always be None in the new system)
+    # Disagreement detection
     result["classifier_disagreement"] = None
     result["classifier_disagreement_type"] = None
 

@@ -31,29 +31,16 @@ def _ensure_run_logger():
         yield
         return
 
-    # Clean stale test logs, init logger, yield, close
-    logs_dir = BASE / "logs"
-    logs_dir.mkdir(exist_ok=True)
-    for f in logs_dir.glob("_test-auto_*"):
-        f.unlink(missing_ok=True)
+    # Create a temp directory for test logs
+    import tempfile
+    test_log_dir = Path(tempfile.mkdtemp(prefix="t3_test_logs_"))
 
-    # Use the model name that tests actually use, so RunLogger model check passes.
-    # All test functions use "gpt-4.1-nano" as the mock model.
     test_model = "gpt-4.1-nano"
-    # Remove any stale log files for this model to avoid timestamp collision
-    for f in logs_dir.glob(f"{test_model}*"):
-        f.unlink(missing_ok=True)
-
-    try:
-        init_run_log(test_model)
-    except FileExistsError:
-        import time
-        time.sleep(1)
-        init_run_log(test_model)
+    init_run_log(test_model, log_dir=test_log_dir)
 
     yield
 
     close_run_log()
-    # Clean up test log files
-    for f in logs_dir.glob(f"{test_model}*"):
-        f.unlink(missing_ok=True)
+    # Clean up temp directory
+    import shutil
+    shutil.rmtree(test_log_dir, ignore_errors=True)

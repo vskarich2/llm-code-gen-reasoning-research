@@ -9,11 +9,10 @@ import logging
 from pathlib import Path
 
 _exec_log = logging.getLogger("t3.execution")
-
+from evaluator import *
 from llm import call_model, get_model_config
 from call_logger import set_call_context
 from parse import parse_model_response
-from evaluator import evaluate_output
 from prompts import build_base_prompt
 from nudges.router import (
     apply_diagnostic, apply_guardrail, apply_guardrail_strict,
@@ -812,11 +811,8 @@ class RunLogger:
     Serial execution only — no threads, no locks needed.
     """
 
-    def __init__(self, log_path: Path, prompts_path: Path, responses_path: Path,
-                 model: str, run_id: str):
+    def __init__(self, log_path: Path, model: str, run_id: str):
         self.log_path = log_path
-        self.prompts_path = prompts_path
-        self.responses_path = responses_path
         self.model = model
         self.run_id = run_id
         self.closed = False
@@ -888,32 +884,22 @@ class RunLogger:
                 "alignment": ev.get("alignment", {}),
                 "num_attempts": ev.get("num_attempts"),
             },
-            # ── AUDIT FIELDS (plan v6 Section 8.3) ──
-            # All 21 fields required for measurement repair reasoning_evaluator_audit.
-            # Fields not yet implemented (Fix C / Phase 1) are set to None.
-            "reasoning_evaluator_audit": {
-                "experiment_id": None,  # Set by caller during reasoning_evaluator_audit experiments
+            # ── AUDIT FIELDS ──
+            # Prompts/responses are in calls/*.json (call logger).
+            # Classifier prompt/response are in calls/*.json (phase=classifier).
+            # Only non-redundant audit fields remain here.
+            "audit": {
                 "case_id": case_id,
                 "condition": condition,
-                "raw_model_output": raw_output,
-                "parsed_reasoning": reasoning_text if isinstance(reasoning_text, str) else str(reasoning_text),
-                "enriched_reasoning": None,  # Fix C / Phase 1
-                "normalized_representation": None,  # Fix C / Phase 1
-                "extraction_method": None,  # Fix C / Phase 1
-                "extraction_failed": None,  # Fix C / Phase 1
-                "extraction_e1_correct": None,  # Phase 1 reasoning_evaluator_audit
+                "parsed_reasoning": reasoning_text[:500] if isinstance(reasoning_text, str) else str(reasoning_text)[:500],
                 "parse_error": parse_error,
                 "parse_category": ev.get("parse_category"),
                 "recovery_method": recovery_method,
-                "classifier_prompt": ev.get("classifier_prompt"),
-                "classifier_raw_output": ev.get("classify_raw"),
                 "classifier_verdict": ev.get("reasoning_correct"),
                 "classifier_failure_type": ev.get("failure_type"),
                 "classifier_parse_error": ev.get("classify_parse_error"),
                 "eval_model_intended": ev.get("eval_model_intended"),
                 "eval_model_actual": ev.get("eval_model_actual"),
-                "semantic_elements": None,  # Phase 0 annotation
-                # Phase 1 observability
                 "code_present": ev.get("code_present"),
                 "code_empty_reason": ev.get("code_empty_reason"),
                 "code_source": ev.get("code_source"),
@@ -927,22 +913,8 @@ class RunLogger:
             },
         }
 
-        prompt_record = {
-            "run_id": self.run_id,
-            "case_id": case_id, "condition": condition, "model": model,
-            "prompt": prompt,
-        }
-
-        response_record = {
-            "run_id": self.run_id,
-            "case_id": case_id, "condition": condition, "model": model,
-            "raw_response": raw_output,
-        }
-
         for path, data in [
             (self.log_path, record),
-            (self.prompts_path, prompt_record),
-            (self.responses_path, response_record),
         ]:
             self.writes_attempted += 1
             try:
@@ -1035,45 +1007,19 @@ def init_run_log(model: str, log_dir: Path | None = None) -> Path:
             f"at {_active_logger.log_path}. Call close_run_log() first."
         )
 
-    if log_dir is not None:
-        # Ablation mode: fixed filenames in provided directory
-        log_dir = Path(log_dir)
-        log_path = log_dir / "run.jsonl"
-        prompts_path = log_dir / "run_prompts.jsonl"
-        responses_path = log_dir / "run_responses.jsonl"
+    if log_dir is None:
+        raise ValueError(
+            "init_run_log requires log_dir. Legacy mode has been removed."
+        )
 
-        import uuid
-        run_id = str(uuid.uuid4())[:8]
-        _active_logger = RunLogger(log_path, prompts_path, responses_path, model, run_id)
-        _exec_log.info("RunLogger created (ablation): run_id=%s, model=%s, log_dir=%s",
-                       run_id, model, log_dir)
-        return log_path
-
-    # Legacy mode: timestamped filenames in logs/
-    from datetime import datetime
-
-    logs_dir = BASE_DIR / "logs"
-    logs_dir.mkdir(exist_ok=True)
-
-    safe_model = model.replace("/", "_").replace("\\", "_")
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    stem = f"{safe_model}_{ts}"
-
-    log_path = logs_dir / f"{stem}.jsonl"
-    prompts_path = logs_dir / f"{stem}_prompts.jsonl"
-    responses_path = logs_dir / f"{stem}_responses.jsonl"
-
-    for p in [log_path, prompts_path, responses_path]:
-        if p.exists():
-            raise FileExistsError(
-                f"Log file already exists: {p}\n"
-                "Refusing to overwrite — wait 1 second or use a different model name."
-            )
+    log_dir = Path(log_dir)
+    log_path = log_dir / "run.jsonl"
 
     import uuid
-    run_id = str(uuid.uuid4())[:8]  # short unique ID per run
-    _active_logger = RunLogger(log_path, prompts_path, responses_path, model, run_id)
-    _exec_log.info("RunLogger created: run_id=%s, model=%s, log=%s", run_id, model, log_path)
+    run_id = str(uuid.uuid4())[:8]
+    _active_logger = RunLogger(log_path, model, run_id)
+    _exec_log.info("RunLogger created: run_id=%s, model=%s, log_dir=%s",
+                   run_id, model, log_dir)
     return log_path
 
 

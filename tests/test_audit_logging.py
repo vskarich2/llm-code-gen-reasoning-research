@@ -1,67 +1,55 @@
-"""Tests for reasoning_evaluator_audit logging: all 21 fields present in JSONL output.
+"""Tests for audit logging fields in run.jsonl output.
 
-Verifies Go/No-Go item 3: complete reasoning_evaluator_audit instrumentation.
+Verifies that run.jsonl records contain the required audit fields.
+Redundant fields (raw_model_output, classifier_prompt, classifier_raw_output)
+have been removed — those are in calls/*.json now.
 """
 
 import json
 import os
 import sys
-import tempfile
 import pytest
 from pathlib import Path
-from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
-# The 21 required reasoning_evaluator_audit fields from plan v6 Section 8.3
+# The required audit fields in run.jsonl (after redundancy removal)
 REQUIRED_AUDIT_FIELDS = [
-    "experiment_id",
     "case_id",
     "condition",
-    "raw_model_output",
     "parsed_reasoning",
-    "enriched_reasoning",
-    "normalized_representation",
-    "extraction_method",
-    "extraction_failed",
-    "extraction_e1_correct",
     "parse_error",
     "parse_category",
     "recovery_method",
-    "classifier_prompt",
-    "classifier_raw_output",
     "classifier_verdict",
     "classifier_failure_type",
     "classifier_parse_error",
     "eval_model_intended",
     "eval_model_actual",
-    "semantic_elements",
+    "code_present",
+    "code_empty_reason",
+    "code_source",
+    "case_validity",
+    "failure_source",
+    "failure_source_detail",
+    "recovery_applied",
+    "recovery_types",
+    "content_normalized",
+    "data_lineage",
 ]
 
-# Fields that are allowed to be None in current implementation.
-# Two categories:
-# 1. Phase 1 / Fix C fields: not yet implemented
-# 2. Legitimately None for CLEAN cases: no error means None
+# Fields that are legitimately None for clean cases
 ALLOWED_NONE_FIELDS = {
-    # Phase 1 / Fix C (not yet implemented)
-    "experiment_id",
-    "enriched_reasoning",
-    "normalized_representation",
-    "extraction_method",
-    "extraction_failed",
-    "extraction_e1_correct",
-    "semantic_elements",
-    # Legitimately None for CLEAN cases (no error = no value)
-    "parse_error",              # None when parsing succeeded
-    "classifier_parse_error",   # None when classifier output parsed OK
-    "recovery_method",          # None when no recovery was needed
-    "classifier_prompt",        # None when parse gate fired (no classifier call)
+    "parse_error",
+    "classifier_parse_error",
+    "recovery_method",
+    "code_empty_reason",
 }
 
 
 class TestAuditFieldCompleteness:
-    """Verify all 21 reasoning_evaluator_audit fields exist in logged records."""
+    """Verify audit fields exist in logged records."""
 
     def _run_mock_pipeline_and_get_record(self, tmp_path,
                                            reasoning="The bug is aliasing",
@@ -70,13 +58,8 @@ class TestAuditFieldCompleteness:
         from execution import RunLogger
 
         log_path = tmp_path / "run.jsonl"
-        prompts_path = tmp_path / "run_prompts.jsonl"
-        responses_path = tmp_path / "run_responses.jsonl"
+        logger = RunLogger(log_path, model="test-model", run_id="test-run")
 
-        logger = RunLogger(log_path, prompts_path, responses_path,
-                           model="test-model", run_id="test-run")
-
-        # Mock eval result as produced by evaluate_output
         ev = {
             "pass": True,
             "score": 1.0,
@@ -86,7 +69,6 @@ class TestAuditFieldCompleteness:
             "identified_correct_issue": True,
             "alignment": {"category": "true_success"},
             "num_attempts": 1,
-            # Fields from llm_classify (Fix D + Fix E)
             "reasoning_correct": True,
             "failure_type": "ALIASING",
             "classify_raw": "YES ; ALIASING",
@@ -95,6 +77,15 @@ class TestAuditFieldCompleteness:
             "eval_model_intended": "intended-model",
             "eval_model_actual": "actual-model",
             "parse_category": "CLEAN",
+            "code_present": True,
+            "code_empty_reason": None,
+            "code_source": "reconstruction",
+            "case_validity": "valid",
+            "failure_source": "SUCCESS",
+            "failure_source_detail": "none",
+            "recovery_applied": False,
+            "recovery_types": [],
+            "content_normalized": False,
         }
 
         parsed = {
@@ -102,53 +93,43 @@ class TestAuditFieldCompleteness:
             "code": "def create_config(): return dict(DEFAULTS)",
             "parse_error": parse_error,
             "_raw_fallback": False,
+            "data_lineage": ["raw_output_received"],
         }
 
         logger.write("test_case", "baseline", "test-model",
                       "Fix the bug...", "raw model output here", parsed, ev)
 
-        # Read back the log record
         lines = log_path.read_text().strip().splitlines()
         assert len(lines) == 1, f"Expected 1 log line, got {len(lines)}"
-        record = json.loads(lines[0])
-        return record
+        return json.loads(lines[0])
 
     def test_audit_block_exists(self, tmp_path):
-        """The 'reasoning_evaluator_audit' key must exist in the log record."""
         record = self._run_mock_pipeline_and_get_record(tmp_path)
-        assert "reasoning_evaluator_audit" in record, "Log record missing 'reasoning_evaluator_audit' block"
+        assert "audit" in record, "Log record missing 'audit' block"
 
-    def test_all_21_fields_present(self, tmp_path):
-        """Every one of the 21 required reasoning_evaluator_audit fields must exist."""
+    def test_all_required_fields_present(self, tmp_path):
         record = self._run_mock_pipeline_and_get_record(tmp_path)
-        audit = record["reasoning_evaluator_audit"]
-
+        audit = record["audit"]
         missing = [f for f in REQUIRED_AUDIT_FIELDS if f not in audit]
         assert missing == [], (
-            f"Missing reasoning_evaluator_audit fields: {missing}. "
-            f"Present fields: {sorted(audit.keys())}. "
-            f"Required: {sorted(REQUIRED_AUDIT_FIELDS)}"
+            f"Missing audit fields: {missing}. "
+            f"Present: {sorted(audit.keys())}"
         )
 
-    def test_field_count_is_31(self, tmp_path):
-        """Audit block must have exactly 31 fields (21 original + 10 Phase 1)."""
+    def test_field_count(self, tmp_path):
         record = self._run_mock_pipeline_and_get_record(tmp_path)
-        audit = record["reasoning_evaluator_audit"]
-        assert len(audit) == 31, (
-            f"Expected 31 reasoning_evaluator_audit fields, got {len(audit)}. "
+        audit = record["audit"]
+        assert len(audit) == len(REQUIRED_AUDIT_FIELDS), (
+            f"Expected {len(REQUIRED_AUDIT_FIELDS)} audit fields, got {len(audit)}. "
             f"Fields: {sorted(audit.keys())}"
         )
 
     def test_non_none_fields_populated(self, tmp_path):
-        """Fields that should be populated in the current implementation
-        must not be None."""
         record = self._run_mock_pipeline_and_get_record(tmp_path)
-        audit = record["reasoning_evaluator_audit"]
-
+        audit = record["audit"]
         must_be_populated = set(REQUIRED_AUDIT_FIELDS) - ALLOWED_NONE_FIELDS
         none_but_shouldnt_be = [
-            f for f in must_be_populated
-            if audit.get(f) is None
+            f for f in must_be_populated if audit.get(f) is None
         ]
         assert none_but_shouldnt_be == [], (
             f"Fields that should be populated but are None: {none_but_shouldnt_be}"
@@ -156,47 +137,35 @@ class TestAuditFieldCompleteness:
 
     def test_case_id_matches(self, tmp_path):
         record = self._run_mock_pipeline_and_get_record(tmp_path)
-        assert record["reasoning_evaluator_audit"]["case_id"] == "test_case"
+        assert record["audit"]["case_id"] == "test_case"
 
     def test_condition_matches(self, tmp_path):
         record = self._run_mock_pipeline_and_get_record(tmp_path)
-        assert record["reasoning_evaluator_audit"]["condition"] == "baseline"
-
-    def test_raw_model_output_present(self, tmp_path):
-        record = self._run_mock_pipeline_and_get_record(tmp_path)
-        assert record["reasoning_evaluator_audit"]["raw_model_output"] == "raw model output here"
+        assert record["audit"]["condition"] == "baseline"
 
     def test_parsed_reasoning_present(self, tmp_path):
         record = self._run_mock_pipeline_and_get_record(tmp_path)
-        assert record["reasoning_evaluator_audit"]["parsed_reasoning"] == "The bug is aliasing"
+        assert record["audit"]["parsed_reasoning"] == "The bug is aliasing"
 
     def test_parse_category_present(self, tmp_path):
         record = self._run_mock_pipeline_and_get_record(tmp_path)
-        assert record["reasoning_evaluator_audit"]["parse_category"] == "CLEAN"
-
-    def test_classifier_prompt_present(self, tmp_path):
-        record = self._run_mock_pipeline_and_get_record(tmp_path)
-        assert record["reasoning_evaluator_audit"]["classifier_prompt"] == "You are evaluating..."
-
-    def test_classifier_raw_output_present(self, tmp_path):
-        record = self._run_mock_pipeline_and_get_record(tmp_path)
-        assert record["reasoning_evaluator_audit"]["classifier_raw_output"] == "YES ; ALIASING"
+        assert record["audit"]["parse_category"] == "CLEAN"
 
     def test_classifier_verdict_present(self, tmp_path):
         record = self._run_mock_pipeline_and_get_record(tmp_path)
-        assert record["reasoning_evaluator_audit"]["classifier_verdict"] is True
+        assert record["audit"]["classifier_verdict"] is True
 
     def test_eval_model_intended_present(self, tmp_path):
         record = self._run_mock_pipeline_and_get_record(tmp_path)
-        assert record["reasoning_evaluator_audit"]["eval_model_intended"] == "intended-model"
+        assert record["audit"]["eval_model_intended"] == "intended-model"
 
     def test_eval_model_actual_present(self, tmp_path):
         record = self._run_mock_pipeline_and_get_record(tmp_path)
-        assert record["reasoning_evaluator_audit"]["eval_model_actual"] == "actual-model"
+        assert record["audit"]["eval_model_actual"] == "actual-model"
 
     def test_recovery_method_none_for_clean(self, tmp_path):
         record = self._run_mock_pipeline_and_get_record(tmp_path)
-        assert record["reasoning_evaluator_audit"]["recovery_method"] is None
+        assert record["audit"]["recovery_method"] is None
 
     def test_recovery_method_set_for_lenient(self, tmp_path):
         record = self._run_mock_pipeline_and_get_record(
@@ -204,15 +173,13 @@ class TestAuditFieldCompleteness:
             reasoning="recovered reasoning",
             parse_error="lenient-json: extracted from malformed JSON",
         )
-        assert record["reasoning_evaluator_audit"]["recovery_method"] == "partial_json"
+        assert record["audit"]["recovery_method"] == "partial_json"
 
     def test_gated_case_has_audit_fields(self, tmp_path):
-        """Even when parse gate fires, reasoning_evaluator_audit fields must be present."""
         from execution import RunLogger
 
         log_path = tmp_path / "run.jsonl"
-        logger = RunLogger(log_path, tmp_path / "p.jsonl", tmp_path / "r.jsonl",
-                           model="test-model", run_id="test-run")
+        logger = RunLogger(log_path, model="test-model", run_id="test-run")
 
         ev = {
             "pass": False, "score": 0.0, "reasons": [], "failure_modes": [],
@@ -220,7 +187,6 @@ class TestAuditFieldCompleteness:
             "identified_correct_issue": False,
             "alignment": {"category": "unclassified"},
             "num_attempts": 1,
-            # Gated result from llm_classify
             "reasoning_correct": None,
             "failure_type": None,
             "classify_raw": None,
@@ -229,6 +195,15 @@ class TestAuditFieldCompleteness:
             "eval_model_intended": None,
             "eval_model_actual": None,
             "parse_category": "REASONING_LOST",
+            "code_present": False,
+            "code_empty_reason": "parse_failure",
+            "code_source": "unknown",
+            "case_validity": "invalid",
+            "failure_source": "PARSE_FAILURE",
+            "failure_source_detail": "raw_fallback",
+            "recovery_applied": False,
+            "recovery_types": [],
+            "content_normalized": False,
         }
 
         parsed = {
@@ -236,24 +211,30 @@ class TestAuditFieldCompleteness:
             "code": "def f(): pass",
             "parse_error": "extraction_error: NO_JSON",
             "_raw_fallback": False,
+            "data_lineage": ["raw_output_received"],
         }
 
         logger.write("gated_case", "baseline", "test-model",
                       "prompt", "raw output", parsed, ev)
 
         record = json.loads(log_path.read_text().strip())
-        audit = record["reasoning_evaluator_audit"]
+        audit = record["audit"]
 
-        # All 21 fields must still exist
         missing = [f for f in REQUIRED_AUDIT_FIELDS if f not in audit]
-        assert missing == [], f"Gated case missing reasoning_evaluator_audit fields: {missing}"
+        assert missing == [], f"Gated case missing audit fields: {missing}"
         assert audit["parse_category"] == "REASONING_LOST"
         assert audit["classifier_verdict"] is None
 
     def test_audit_fields_are_json_serializable(self, tmp_path):
-        """All reasoning_evaluator_audit fields must serialize to JSON without error."""
         record = self._run_mock_pipeline_and_get_record(tmp_path)
-        # If we got here, json.dumps already worked in write().
-        # Double-check by re-serializing the reasoning_evaluator_audit block.
-        audit_json = json.dumps(record["reasoning_evaluator_audit"], default=str)
+        audit_json = json.dumps(record["audit"], default=str)
         assert len(audit_json) > 0
+
+    def test_no_redundant_raw_fields(self, tmp_path):
+        """raw_model_output, classifier_prompt, classifier_raw_output
+        must NOT be in audit — they live in calls/*.json now."""
+        record = self._run_mock_pipeline_and_get_record(tmp_path)
+        audit = record["audit"]
+        assert "raw_model_output" not in audit
+        assert "classifier_prompt" not in audit
+        assert "classifier_raw_output" not in audit

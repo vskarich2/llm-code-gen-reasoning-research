@@ -147,6 +147,14 @@ class LoggingConfig:
 
 
 @dataclass
+class RunConfig:
+    """Per-run parameters. The config is the single source of truth."""
+    trial: int
+    run_id: str
+    run_dir: str
+
+
+@dataclass
 class ExperimentMetadata:
     name: str
     description: str = ""
@@ -161,6 +169,7 @@ class ExperimentConfig:
     models: ModelsConfig
     conditions: dict[str, ConditionConfig]
     cases: CasesConfig
+    run: RunConfig
     retry_defaults: RetryConfig
     evaluation: EvaluationConfig
     execution: ExecutionConfig
@@ -384,11 +393,31 @@ def _parse_config(raw: dict) -> ExperimentConfig:
         redis_stream_maxlen=redis_raw.get("stream_maxlen", 100_000),
     )
 
+    # Run
+    run_raw = raw.get("run", {})
+    if not run_raw:
+        raise ValueError(
+            "CONFIG ERROR: 'run' section is required. Must define trial, run_id, run_dir. "
+            "These cannot be set via CLI — the config is the single source of truth."
+        )
+    for req_field in ("trial", "run_id", "run_dir"):
+        if req_field not in run_raw or run_raw[req_field] is None:
+            raise ValueError(
+                f"CONFIG ERROR: run.{req_field} is required. "
+                f"The config is the single source of truth for run parameters."
+            )
+    run = RunConfig(
+        trial=int(run_raw["trial"]),
+        run_id=str(run_raw["run_id"]),
+        run_dir=str(run_raw["run_dir"]),
+    )
+
     return ExperimentConfig(
         experiment=experiment,
         models=models,
         conditions=conditions,
         cases=cases,
+        run=run,
         retry_defaults=retry_defaults,
         evaluation=evaluation,
         execution=execution,
