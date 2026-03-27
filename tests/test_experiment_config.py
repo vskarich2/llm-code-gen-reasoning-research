@@ -17,6 +17,7 @@ BASE = Path(__file__).resolve().parents[1]
 # HELPERS
 # ============================================================
 
+
 def _load_cases():
     cases_path = BASE / "cases_v2.json"
     return json.loads(cases_path.read_text(encoding="utf-8"))
@@ -35,6 +36,7 @@ def _load_case_with_contents(case):
 # CONFIG SNAPSHOT TESTS
 # ============================================================
 
+
 class TestConfigSnapshot:
     """Validate that the LEG ablation config matches expected values."""
 
@@ -50,6 +52,7 @@ class TestConfigSnapshot:
 
     def test_conditions_are_valid(self):
         from constants import VALID_CONDITIONS
+
         for cond in ["baseline", "leg_reduction"]:
             assert cond in VALID_CONDITIONS, f"{cond} not in VALID_CONDITIONS"
 
@@ -73,6 +76,7 @@ class TestConfigSnapshot:
 # ============================================================
 # DEGENERATE INPUT TESTS
 # ============================================================
+
 
 class TestNoDegenerateInputs:
     """Catch empty, truncated, or malformed case files."""
@@ -117,6 +121,7 @@ class TestNoDegenerateInputs:
 # PROMPT TEMPLATE TESTS
 # ============================================================
 
+
 class TestPromptTemplate:
     """Verify prompts are well-formed and contain expected content."""
 
@@ -128,6 +133,7 @@ class TestPromptTemplate:
 
     def test_baseline_prompt_contains_task(self, canary_case):
         from execution import build_prompt
+
         prompt, _ = build_prompt(canary_case, "baseline")
         assert isinstance(prompt, str)
         assert len(prompt) > 100, f"Prompt suspiciously short: {len(prompt)} chars"
@@ -136,6 +142,7 @@ class TestPromptTemplate:
 
     def test_baseline_prompt_contains_code(self, canary_case):
         from execution import build_prompt
+
         prompt, _ = build_prompt(canary_case, "baseline")
         for content in canary_case["code_files_contents"].values():
             snippet = content.strip()[:50]
@@ -145,16 +152,18 @@ class TestPromptTemplate:
         """leg_reduction builds its own prompt via build_leg_reduction_prompt, not build_prompt."""
         from execution import build_prompt
         from leg_reduction import build_leg_reduction_prompt
+
         bl_prompt, _ = build_prompt(canary_case, "baseline")
         lr_prompt = build_leg_reduction_prompt(
             canary_case["task"], canary_case["code_files_contents"]
         )
-        assert bl_prompt != lr_prompt, "Baseline and leg_reduction prompts are identical — intervention not applied"
+        assert (
+            bl_prompt != lr_prompt
+        ), "Baseline and leg_reduction prompts are identical — intervention not applied"
 
     def test_leg_reduction_prompt_nonempty(self, canary_case):
         from leg_reduction import build_leg_reduction_prompt
-        prompt = build_leg_reduction_prompt(
-            canary_case["task"], canary_case["code_files_contents"]
-        )
+
+        prompt = build_leg_reduction_prompt(canary_case["task"], canary_case["code_files_contents"])
         assert isinstance(prompt, str)
         assert len(prompt) > 100, f"LEG reduction prompt suspiciously short: {len(prompt)} chars"

@@ -70,21 +70,53 @@ _LATENT_KEYWORDS = {
 # GENERIC WORDS (filtered from critique accuracy matching)
 # ============================================================
 
-_GENERIC_WORDS = frozenset({
-    "value", "list", "index", "error", "function", "code", "line",
-    "variable", "return", "should", "does", "instead", "because",
-    "need", "change", "update", "method", "class", "object", "type",
-    "result", "data", "input", "output", "true", "false", "none",
-    "with", "from", "that", "this", "have", "been", "will", "when",
-})
+_GENERIC_WORDS = frozenset(
+    {
+        "value",
+        "list",
+        "index",
+        "error",
+        "function",
+        "code",
+        "line",
+        "variable",
+        "return",
+        "should",
+        "does",
+        "instead",
+        "because",
+        "need",
+        "change",
+        "update",
+        "method",
+        "class",
+        "object",
+        "type",
+        "result",
+        "data",
+        "input",
+        "output",
+        "true",
+        "false",
+        "none",
+        "with",
+        "from",
+        "that",
+        "this",
+        "have",
+        "been",
+        "will",
+        "when",
+    }
+)
 
 
 # ============================================================
 # PURE HELPER FUNCTIONS
 # ============================================================
 
-def _select_best_code(strict_code: str, fallback_code: str
-                      ) -> tuple[str, str, bool, dict]:
+
+def _select_best_code(strict_code: str, fallback_code: str) -> tuple[str, str, bool, dict]:
     """Select best code from strict and fallback extraction candidates.
 
     Returns (selected_code, extraction_source, extraction_conflict, extraction_candidates).
@@ -129,7 +161,7 @@ def _select_best_code(strict_code: str, fallback_code: str
     # C2: Filter to non-trivial
     nontrivial = []
     for src, code in valid:
-        has_def = 'def ' in code or 'class ' in code
+        has_def = "def " in code or "class " in code
         long_enough = len(code.strip()) >= 50
         if has_def and long_enough:
             nontrivial.append((src, code))
@@ -155,19 +187,26 @@ def _compute_diff(old_code, new_code):
     edit_dispersion = 1/hunks (PROXY metric, not true locality).
     """
     if not old_code or not new_code:
-        return {"lines_changed": 0, "chars_changed": 0, "hunks": 0,
-                "diff_text": "", "edit_dispersion": 1.0}
+        return {
+            "lines_changed": 0,
+            "chars_changed": 0,
+            "hunks": 0,
+            "diff_text": "",
+            "edit_dispersion": 1.0,
+        }
 
     old_lines = old_code.splitlines(keepends=True)
     new_lines = new_code.splitlines(keepends=True)
     diff = list(difflib.unified_diff(old_lines, new_lines, n=0))
 
-    lines_changed = sum(1 for l in diff if l.startswith(('+', '-'))
-                        and not l.startswith(('+++', '---')))
-    chars_changed = (sum(1 for a, b in zip(old_code, new_code) if a != b)
-                     + abs(len(new_code) - len(old_code)))
+    lines_changed = sum(
+        1 for l in diff if l.startswith(("+", "-")) and not l.startswith(("+++", "---"))
+    )
+    chars_changed = sum(1 for a, b in zip(old_code, new_code) if a != b) + abs(
+        len(new_code) - len(old_code)
+    )
 
-    hunks = sum(1 for l in diff if l.startswith('@@'))
+    hunks = sum(1 for l in diff if l.startswith("@@"))
     edit_dispersion = round(1.0 / max(hunks, 1), 3)
 
     return {
@@ -319,6 +358,7 @@ def _estimate_reasoning_validity(critique, reasoning_k, case, raw_output, trajec
 # TRAJECTORY HELPERS (new — trajectory-aware analysis)
 # ============================================================
 
+
 def _detect_latent_signal(reasoning_k, code_passed):
     """Detect when model 'knows the answer' but fails to execute."""
     if code_passed:
@@ -351,8 +391,11 @@ def _compute_transition_entropy(transitions):
 
 def _count_reversals(scores):
     """Count score direction changes."""
-    return sum(1 for i in range(2, len(scores))
-               if (scores[i - 1] - scores[i - 2]) * (scores[i] - scores[i - 1]) < 0)
+    return sum(
+        1
+        for i in range(2, len(scores))
+        if (scores[i - 1] - scores[i - 2]) * (scores[i] - scores[i - 1]) < 0
+    )
 
 
 def _run_lengths(sequence):
@@ -374,19 +417,31 @@ def _run_lengths(sequence):
 def _classify_trajectory_dynamics(trajectory):
     """ANALYSIS ONLY — classify trajectory pattern. NOT used for control."""
     if len(trajectory) <= 1:
-        return {"pattern": "single_shot", "oscillation": False,
-                "divergence": False, "stagnation": False, "convergence": False,
-                "score_reversals": 0, "type_changes": 0, "max_consecutive_similar": 0}
+        return {
+            "pattern": "single_shot",
+            "oscillation": False,
+            "divergence": False,
+            "stagnation": False,
+            "convergence": False,
+            "score_reversals": 0,
+            "type_changes": 0,
+            "max_consecutive_similar": 0,
+        }
 
     scores = [e["score"] for e in trajectory]
     types = [e.get("failure_type") for e in trajectory if not e["pass"]]
-    sims = [e.get("similarity_to_previous") for e in trajectory[1:]
-            if e.get("similarity_to_previous") is not None]
+    sims = [
+        e.get("similarity_to_previous")
+        for e in trajectory[1:]
+        if e.get("similarity_to_previous") is not None
+    ]
 
     reversals = _count_reversals(scores)
     oscillation = reversals >= 2
 
-    type_changes = sum(1 for i in range(1, len(types)) if types[i] != types[i - 1]) if len(types) > 1 else 0
+    type_changes = (
+        sum(1 for i in range(1, len(types)) if types[i] != types[i - 1]) if len(types) > 1 else 0
+    )
     no_improvement = scores[-1] <= scores[0]
     divergence = type_changes >= 2 and no_improvement
 
@@ -414,10 +469,14 @@ def _classify_trajectory_dynamics(trajectory):
         pattern = "UNCLASSIFIED"
 
     return {
-        "pattern": pattern, "oscillation": oscillation,
-        "divergence": divergence, "stagnation": stagnation,
-        "convergence": convergence, "score_reversals": reversals,
-        "type_changes": type_changes, "max_consecutive_similar": max_stag,
+        "pattern": pattern,
+        "oscillation": oscillation,
+        "divergence": divergence,
+        "stagnation": stagnation,
+        "convergence": convergence,
+        "score_reversals": reversals,
+        "type_changes": type_changes,
+        "max_consecutive_similar": max_stag,
     }
 
 
@@ -462,8 +521,12 @@ def _compute_failure_persistence(failure_type_sequence, error_messages=None):
     """Measures how stuck the model is on one failure type. Robust to classifier noise."""
     types = [t for t in failure_type_sequence if t is not None]
     if not types:
-        return {"longest_run": 0, "dominant_fraction": 0.0,
-                "dominant_type": None, "unknown_rate": 0.0}
+        return {
+            "longest_run": 0,
+            "dominant_fraction": 0.0,
+            "dominant_type": None,
+            "unknown_rate": 0.0,
+        }
 
     unknown_count = sum(1 for t in types if t == "UNKNOWN")
 
@@ -475,7 +538,11 @@ def _compute_failure_persistence(failure_type_sequence, error_messages=None):
             if corrected[i] == "UNKNOWN" and i < len(msgs):
                 for j in range(i - 1, -1, -1):
                     if corrected[j] != "UNKNOWN" and j < len(msgs):
-                        if msgs[j] and msgs[i] and SequenceMatcher(None, msgs[j], msgs[i]).ratio() > 0.8:
+                        if (
+                            msgs[j]
+                            and msgs[i]
+                            and SequenceMatcher(None, msgs[j], msgs[i]).ratio() > 0.8
+                        ):
                             corrected[i] = corrected[j]
                         break
 
@@ -540,6 +607,7 @@ def _eval_parse_rate(trajectory, error_field):
 def _compute_eval_bias(trajectory):
     """Wrapper for compute_evaluator_bias."""
     from leg_evaluator import compute_evaluator_bias
+
     return compute_evaluator_bias(trajectory)
 
 
@@ -549,20 +617,37 @@ def _compute_eval_bias(trajectory):
 
 ALIGNMENT_THRESHOLD = 0.5
 
-_ACTION_TOKENS = frozenset([
-    '=', 'copy(', 'if ', 'for ', 'append(', 'return ', 'raise ',
-    '.pop(', '.get(', '.update(', '.insert(', 'del ', 'import ',
-    'try:', 'except', 'with ', '.clear(', '.add(',
-])
+_ACTION_TOKENS = frozenset(
+    [
+        "=",
+        "copy(",
+        "if ",
+        "for ",
+        "append(",
+        "return ",
+        "raise ",
+        ".pop(",
+        ".get(",
+        ".update(",
+        ".insert(",
+        "del ",
+        "import ",
+        "try:",
+        "except",
+        "with ",
+        ".clear(",
+        ".add(",
+    ]
+)
 
 
 def _extract_plan(raw_output):
     """Extract structured plan from model output."""
-    plan_match = re.search(r'PLAN:\s*\n((?:\d+\..*\n?)+)', raw_output)
-    invariant_match = re.search(r'INVARIANT:\s*(.*)', raw_output)
+    plan_match = re.search(r"PLAN:\s*\n((?:\d+\..*\n?)+)", raw_output)
+    invariant_match = re.search(r"INVARIANT:\s*(.*)", raw_output)
     if not plan_match:
         return None
-    steps = re.findall(r'\d+\.\s*(.*)', plan_match.group(1))
+    steps = re.findall(r"\d+\.\s*(.*)", plan_match.group(1))
     if not steps:
         return None
     invariant = invariant_match.group(1).strip() if invariant_match else None
@@ -571,10 +656,23 @@ def _extract_plan(raw_output):
 
 def _extract_action_keywords(step_text):
     """Extract semantic action keywords from a plan step."""
-    cleaned = re.sub(r'\b(in|the|a|an|to|of|for|and|or|by|with|from)\b', '', step_text.lower())
-    words = re.findall(r'[a-zA-Z_]\w{3,}', cleaned)
-    generic = {'should', 'must', 'need', 'change', 'update', 'make', 'ensure',
-               'function', 'method', 'variable', 'code', 'line', 'file'}
+    cleaned = re.sub(r"\b(in|the|a|an|to|of|for|and|or|by|with|from)\b", "", step_text.lower())
+    words = re.findall(r"[a-zA-Z_]\w{3,}", cleaned)
+    generic = {
+        "should",
+        "must",
+        "need",
+        "change",
+        "update",
+        "make",
+        "ensure",
+        "function",
+        "method",
+        "variable",
+        "code",
+        "line",
+        "file",
+    }
     return [w for w in words if w not in generic]
 
 
@@ -663,6 +761,7 @@ def _classify_failure_trajectory(failure_sequence):
 # CLASSIFIERS (post-hoc)
 # ============================================================
 
+
 def _classify_outcome(trajectory):
     """What happened: convergence dynamics."""
     n = len(trajectory)
@@ -722,18 +821,24 @@ def _classify_regime(trajectory):
     avg_diff = sum(d["chars_changed"] for d in diffs) / len(diffs) if diffs else 0
     diff_small = avg_diff < 100
 
-    r_signals = [e.get("reasoning_signals", {}).get("estimated_valid")
-                 for e in trajectory if e.get("reasoning_signals")]
+    r_signals = [
+        e.get("reasoning_signals", {}).get("estimated_valid")
+        for e in trajectory
+        if e.get("reasoning_signals")
+    ]
     r_valid = [s for s in r_signals if s is not None]
     reasoning_consistent = all(r_valid) if r_valid else False
 
     # Only valid critiques count
-    critiques = [e["critique"] for e in trajectory
-                 if e.get("critique") and e["critique"].get("_valid")]
+    critiques = [
+        e["critique"] for e in trajectory if e.get("critique") and e["critique"].get("_valid")
+    ]
     if len(critiques) >= 2:
         root_causes = [c.get("root_cause", "") for c in critiques]
-        pairwise = [_keyword_overlap(root_causes[i], root_causes[i + 1])
-                    for i in range(len(root_causes) - 1)]
+        pairwise = [
+            _keyword_overlap(root_causes[i], root_causes[i + 1])
+            for i in range(len(root_causes) - 1)
+        ]
         critique_consistent = sum(pairwise) / len(pairwise) > 0.3
     else:
         critique_consistent = True
@@ -762,6 +867,7 @@ def _classify_regime(trajectory):
 # ============================================================
 # METRICS
 # ============================================================
+
 
 def _compute_metrics(trajectory):
     """Compute retry metrics from trajectory."""
@@ -792,9 +898,11 @@ def _compute_metrics(trajectory):
         "retry_efficiency": round(1.0 / n, 3) if converged else 0.0,
         "error_entropy": round(error_entropy, 3),
         "score_trajectory": scores,
-        "stagnated": (n > 1 and bool(diffs) and
-                      _is_stagnated(diffs[-1], scores[-1],
-                                    scores[-2] if n > 1 else 0)),
+        "stagnated": (
+            n > 1
+            and bool(diffs)
+            and _is_stagnated(diffs[-1], scores[-1], scores[-2] if n > 1 else 0)
+        ),
     }
 
 
@@ -815,12 +923,18 @@ def _compute_critique_accuracy(trajectory):
         total += 1
 
         root_cause = critique.get("root_cause", "")
-        cause_words = {w.lower() for w in re.findall(r'[a-zA-Z_]\w{3,}', root_cause)
-                       if w.lower() not in _GENERIC_WORDS}
+        cause_words = {
+            w.lower()
+            for w in re.findall(r"[a-zA-Z_]\w{3,}", root_cause)
+            if w.lower() not in _GENERIC_WORDS
+        }
 
         diff_text = next_diff["diff_text"]
-        diff_words = {w.lower() for w in re.findall(r'[a-zA-Z_]\w{3,}', diff_text)
-                      if w.lower() not in _GENERIC_WORDS}
+        diff_words = {
+            w.lower()
+            for w in re.findall(r"[a-zA-Z_]\w{3,}", diff_text)
+            if w.lower() not in _GENERIC_WORDS
+        }
 
         if cause_words & diff_words:
             hits += 1
@@ -831,6 +945,7 @@ def _compute_critique_accuracy(trajectory):
 # ============================================================
 # LLM-TOUCHING FUNCTIONS
 # ============================================================
+
 
 def _call_critique(model, code_k, error_obj, ev):
     """Separate model call for structured failure diagnosis.
@@ -867,9 +982,12 @@ Respond with ONLY this JSON (no other text):
         return result
     except Exception:
         return {
-            "failure_type": "unknown", "root_cause": "unparseable",
-            "invariant_violated": "unknown", "confidence": 0.0,
-            "is_reasoning_error": None, "_valid": False,
+            "failure_type": "unknown",
+            "root_cause": "unparseable",
+            "invariant_violated": "unknown",
+            "confidence": 0.0,
+            "is_reasoning_error": None,
+            "_valid": False,
         }
 
 
@@ -912,16 +1030,26 @@ def _build_initial_prompt(case, use_alignment=False):
     return base
 
 
-def _build_retry_prompt(case, original_code, prev_code, test_output, critique, contract,
-                        adaptive_hint=None, trajectory_context=None,
-                        use_alignment=False):
+def _build_retry_prompt(
+    case,
+    original_code,
+    prev_code,
+    test_output,
+    critique,
+    contract,
+    adaptive_hint=None,
+    trajectory_context=None,
+    use_alignment=False,
+):
     """Retry prompt with test feedback, critique, optional contract/hints."""
     parts = [case["task"]]
     parts.append(f"\n=== Original Code ===\n{original_code}")
     parts.append(f"\n=== Your Previous Attempt ===\n```python\n{prev_code}\n```")
     parts.append(f"\n=== Test Results (FAILED) ===\n{test_output}")
     if critique:
-        parts.append(f"\n=== Diagnosis ===\n{json.dumps(_clean_critique_for_log(critique), indent=2)}")
+        parts.append(
+            f"\n=== Diagnosis ===\n{json.dumps(_clean_critique_for_log(critique), indent=2)}"
+        )
     if contract:
         parts.append(f"\n=== Your Intended Fix ===\n{json.dumps(contract, indent=2)}")
     if adaptive_hint:
@@ -940,8 +1068,8 @@ def _build_retry_prompt(case, original_code, prev_code, test_output, critique, c
 # LOGGING
 # ============================================================
 
-def _write_iteration_log(case, model, k, max_iterations, condition,
-                         prompt, raw, parsed, ev, entry):
+
+def _write_iteration_log(case, model, k, max_iterations, condition, prompt, raw, parsed, ev, entry):
     """Write one iteration via the active RunLogger."""
     from execution import get_run_logger, get_model_config as _gmc
 
@@ -952,8 +1080,11 @@ def _write_iteration_log(case, model, k, max_iterations, condition,
 
     record = {
         "run_id": logger.run_id,
-        "case_id": case["id"], "condition": condition, "model": model,
-        "iteration": k, "max_iterations": max_iterations,
+        "case_id": case["id"],
+        "condition": condition,
+        "model": model,
+        "iteration": k,
+        "max_iterations": max_iterations,
         "model_config": _gmc(),
         "prompt_length": len(prompt),
         "raw_response_length": len(raw),
@@ -964,7 +1095,8 @@ def _write_iteration_log(case, model, k, max_iterations, condition,
         },
         "execution": ev.get("execution", {}),
         "evaluation": {
-            "pass": ev["pass"], "score": ev["score"],
+            "pass": ev["pass"],
+            "score": ev["score"],
             "reasoning_valid": ev.get("identified_correct_issue", False),
             "alignment": ev.get("alignment", {}),
         },
@@ -972,14 +1104,20 @@ def _write_iteration_log(case, model, k, max_iterations, condition,
 
     prompt_record = {
         "run_id": logger.run_id,
-        "case_id": case["id"], "condition": condition, "model": model,
-        "iteration": k, "prompt": prompt,
+        "case_id": case["id"],
+        "condition": condition,
+        "model": model,
+        "iteration": k,
+        "prompt": prompt,
     }
 
     response_record = {
         "run_id": logger.run_id,
-        "case_id": case["id"], "condition": condition, "model": model,
-        "iteration": k, "raw_response": raw,
+        "case_id": case["id"],
+        "condition": condition,
+        "model": model,
+        "iteration": k,
+        "raw_response": raw,
     }
 
     # Model mismatch check — same as RunLogger.write but for the manual path
@@ -989,17 +1127,18 @@ def _write_iteration_log(case, model, k, max_iterations, condition,
             f"write model='{model}'. Cross-run contamination detected."
         )
 
-    for path, data in [(logger.log_path, record),
-                        (logger.prompts_path, prompt_record),
-                        (logger.responses_path, response_record)]:
+    for path, data in [
+        (logger.log_path, record),
+        (logger.prompts_path, prompt_record),
+        (logger.responses_path, response_record),
+    ]:
         logger.writes_attempted += 1
         try:
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(data, default=str) + "\n")
         except OSError as e:
             logger.writes_failed += 1
-            _log.error("LOG WRITE FAILED for %s/%s to %s: %s",
-                       case["id"], condition, path, e)
+            _log.error("LOG WRITE FAILED for %s/%s to %s: %s", case["id"], condition, path, e)
 
 
 def _write_retry_summary(case, model, condition, summary):
@@ -1014,9 +1153,17 @@ def _write_retry_summary(case, model, condition, summary):
 # MAIN LOOP
 # ============================================================
 
-def run_retry_harness(case, model, max_iterations=5, use_contract=False,
-                      use_adaptive=False, use_alignment=False,
-                      use_llm_eval=False, eval_model=None):
+
+def run_retry_harness(
+    case,
+    model,
+    max_iterations=5,
+    use_contract=False,
+    use_adaptive=False,
+    use_alignment=False,
+    use_llm_eval=False,
+    eval_model=None,
+):
     """Run retry harness. Returns (case_id, condition, ev).
 
     A scientific measurement instrument for reasoning-execution dynamics.
@@ -1045,8 +1192,13 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
     # Contract (elicited upfront, used only on k>0)
     contract = None
     if use_contract:
-        set_call_context(phase="generation", case_id=case["id"],
-                         condition=condition, attempt_index=0, step="elicit_contract")
+        set_call_context(
+            phase="generation",
+            case_id=case["id"],
+            condition=condition,
+            attempt_index=0,
+            step="elicit_contract",
+        )
         contract = _elicit_contract(case, model)
         model_call_count += 1
 
@@ -1064,8 +1216,7 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
         # Wallclock safety
         elapsed = time.monotonic() - total_start
         if elapsed > MAX_TOTAL_SECONDS:
-            _log.warning("TIMEOUT for %s after %.1fs at iteration %d",
-                         case["id"], elapsed, k)
+            _log.warning("TIMEOUT for %s after %.1fs at iteration %d", case["id"], elapsed, k)
             break
 
         # --- Generate ---
@@ -1073,7 +1224,11 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
             prompt = _build_initial_prompt(case, use_alignment=use_alignment)
         else:
             prompt = _build_retry_prompt(
-                case, original_code, prev_code, test_output, critique,
+                case,
+                original_code,
+                prev_code,
+                test_output,
+                critique,
                 contract,  # None if use_contract=False
                 adaptive_hint=adaptive_hint,
                 trajectory_context=trajectory_context,
@@ -1082,17 +1237,21 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
 
         iter_start = time.monotonic()
         from call_logger import set_call_context
-        set_call_context(phase="generation", case_id=case["id"],
-                         condition=condition, attempt_index=k)
+
+        set_call_context(
+            phase="generation", case_id=case["id"], condition=condition, attempt_index=k
+        )
         raw = call_model(prompt, model=model)
         model_call_count += 1
         iter_elapsed = time.monotonic() - iter_start
         if iter_elapsed > MAX_ITERATION_SECONDS:
-            _log.warning("SLOW ITERATION for %s: %.1fs at iteration %d",
-                         case["id"], iter_elapsed, k)
+            _log.warning(
+                "SLOW ITERATION for %s: %.1fs at iteration %d", case["id"], iter_elapsed, k
+            )
 
         # --- Evaluate through canonical pipeline ---
         from execution import evaluate_case, _propagate_observability
+
         case["_condition"] = condition
         parsed_result, ev = evaluate_case(case, raw)
         _propagate_observability(parsed_result, ev)
@@ -1105,6 +1264,7 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
         plan_steps = []
         try:
             import json as _json
+
             raw_json = _json.loads(raw) if raw.strip().startswith("{") else {}
             if isinstance(raw_json, dict) and isinstance(raw_json.get("plan"), list):
                 plan_steps = raw_json["plan"]
@@ -1120,8 +1280,9 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
         # --- Critique (only on failure, not on last iteration) ---
         critique = None
         if not ev["pass"] and k < max_iterations - 1:
-            set_call_context(phase="critique", case_id=case["id"],
-                             condition=condition, attempt_index=k)
+            set_call_context(
+                phase="critique", case_id=case["id"], condition=condition, attempt_index=k
+            )
             critique = _call_critique(model, code_k, error_obj, ev)
             model_call_count += 1
 
@@ -1129,6 +1290,7 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
         classification = None
         if not ev["pass"]:
             from failure_classifier import classify_failure
+
             classification = classify_failure(error_obj, critique)
 
         # --- Reasoning signals ---
@@ -1153,8 +1315,7 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
             prev_type = trajectory[-1].get("failure_type") if trajectory else None
 
             # Control 1: Same failure repeating (with error message fallback)
-            types_match = (current_type and current_type == prev_type
-                           and current_type != "UNKNOWN")
+            types_match = current_type and current_type == prev_type and current_type != "UNKNOWN"
             if not types_match and (not current_type or current_type == "UNKNOWN"):
                 prev_msg = trajectory[-1].get("error", {}).get("message", "")
                 curr_msg = error_obj.get("message", "")
@@ -1194,16 +1355,23 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
                         f"The same failure ({current_type}) has persisted for "
                         f"{consecutive_same_failure + 1} attempts. "
                         f"Your previous approaches are not working. "
-                        f"Try a fundamentally different strategy.")
+                        f"Try a fundamentally different strategy."
+                    )
                 elif consecutive_high_sim >= PERSISTENCE_ESCALATION_COUNT:
                     trajectory_context = (
                         "Your last attempts produced nearly identical code. "
                         "You must make a meaningfully different change. "
-                        "Reconsider your assumptions about the root cause.")
-                elif k >= 2 and not score_improving and ev["score"] <= trajectory[-2].get("score", 0) + SCORE_EPSILON:
+                        "Reconsider your assumptions about the root cause."
+                    )
+                elif (
+                    k >= 2
+                    and not score_improving
+                    and ev["score"] <= trajectory[-2].get("score", 0) + SCORE_EPSILON
+                ):
                     trajectory_context = (
                         "Your score has not improved in the last 2 attempts. "
-                        "Consider a broader approach to the problem.")
+                        "Consider a broader approach to the problem."
+                    )
 
         # --- Trajectory entry ---
         entry = {
@@ -1225,13 +1393,19 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
             "similarity_to_previous": attempt_similarity,
             "attempt_progress": round(k / max_iterations, 3),
             "classification": classification,
-            "intervention": {
-                "type": hint_used_type,
-                "confidence": classification["classifier_confidence"] if classification else None,
-                "applied": adaptive_hint is not None and hint_used_type != "DEFAULT",
-                "hint_text": adaptive_hint,
-                "trajectory_context": trajectory_context,
-            } if use_adaptive and not ev["pass"] else None,
+            "intervention": (
+                {
+                    "type": hint_used_type,
+                    "confidence": (
+                        classification["classifier_confidence"] if classification else None
+                    ),
+                    "applied": adaptive_hint is not None and hint_used_type != "DEFAULT",
+                    "hint_text": adaptive_hint,
+                    "trajectory_context": trajectory_context,
+                }
+                if use_adaptive and not ev["pass"]
+                else None
+            ),
             "hint_used_type": hint_used_type,
             "latent_signal": latent_signal,
             # Schema compliance
@@ -1262,22 +1436,27 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
                     entry["alignment_per_step"] = alignment["per_step"]
 
                     # Structured alignment feedback for retry prompt
-                    if not ev["pass"] and not alignment["alignment_success"] and k < max_iterations - 1:
+                    if (
+                        not ev["pass"]
+                        and not alignment["alignment_success"]
+                        and k < max_iterations - 1
+                    ):
                         missing = [s["step"] for s in alignment["per_step"] if not s["implemented"]]
                         if missing:
                             trajectory_context = (
                                 f"Your plan has {len(alignment['per_step'])} steps, "
                                 f"but only {alignment['step_coverage']:.0%} are implemented.\n\n"
-                                f"Missing steps:\n" +
-                                "\n".join(f"- {s}" for s in missing[:3]) +
-                                "\n\nImplement ALL steps in your code."
+                                f"Missing steps:\n"
+                                + "\n".join(f"- {s}" for s in missing[:3])
+                                + "\n\nImplement ALL steps in your code."
                             )
 
         trajectory.append(entry)
 
         # --- Log iteration ---
-        _write_iteration_log(case, model, k, max_iterations, condition,
-                             prompt, raw, parsed_result, ev, entry)
+        _write_iteration_log(
+            case, model, k, max_iterations, condition, prompt, raw, parsed_result, ev, entry
+        )
 
         # --- ANALYSIS logging (observations, NOT stop conditions) ---
         if k >= 2:
@@ -1308,38 +1487,56 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
     # --- Handle edge case: loop never ran (timeout at k=0) ---
     if ev is None:
         ev = {
-            "pass": False, "score": 0.0,
+            "pass": False,
+            "score": 0.0,
             "reasons": ["timeout_before_first_iteration"],
             "execution": {"status": "error", "ran": False},
         }
 
     # --- LEG EVALUATION (post-hoc, gated by use_llm_eval) ---
     if use_llm_eval and trajectory:
-        from leg_evaluator import evaluate_reasoning, compute_leg_true, compute_reasoning_matches_truth
+        from leg_evaluator import (
+            evaluate_reasoning,
+            compute_leg_true,
+            compute_reasoning_matches_truth,
+        )
+
         for entry in trajectory:
             if not entry["pass"] and entry.get("reasoning"):
                 ft = entry.get("classifier_failure_type") or (
-                    entry.get("classification", {}) or {}).get("failure_type_final")
+                    entry.get("classification", {}) or {}
+                ).get("failure_type_final")
 
                 if not entry.get("code") or not entry["code"].strip():
                     _log.warning(
                         "LEG EVAL with EMPTY CODE for %s iter %d — "
                         "evaluator will judge reasoning without seeing code",
-                        case["id"], entry.get("attempt", -1)
+                        case["id"],
+                        entry.get("attempt", -1),
                     )
 
                 blind = evaluate_reasoning(
-                    model, entry["reasoning"], entry["code"],
-                    entry["error"], blind=True, eval_model=eval_model)
+                    model,
+                    entry["reasoning"],
+                    entry["code"],
+                    entry["error"],
+                    blind=True,
+                    eval_model=eval_model,
+                )
                 entry["llm_eval_blind_verdict"] = blind["verdict"]
                 entry["llm_eval_blind_type"] = blind["inferred_type"]
                 entry["llm_eval_blind_raw"] = blind["raw"]
                 entry["llm_eval_blind_parse_error"] = blind["parse_error"]
 
                 conditioned = evaluate_reasoning(
-                    model, entry["reasoning"], entry["code"],
-                    entry["error"], classifier_type=ft, blind=False,
-                    eval_model=eval_model)
+                    model,
+                    entry["reasoning"],
+                    entry["code"],
+                    entry["error"],
+                    classifier_type=ft,
+                    blind=False,
+                    eval_model=eval_model,
+                )
                 entry["llm_eval_conditioned_verdict"] = conditioned["verdict"]
                 entry["llm_eval_conditioned_type"] = conditioned["inferred_type"]
                 entry["llm_eval_conditioned_raw"] = conditioned["raw"]
@@ -1390,10 +1587,20 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
     # Derived analysis signals
     failure_seq = [t for t in ft_seq if t is not None]
     transitions = _compute_transitions(failure_seq)
-    dynamics = _classify_trajectory_dynamics(trajectory) if len(trajectory) > 1 else {
-        "pattern": "single_shot", "oscillation": False, "divergence": False,
-        "stagnation": False, "convergence": False, "score_reversals": 0,
-        "type_changes": 0, "max_consecutive_similar": 0}
+    dynamics = (
+        _classify_trajectory_dynamics(trajectory)
+        if len(trajectory) > 1
+        else {
+            "pattern": "single_shot",
+            "oscillation": False,
+            "divergence": False,
+            "stagnation": False,
+            "convergence": False,
+            "score_reversals": 0,
+            "type_changes": 0,
+            "max_consecutive_similar": 0,
+        }
+    )
 
     # Trajectory metrics (ANALYSIS only)
     metrics["transition_entropy"] = _compute_transition_entropy(transitions)
@@ -1414,28 +1621,41 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
     failed_entries = [e for e in trajectory if not e["pass"] and e.get("classification")]
     classifier_coverage = {}
     if failed_entries:
-        confident = sum(1 for e in failed_entries if e["classification"]["classifier_confidence"] >= 0.5)
-        applied = sum(1 for e in trajectory if e.get("intervention", {}) and e["intervention"] and e["intervention"].get("applied"))
+        confident = sum(
+            1 for e in failed_entries if e["classification"]["classifier_confidence"] >= 0.5
+        )
+        applied = sum(
+            1
+            for e in trajectory
+            if e.get("intervention", {}) and e["intervention"] and e["intervention"].get("applied")
+        )
         types = Counter(e["classification"]["failure_type_final"] for e in failed_entries)
         classifier_coverage = {
             "total_classifications": len(failed_entries),
             "confident_predictions": confident,
             "confident_prediction_rate": round(confident / len(failed_entries), 3),
             "adaptive_applied_count": applied,
-            "adaptive_applied_rate": round(applied / len(failed_entries), 3) if failed_entries else 0,
+            "adaptive_applied_rate": (
+                round(applied / len(failed_entries), 3) if failed_entries else 0
+            ),
             "type_distribution": dict(types),
         }
 
     # Latent execution gap
-    latent_entries = [e for e in trajectory if e.get("latent_signal", {}).get("correct_pattern_in_reasoning")]
+    latent_entries = [
+        e for e in trajectory if e.get("latent_signal", {}).get("correct_pattern_in_reasoning")
+    ]
     latent_gap = {
         "latent_but_failed": sum(1 for e in latent_entries if not e["pass"]),
         "latent_and_succeeded": sum(1 for e in latent_entries if e["pass"]),
     }
 
     # Attempt diversity
-    sims = [e.get("similarity_to_previous") for e in trajectory[1:]
-            if e.get("similarity_to_previous") is not None]
+    sims = [
+        e.get("similarity_to_previous")
+        for e in trajectory[1:]
+        if e.get("similarity_to_previous") is not None
+    ]
     attempt_diversity = round(1.0 - sum(sims) / len(sims), 3) if sims else 0.0
 
     summary = {
@@ -1455,16 +1675,25 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
         "score_sequence": score_seq,
         "failure_type_sequence": ft_seq,
         "similarity_sequence": sim_seq,
-        "num_type_changes": sum(1 for i in range(1, len(failure_seq)) if failure_seq[i] != failure_seq[i - 1]) if len(failure_seq) > 1 else 0,
+        "num_type_changes": (
+            sum(1 for i in range(1, len(failure_seq)) if failure_seq[i] != failure_seq[i - 1])
+            if len(failure_seq) > 1
+            else 0
+        ),
         "num_score_reversals": _count_reversals(score_seq),
         "consecutive_same_failure_lengths": _run_lengths(ft_seq),
         # Derived analysis signals
         "error_trajectory": [e["error"]["category"] for e in trajectory],
         "error_trajectory_detailed": [
-            {"category": e["error"]["category"],
-             "message": e["error"]["message"][:200],
-             "invariant": (e["critique"].get("invariant_violated")
-                           if e.get("critique") and e.get("critique_valid") else None)}
+            {
+                "category": e["error"]["category"],
+                "message": e["error"]["message"][:200],
+                "invariant": (
+                    e["critique"].get("invariant_violated")
+                    if e.get("critique") and e.get("critique_valid")
+                    else None
+                ),
+            }
             for e in trajectory
         ],
         "failure_sequence": failure_seq,
@@ -1489,16 +1718,30 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
         # LEG metrics (populated if use_llm_eval)
         "leg_rate_true": _leg_rate(trajectory, "leg_true") if use_llm_eval else None,
         "leg_rate_keyword": _leg_rate(trajectory, "leg_keyword_only"),
-        "leg_resolution_rate_true": _leg_resolution(trajectory, "leg_true") if use_llm_eval else None,
-        "leg_coupling_rate": _leg_rate(trajectory, "leg_coupling") if use_llm_eval and use_alignment else None,
-        "leg_execution_rate": _leg_rate(trajectory, "leg_execution") if use_llm_eval and use_alignment else None,
-        "evaluator_parse_failure_rate_blind": _eval_parse_rate(trajectory, "llm_eval_blind_parse_error") if use_llm_eval else None,
-        "evaluator_parse_failure_rate_conditioned": _eval_parse_rate(trajectory, "llm_eval_conditioned_parse_error") if use_llm_eval else None,
+        "leg_resolution_rate_true": (
+            _leg_resolution(trajectory, "leg_true") if use_llm_eval else None
+        ),
+        "leg_coupling_rate": (
+            _leg_rate(trajectory, "leg_coupling") if use_llm_eval and use_alignment else None
+        ),
+        "leg_execution_rate": (
+            _leg_rate(trajectory, "leg_execution") if use_llm_eval and use_alignment else None
+        ),
+        "evaluator_parse_failure_rate_blind": (
+            _eval_parse_rate(trajectory, "llm_eval_blind_parse_error") if use_llm_eval else None
+        ),
+        "evaluator_parse_failure_rate_conditioned": (
+            _eval_parse_rate(trajectory, "llm_eval_conditioned_parse_error")
+            if use_llm_eval
+            else None
+        ),
         "evaluator_bias": _compute_eval_bias(trajectory) if use_llm_eval else None,
         # Schema compliance
-        "schema_compliance_rate": round(
-            sum(1 for e in trajectory if e.get("valid_schema")) / len(trajectory), 3
-        ) if trajectory else 0.0,
+        "schema_compliance_rate": (
+            round(sum(1 for e in trajectory if e.get("valid_schema")) / len(trajectory), 3)
+            if trajectory
+            else 0.0
+        ),
         # Standard
         "contract_used": use_contract,
         "contract": contract,
@@ -1506,13 +1749,11 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
         "critique_accuracy": critique_acc,
         "converged": ev["pass"],
         "iterations_to_success": (
-            next((i for i, e in enumerate(trajectory) if e["pass"]), None)
-            if ev["pass"] else None
+            next((i for i, e in enumerate(trajectory) if e["pass"]), None) if ev["pass"] else None
         ),
         "total_iterations_executed": iterations_executed,
         "total_model_calls": model_call_count,
-        "trajectory": [{k2: v for k2, v in e.items() if k2 != "code"}
-                       for e in trajectory],
+        "trajectory": [{k2: v for k2, v in e.items() if k2 != "code"} for e in trajectory],
     }
 
     _write_retry_summary(case, model, condition, summary)
@@ -1529,12 +1770,14 @@ def run_retry_harness(case, model, max_iterations=5, use_contract=False,
 
     # Write final iteration to run.jsonl and events.jsonl (V10 fix)
     from execution import write_log, _emit_metrics_event
+
     if trajectory:
         # Use last iteration's data for logging
         last_prompt = prompt  # loop variable from last iteration
-        last_raw = raw        # loop variable from last iteration
+        last_raw = raw  # loop variable from last iteration
         write_log(case["id"], condition, model, last_prompt, last_raw, parsed_result, ev)
-    _emit_metrics_event(case, model, condition, ev,
-                        elapsed_seconds=round(time.monotonic() - total_start, 2))
+    _emit_metrics_event(
+        case, model, condition, ev, elapsed_seconds=round(time.monotonic() - total_start, 2)
+    )
 
     return case["id"], condition, ev

@@ -23,8 +23,10 @@ BASE_DIR = Path(__file__).parent
 # EXCEPTIONS
 # ============================================================
 
+
 class TemplateError(Exception):
     """Base class for all template system errors."""
+
     pass
 
 
@@ -44,11 +46,12 @@ class TemplateExtraVarError(TemplateError):
 # TEMPLATE SPEC + REGISTRY
 # ============================================================
 
+
 @dataclass(frozen=True)
 class TemplateSpec:
     name: str
-    path: str                        # relative to project root (e.g., "templates/base.jinja2")
-    required_vars: frozenset[str]    # SOLE source of truth for variable requirements
+    path: str  # relative to project root (e.g., "templates/base.jinja2")
+    required_vars: frozenset[str]  # SOLE source of truth for variable requirements
 
 
 # Central registry -- every template the system uses MUST be registered here.
@@ -65,60 +68,102 @@ def register(spec: TemplateSpec) -> None:
 # REGISTERED TEMPLATES
 # ============================================================
 
-register(TemplateSpec(
-    name="base",
-    path="templates/base.jinja2",
-    required_vars=frozenset({"task", "code_files_block"}),
-))
+register(
+    TemplateSpec(
+        name="base",
+        path="templates/base.jinja2",
+        required_vars=frozenset({"task", "code_files_block"}),
+    )
+)
 
-register(TemplateSpec(
-    name="retry",
-    path="templates/retry.jinja2",
-    required_vars=frozenset({
-        "task", "code_files_block", "previous_code",
-        "test_output", "failure_reason", "step_number",
-    }),
-))
+register(
+    TemplateSpec(
+        name="retry",
+        path="templates/retry.jinja2",
+        required_vars=frozenset(
+            {
+                "task",
+                "code_files_block",
+                "previous_code",
+                "test_output",
+                "failure_reason",
+                "step_number",
+            }
+        ),
+    )
+)
 
-register(TemplateSpec(
-    name="repair_feedback",
-    path="templates/repair_feedback.jinja2",
-    required_vars=frozenset({
-        "task", "code_files_block", "error_reasons",
-    }),
-))
+register(
+    TemplateSpec(
+        name="repair_feedback",
+        path="templates/repair_feedback.jinja2",
+        required_vars=frozenset(
+            {
+                "task",
+                "code_files_block",
+                "error_reasons",
+            }
+        ),
+    )
+)
 
-register(TemplateSpec(
-    name="contract_elicit",
-    path="templates/contract_elicit.jinja2",
-    required_vars=frozenset({
-        "task", "code_files_block", "contract_schema",
-    }),
-))
+register(
+    TemplateSpec(
+        name="contract_elicit",
+        path="templates/contract_elicit.jinja2",
+        required_vars=frozenset(
+            {
+                "task",
+                "code_files_block",
+                "contract_schema",
+            }
+        ),
+    )
+)
 
-register(TemplateSpec(
-    name="contract_code",
-    path="templates/contract_code.jinja2",
-    required_vars=frozenset({
-        "task", "code_files_block", "contract_json",
-    }),
-))
+register(
+    TemplateSpec(
+        name="contract_code",
+        path="templates/contract_code.jinja2",
+        required_vars=frozenset(
+            {
+                "task",
+                "code_files_block",
+                "contract_json",
+            }
+        ),
+    )
+)
 
-register(TemplateSpec(
-    name="contract_retry",
-    path="templates/contract_retry.jinja2",
-    required_vars=frozenset({
-        "task", "code_files_block", "contract_json", "violations_text",
-    }),
-))
+register(
+    TemplateSpec(
+        name="contract_retry",
+        path="templates/contract_retry.jinja2",
+        required_vars=frozenset(
+            {
+                "task",
+                "code_files_block",
+                "contract_json",
+                "violations_text",
+            }
+        ),
+    )
+)
 
-register(TemplateSpec(
-    name="classify",
-    path="templates/classify.jinja2",
-    required_vars=frozenset({
-        "failure_types", "task", "code", "reasoning",
-    }),
-))
+register(
+    TemplateSpec(
+        name="classify",
+        path="templates/classify.jinja2",
+        required_vars=frozenset(
+            {
+                "failure_types",
+                "task",
+                "code",
+                "reasoning",
+            }
+        ),
+    )
+)
 
 
 # ============================================================
@@ -166,8 +211,7 @@ def init_template_hashes() -> dict[str, str]:
     global _template_hashes
     if _template_hashes is not None:
         raise RuntimeError(
-            "init_template_hashes() called twice. "
-            "Template hashes are immutable after startup."
+            "init_template_hashes() called twice. " "Template hashes are immutable after startup."
         )
 
     env = _get_env()
@@ -195,8 +239,7 @@ def get_template_hash(template_name: str) -> str:
         )
     if template_name not in _template_hashes:
         raise TemplateNotFoundError(
-            f"No hash for template '{template_name}'. "
-            f"Known: {sorted(_template_hashes.keys())}"
+            f"No hash for template '{template_name}'. " f"Known: {sorted(_template_hashes.keys())}"
         )
     return _template_hashes[template_name]
 
@@ -210,6 +253,7 @@ def _reset_template_hashes() -> None:
 # ============================================================
 # RENDER
 # ============================================================
+
 
 def render(template_name: str, variables: dict[str, str]) -> str:
     """Render a registered template with strict validation.
@@ -246,7 +290,10 @@ def render(template_name: str, variables: dict[str, str]) -> str:
 
     _tpl_log.info(
         "TEMPLATE LOADED: %s (hash=%s)\n  REQUIRED VARS: %s\n  PROVIDED VARS: %s",
-        spec.path, template_hash[:12], sorted(spec.required_vars), sorted(provided)
+        spec.path,
+        template_hash[:12],
+        sorted(spec.required_vars),
+        sorted(provided),
     )
 
     env = _get_env()
@@ -277,8 +324,10 @@ def render_with_metadata(template_name: str, variables: dict[str, str]) -> tuple
 # PROMPT LOGGING
 # ============================================================
 
-def log_rendered_prompt(template_name: str, template_hash: str,
-                        variables: dict, rendered: str) -> dict:
+
+def log_rendered_prompt(
+    template_name: str, template_hash: str, variables: dict, rendered: str
+) -> dict:
     """Build a prompt log record with full provenance.
 
     Returns the record dict. Caller writes it via RunLogger.
@@ -292,7 +341,10 @@ def log_rendered_prompt(template_name: str, template_hash: str,
     }
     _tpl_log.info(
         "PROMPT RENDERED: template=%s hash=%s vars=%s len=%d",
-        template_name, template_hash[:12], sorted(variables.keys()), len(rendered)
+        template_name,
+        template_hash[:12],
+        sorted(variables.keys()),
+        len(rendered),
     )
     return record
 
@@ -301,11 +353,24 @@ def log_rendered_prompt(template_name: str, template_hash: str,
 # TEMPLATE VALIDATION
 # ============================================================
 
-FORBIDDEN_TEMPLATE_TAGS = frozenset({
-    "for", "endfor", "macro", "endmacro", "call", "endcall",
-    "filter", "endfilter", "set", "block", "endblock",
-    "extends", "import", "from",
-})
+FORBIDDEN_TEMPLATE_TAGS = frozenset(
+    {
+        "for",
+        "endfor",
+        "macro",
+        "endmacro",
+        "call",
+        "endcall",
+        "filter",
+        "endfilter",
+        "set",
+        "block",
+        "endblock",
+        "extends",
+        "import",
+        "from",
+    }
+)
 
 
 def validate_template_allowed_logic(template_path: Path) -> None:
@@ -315,7 +380,7 @@ def validate_template_allowed_logic(template_path: Path) -> None:
     Forbidden: for, macro, set, block, extends, import, etc.
     """
     content = template_path.read_text()
-    tags = re.findall(r'\{%-?\s*(\w+)', content)
+    tags = re.findall(r"\{%-?\s*(\w+)", content)
     for tag in tags:
         if tag in FORBIDDEN_TEMPLATE_TAGS:
             raise TemplateError(
@@ -361,8 +426,7 @@ def preflight_validate_templates(config) -> None:
             tpl_name = getattr(cond_cfg, field)
             if tpl_name is not None and tpl_name not in TEMPLATE_REGISTRY:
                 raise TemplateError(
-                    f"Condition '{cond_name}'.{field} = '{tpl_name}' "
-                    f"not in TEMPLATE_REGISTRY"
+                    f"Condition '{cond_name}'.{field} = '{tpl_name}' " f"not in TEMPLATE_REGISTRY"
                 )
 
     # 5. Dry-render all templates with placeholder values to verify Jinja2 syntax
@@ -373,9 +437,7 @@ def preflight_validate_templates(config) -> None:
             placeholders = {var: f"__PLACEHOLDER_{var}__" for var in spec.required_vars}
             template.render(**placeholders)
         except Exception as e:
-            raise TemplateError(
-                f"Template '{name}' failed dry-render validation: {e}"
-            ) from e
+            raise TemplateError(f"Template '{name}' failed dry-render validation: {e}") from e
 
     # 6. Compute and store all template hashes (once, immutable)
     hashes = init_template_hashes()

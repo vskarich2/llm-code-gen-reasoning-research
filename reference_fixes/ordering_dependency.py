@@ -49,21 +49,25 @@ def run_steps(steps):
 
 def correct_order():
     reset()
-    run_steps([
-        (init, ()),
-        (process, ("a",)),
-        (process, ("b",)),
-        (shutdown, ()),
-    ])
+    run_steps(
+        [
+            (init, ()),
+            (process, ("a",)),
+            (process, ("b",)),
+            (shutdown, ()),
+        ]
+    )
     return get_log()
 
 
 def broken_order():
     reset()
-    run_steps([
-        (process, ("a",)),
-        (init, ()),
-        (process, ("b",)),
-        (shutdown, ()),
-    ])
+    run_steps(
+        [
+            (process, ("a",)),
+            (init, ()),
+            (process, ("b",)),
+            (shutdown, ()),
+        ]
+    )
     return get_log()

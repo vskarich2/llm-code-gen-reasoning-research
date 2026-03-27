@@ -10,6 +10,7 @@ Validates:
   7. Integration — full pipeline mock flow
   8. Rejection — invalid inputs caught explicitly
 """
+
 import sys
 import os
 import json
@@ -24,31 +25,43 @@ from leg_reduction import (
     MAX_INTERNAL_REVISIONS,
 )
 
-
 # ============================================================
 # HELPERS — build valid objects
 # ============================================================
 
+
 def _make_valid_single_revision():
     """A valid output with 1 revision (model got it right first try)."""
     v = [
-        {"step": "Add rollback in except", "status": "PASS", "evidence": "except block has balance += amount"},
+        {
+            "step": "Add rollback in except",
+            "status": "PASS",
+            "evidence": "except block has balance += amount",
+        },
     ]
     return {
         "bug_diagnosis": "Missing rollback after debit",
-        "plan_steps": [{"step": "Add rollback in except", "intended_effect": "restore balance on failure"}],
-        "revision_history": [{
-            "revision": 0,
-            "verification": v,
-            "invariants_checked": [
-                {"invariant": "balance conserved", "status": "PASS", "evidence": "except restores sender.balance"},
-            ],
-            "issues_found": [],
-            "changes_made": None,
-            "changed_functions": [],
-            "code_before": "def f(): pass",
-            "code_after": "def f(): return 1",
-        }],
+        "plan_steps": [
+            {"step": "Add rollback in except", "intended_effect": "restore balance on failure"}
+        ],
+        "revision_history": [
+            {
+                "revision": 0,
+                "verification": v,
+                "invariants_checked": [
+                    {
+                        "invariant": "balance conserved",
+                        "status": "PASS",
+                        "evidence": "except restores sender.balance",
+                    },
+                ],
+                "issues_found": [],
+                "changes_made": None,
+                "changed_functions": [],
+                "code_before": "def f(): pass",
+                "code_after": "def f(): return 1",
+            }
+        ],
         "verification": v,
         "code": "def f(): return 1",
         "internal_revisions": 0,
@@ -71,11 +84,19 @@ def _make_valid_two_revisions():
                 "revision": 0,
                 "verification": v0,
                 "invariants_checked": [
-                    {"invariant": "balance conserved", "status": "FAIL", "evidence": "no rollback path"},
+                    {
+                        "invariant": "balance conserved",
+                        "status": "FAIL",
+                        "evidence": "no rollback path",
+                    },
                 ],
                 "issues_found": [
-                    {"issue_id": "ISS-1", "description": "no except block", "evidence": "line 5 missing try",
-                     "related_invariant": "balance conserved"},
+                    {
+                        "issue_id": "ISS-1",
+                        "description": "no except block",
+                        "evidence": "line 5 missing try",
+                        "related_invariant": "balance conserved",
+                    },
                 ],
                 "changes_made": None,
                 "changed_functions": [],
@@ -86,11 +107,19 @@ def _make_valid_two_revisions():
                 "revision": 1,
                 "verification": v1,
                 "invariants_checked": [
-                    {"invariant": "balance conserved", "status": "PASS", "evidence": "except block present"},
+                    {
+                        "invariant": "balance conserved",
+                        "status": "PASS",
+                        "evidence": "except block present",
+                    },
                 ],
                 "issues_found": [],
                 "changes_made": [
-                    {"change_type": "add", "target": "execute_transfer", "description": "added try/except with rollback"},
+                    {
+                        "change_type": "add",
+                        "target": "execute_transfer",
+                        "description": "added try/except with rollback",
+                    },
                 ],
                 "changed_functions": ["execute_transfer"],
                 "code_before": "def f(): pass",
@@ -106,6 +135,7 @@ def _make_valid_two_revisions():
 # ============================================================
 # 1. SCHEMA COMPLIANCE
 # ============================================================
+
 
 def test_valid_single_revision_parses():
     raw = json.dumps(_make_valid_single_revision())
@@ -153,12 +183,11 @@ def test_verification_entry_requires_evidence():
     d = _make_valid_single_revision()
     # Remove evidence from both revision_history and top-level verification
     d["revision_history"][0]["verification"][0] = {
-        "step": "Add rollback in except", "status": "PASS"
+        "step": "Add rollback in except",
+        "status": "PASS",
         # evidence deliberately omitted
     }
-    d["verification"][0] = {
-        "step": "Add rollback in except", "status": "PASS"
-    }
+    d["verification"][0] = {"step": "Add rollback in except", "status": "PASS"}
     r = parse_leg_reduction_output(json.dumps(d))
     assert r["valid"] is False
     assert "evidence" in r["parse_error"]
@@ -192,6 +221,7 @@ def test_change_type_must_be_add_modify_delete():
 # ============================================================
 # 2. CAUSAL CONSISTENCY
 # ============================================================
+
 
 def test_no_op_revision_detected():
     """code_before == code_after with no changes → invalid."""
@@ -240,6 +270,7 @@ def test_revision_0_must_have_empty_changed_functions():
 # 3. REVISION ORDERING
 # ============================================================
 
+
 def test_revision_index_must_match_position():
     d = _make_valid_two_revisions()
     d["revision_history"][1]["revision"] = 5  # wrong index
@@ -260,6 +291,7 @@ def test_internal_revisions_must_match_history_length():
 # 4. TOP-LEVEL CONSISTENCY
 # ============================================================
 
+
 def test_top_level_verification_must_match_last_revision():
     d = _make_valid_single_revision()
     d["verification"] = [{"step": "WRONG STEP", "status": "PASS", "evidence": "wrong"}]
@@ -279,6 +311,7 @@ def test_top_level_code_must_match_last_code_after():
 # ============================================================
 # 5. ALL STEPS VERIFIED LOGIC
 # ============================================================
+
 
 def test_all_pass_means_verified():
     r = parse_leg_reduction_output(json.dumps(_make_valid_single_revision()))
@@ -304,9 +337,18 @@ def test_exceeded_max_revisions_flagged():
             "revision": i,
             "verification": d["verification"],
             "invariants_checked": d["revision_history"][0]["invariants_checked"],
-            "issues_found": [] if i == MAX_INTERNAL_REVISIONS + 1 else [
-                {"issue_id": f"ISS-{i}", "description": "still broken", "evidence": "...",
-                 "related_invariant": None}],
+            "issues_found": (
+                []
+                if i == MAX_INTERNAL_REVISIONS + 1
+                else [
+                    {
+                        "issue_id": f"ISS-{i}",
+                        "description": "still broken",
+                        "evidence": "...",
+                        "related_invariant": None,
+                    }
+                ]
+            ),
             "changes_made": [{"change_type": "modify", "target": "f", "description": "attempt"}],
             "changed_functions": ["f"],
             "code_before": f"v{i-1}",
@@ -321,6 +363,7 @@ def test_exceeded_max_revisions_flagged():
 # ============================================================
 # 6. JSON / PARSE EDGE CASES
 # ============================================================
+
 
 def test_empty_input_fails():
     r = parse_leg_reduction_output("")
@@ -356,6 +399,7 @@ def test_trailing_text_ok():
 # 7. BACKWARD COMPATIBILITY + INTEGRATION
 # ============================================================
 
+
 def test_prompt_contains_revision_history_schema():
     prompt = build_leg_reduction_prompt("Fix bug.", {"main.py": "x = 1"})
     assert "revision_history" in prompt
@@ -371,6 +415,7 @@ def test_prompt_contains_revision_history_schema():
 
 def test_leg_reduction_condition_registered():
     from runner import ALL_CONDITIONS, COND_LABELS, VALID_CONDITIONS
+
     assert "leg_reduction" in ALL_CONDITIONS
     assert "leg_reduction" in COND_LABELS
     assert "leg_reduction" in VALID_CONDITIONS
@@ -379,6 +424,7 @@ def test_leg_reduction_condition_registered():
 def test_leg_reduction_full_flow_mock():
     from execution import run_leg_reduction
     from runner import load_cases
+
     case = load_cases(case_id="l3_state_pipeline")[0]
     cid, cond, ev = run_leg_reduction(case, "gpt-4.1-nano")
     assert cid == "l3_state_pipeline"
@@ -386,7 +432,9 @@ def test_leg_reduction_full_flow_mock():
     assert "pass" in ev
     assert "score" in ev
     lr = ev["leg_reduction"]
-    assert lr["valid_schema"] is True, f"Schema invalid: {lr['parse_error']}, errors: {lr.get('validation_errors')}"
+    assert (
+        lr["valid_schema"] is True
+    ), f"Schema invalid: {lr['parse_error']}, errors: {lr.get('validation_errors')}"
     assert "revision_history" in lr
     assert len(lr["revision_history"]) >= 1
     assert "revision_count" in lr
@@ -396,6 +444,7 @@ def test_leg_reduction_full_flow_mock():
 def test_leg_reduction_mock_has_invariants():
     from execution import run_leg_reduction
     from runner import load_cases
+
     case = load_cases(case_id="l3_state_pipeline")[0]
     _, _, ev = run_leg_reduction(case, "gpt-4.1-nano")
     lr = ev["leg_reduction"]
@@ -411,16 +460,26 @@ def test_leg_reduction_mock_has_invariants():
 def test_leg_reduction_result_has_standard_eval_fields():
     from execution import run_leg_reduction
     from runner import load_cases
+
     case = load_cases(case_id="l3_state_pipeline")[0]
     _, _, ev = run_leg_reduction(case, "gpt-4.1-nano")
-    for field in ["pass", "score", "reasons", "failure_modes", "execution",
-                   "operator_used", "condition", "alignment"]:
+    for field in [
+        "pass",
+        "score",
+        "reasons",
+        "failure_modes",
+        "execution",
+        "operator_used",
+        "condition",
+        "alignment",
+    ]:
         assert field in ev, f"Missing standard eval field: {field}"
 
 
 def test_existing_baseline_still_works():
     from execution import run_single
     from runner import load_cases
+
     case = load_cases(case_id="l3_state_pipeline")[0]
     cid, cond, ev = run_single(case, "gpt-4.1-nano", "baseline")
     assert cid == "l3_state_pipeline"

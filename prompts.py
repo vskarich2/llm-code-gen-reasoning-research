@@ -34,7 +34,6 @@ STOP. Before returning your answer, perform a dependency reasoning_evaluator_aud
 Preserve sync_user_to_cache() in save_user.
 Explain which dependency you preserved and why.
 """,
-
     "TEMPORAL_CAUSAL_ERROR": """
 STOP. Before returning your answer, trace which data each function expects:
 
@@ -52,7 +51,6 @@ STOP. Before returning your answer, trace which data each function expects:
 Preserve: raw_stats on raw data, quality on cleaned data.
 Explain which ordering constraint you preserved.
 """,
-
     "INVARIANT_VIOLATION": """
 STOP. Before returning your answer, reason about the failure window:
 
@@ -71,7 +69,6 @@ STOP. Before returning your answer, reason about the failure window:
 Do NOT just add logging, retries, or reasoning_evaluator_audit calls.
 Explain what invariant you are protecting.
 """,
-
     "STATE_SEMANTIC_VIOLATION": """
 STOP. Before returning your answer, trace the state lifecycle:
 
@@ -119,7 +116,6 @@ MANDATORY CONSTRAINTS — you must follow ALL of these:
 If you cannot prove semantic equivalence, keep the original code.
 Return updated code only after verifying all constraints.
 """,
-
     "TEMPORAL_CAUSAL_ERROR": """
 MANDATORY CONSTRAINTS — you must follow ALL of these:
 
@@ -142,7 +138,6 @@ If you cannot prove that raw_stats still describes original data,
 keep the original pipeline structure.
 Return updated code only after verifying all constraints.
 """,
-
     "INVARIANT_VIOLATION": """
 MANDATORY CONSTRAINTS — you must follow ALL of these:
 
@@ -167,7 +162,6 @@ MANDATORY CONSTRAINTS — you must follow ALL of these:
 If your refactor does not include rollback or atomic assignment,
 it is wrong. Return code only after verifying.
 """,
-
     "STATE_SEMANTIC_VIOLATION": """
 MANDATORY CONSTRAINTS — you must follow ALL of these:
 
@@ -238,6 +232,7 @@ def _format_code_files_v1(code_files: dict[str, str]) -> str:
 def _format_code_files_v2(code_files: dict[str, str]) -> str:
     """V2 format: numbered FILE delimiters with full relative paths."""
     from pathlib import Path
+
     n = len(code_files)
     parts = []
     parts.append(f"## Codebase ({n} file{'s' if n != 1 else ''})")

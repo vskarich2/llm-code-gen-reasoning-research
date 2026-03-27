@@ -142,11 +142,13 @@ def parse_classify_output(raw: str) -> dict:
 def _get_eval_model() -> str:
     """Get evaluator model from config. No hardcoded fallback."""
     from experiment_config import get_config
+
     return get_config().models.evaluator.name
 
 
-def classify_parse_category(reasoning: str, parse_error: str | None,
-                             raw_fallback: bool = False) -> str:
+def classify_parse_category(
+    reasoning: str, parse_error: str | None, raw_fallback: bool = False
+) -> str:
     """Determine parse category for reasoning input.
 
     Returns one of: CLEAN, REASONING_LOST, CODE_LOST, PARTIAL_JSON_RECOVERED,
@@ -170,15 +172,23 @@ def classify_parse_category(reasoning: str, parse_error: str | None,
 
 
 # Categories where classification is disallowed (reasoning is unrecoverable)
-_CLASSIFICATION_DISALLOWED = frozenset({
-    "REASONING_LOST", "CODE_LOST", "STRUCTURE_MISSING",
-})
+_CLASSIFICATION_DISALLOWED = frozenset(
+    {
+        "REASONING_LOST",
+        "CODE_LOST",
+        "STRUCTURE_MISSING",
+    }
+)
 
 
-def llm_classify(case: dict, code: str, reasoning: str,
-                 eval_model: str | None = None,
-                 parse_error: str | None = None,
-                 raw_fallback: bool = False) -> dict:
+def llm_classify(
+    case: dict,
+    code: str,
+    reasoning: str,
+    eval_model: str | None = None,
+    parse_error: str | None = None,
+    raw_fallback: bool = False,
+) -> dict:
     """Run the LLM reasoning classifier on an attempt.
 
     Evaluates ONLY reasoning correctness. Does NOT judge code correctness.
@@ -215,7 +225,9 @@ def llm_classify(case: dict, code: str, reasoning: str,
         _log.warning(
             "PARSE GATE: skipping classification for case %s — "
             "parse_category=%s, parse_error=%s, reasoning empty=%s",
-            case.get("id", "?"), parse_cat, parse_error,
+            case.get("id", "?"),
+            parse_cat,
+            parse_error,
             not (reasoning and reasoning.strip()),
         )
         return {
@@ -230,21 +242,29 @@ def llm_classify(case: dict, code: str, reasoning: str,
 
     # Truncation limits from config
     from experiment_config import get_config
+
     eval_cfg = get_config().models.evaluator
-    prompt = _CLASSIFY_PROMPT.format(
-        failure_types=", ".join(sorted(FAILURE_TYPE_SET)),
-        task=case.get("task", "")[:eval_cfg.max_task_chars],
-        code=(code or "")[:eval_cfg.max_code_chars],
-        reasoning=(reasoning or "")[:eval_cfg.max_reasoning_chars],
-    )
+    _cls_vars = {
+        "failure_types": ", ".join(sorted(FAILURE_TYPE_SET)),
+        "task": case.get("task", "")[: eval_cfg.max_task_chars],
+        "code": (code or "")[: eval_cfg.max_code_chars],
+        "reasoning": (reasoning or "")[: eval_cfg.max_reasoning_chars],
+    }
+
+    # New path: AssemblyEngine
+    from assembly_engine import build as _assembly_build
+    _rendered = _assembly_build(["classify_reasoning"], _cls_vars)
+    prompt = _rendered.final_prompt
 
     # Evaluator model from config — no hardcoded fallback
     model = eval_model or _get_eval_model()
 
     try:
         from call_logger import set_call_context
-        set_call_context(phase="classifier", case_id=case.get("id", "?"),
-                         condition=case.get("_condition", "?"))
+
+        set_call_context(
+            phase="classifier", case_id=case.get("id", "?"), condition=case.get("_condition", "?")
+        )
         raw = call_model(prompt, model=model, raw=True)
         parsed = parse_classify_output(raw)
         return {
@@ -272,6 +292,7 @@ def llm_classify(case: dict, code: str, reasoning: str,
 # ============================================================
 # DERIVED CATEGORIES (pure computation — no LLM, no heuristics)
 # ============================================================
+
 
 def compute_category(code_correct: bool | None, reasoning_correct: bool | None) -> str:
     """Compute the alignment category.
@@ -322,16 +343,41 @@ from eval_cases import _has, _low  # noqa: F401
 # _REASONING_SIGNALS is retained ONLY for the retry_harness heuristic_signal
 # (which is logged but NOT used for classification decisions).
 _REASONING_SIGNALS = {
-    "HIDDEN_DEPENDENCY": ["overwrite", "cache_put_if_absent.*different",
-                          "not interchangeable", "stale", "live.*write",
-                          "always.*overwrite", "won't overwrite"],
+    "HIDDEN_DEPENDENCY": [
+        "overwrite",
+        "cache_put_if_absent.*different",
+        "not interchangeable",
+        "stale",
+        "live.*write",
+        "always.*overwrite",
+        "won't overwrite",
+    ],
     "TEMPORAL_ORDERING": ["order", "before", "after", "sequence", "timing", "first"],
-    "TEMPORAL_CAUSAL_ERROR": ["original data", "raw data", "before transform",
-                              "different keys", "different semantic", "not.*replacement"],
-    "INVARIANT_VIOLATION": ["partial failure", "money.*lost", "rollback",
-                            "inconsistent", "atomicity", "failure window", "debit.*credit"],
-    "STATE_SEMANTIC_VIOLATION": ["frozen", "get_committed_total", "preview",
-                                 "stage.*without.*commit", "none.*not.*zero", "returns none"],
+    "TEMPORAL_CAUSAL_ERROR": [
+        "original data",
+        "raw data",
+        "before transform",
+        "different keys",
+        "different semantic",
+        "not.*replacement",
+    ],
+    "INVARIANT_VIOLATION": [
+        "partial failure",
+        "money.*lost",
+        "rollback",
+        "inconsistent",
+        "atomicity",
+        "failure window",
+        "debit.*credit",
+    ],
+    "STATE_SEMANTIC_VIOLATION": [
+        "frozen",
+        "get_committed_total",
+        "preview",
+        "stage.*without.*commit",
+        "none.*not.*zero",
+        "returns none",
+    ],
     "RACE_CONDITION": ["race", "lock", "concurren", "thread.*safe"],
     "IDEMPOTENCY_VIOLATION": ["idempoten", "accumulate", "double", "not.*safe.*retry"],
     "CACHE_ORDERING": ["version", "invalidat.*order", "conditional_set"],
@@ -376,6 +422,7 @@ def _detected_correct_reasoning(case: dict, output: str) -> bool:
 # EVIDENCE USAGE SCORING (SCM experiment)
 # ============================================================
 
+
 def compute_evidence_metrics(case: dict, output: str) -> dict:
     """Compute evidence_usage_score, incorrect/uncertain/hallucinated counts.
 
@@ -383,6 +430,7 @@ def compute_evidence_metrics(case: dict, output: str) -> dict:
     for "not applicable" — that corrupts averages.
     """
     from scm_data import get_scm
+
     scm = get_scm(case.get("id", ""))
     if not scm:
         return {
@@ -397,8 +445,12 @@ def compute_evidence_metrics(case: dict, output: str) -> dict:
 
     valid_ids = set()
     id_definitions = {}
-    for prefix, section in [("F", "functions"), ("V", "variables"),
-                            ("E", "edges"), ("I", "invariants")]:
+    for prefix, section in [
+        ("F", "functions"),
+        ("V", "variables"),
+        ("E", "edges"),
+        ("I", "invariants"),
+    ]:
         for k, v in scm.get(section, {}).items():
             valid_ids.add(k)
             id_definitions[k] = v if isinstance(v, str) else str(v)
@@ -406,7 +458,7 @@ def compute_evidence_metrics(case: dict, output: str) -> dict:
         valid_ids.add(k)
         id_definitions[k] = scm["constraints"][k].get("text", "")
 
-    found_ids = set(re.findall(r'\b([FVEIC]\d+)\b', output))
+    found_ids = set(re.findall(r"\b([FVEIC]\d+)\b", output))
     valid_found = found_ids & valid_ids
     hallucinated = found_ids - valid_ids
 
@@ -435,12 +487,12 @@ def compute_evidence_metrics(case: dict, output: str) -> dict:
     if score >= 1:
         for vid in valid_found:
             defn = id_definitions.get(vid, "")
-            code_terms = re.findall(r'[a-z_]+\(\)', defn) + re.findall(r"[a-z_]+\[", defn)
+            code_terms = re.findall(r"[a-z_]+\(\)", defn) + re.findall(r"[a-z_]+\[", defn)
             for term in code_terms[:3]:
                 clean = term.rstrip("()[")
                 if clean and len(clean) > 2:
                     for m in re.finditer(re.escape(vid), output):
-                        window = output[max(0, m.start()-50):m.end()+50]
+                        window = output[max(0, m.start() - 50) : m.end() + 50]
                         if clean in window.lower():
                             score = 2
                             break
@@ -479,14 +531,26 @@ def compute_evidence_metrics(case: dict, output: str) -> dict:
 def _classify_id_usage(vid: str, definition: str, output: str) -> str:
     """Classify a single SCM ID usage as correct/incorrect/uncertain."""
     defn_lower = definition.lower()
-    for m in re.finditer(r'\b' + re.escape(vid) + r'\b', output):
+    for m in re.finditer(r"\b" + re.escape(vid) + r"\b", output):
         start = max(0, m.start() - 120)
         end = min(len(output), m.end() + 120)
         window = output[start:end].lower()
-        has_claim = any(w in window for w in [
-            "writes", "reads", "sets", "returns", "calls", "checks",
-            "overwrites", "always", "never", "must", "not",
-        ])
+        has_claim = any(
+            w in window
+            for w in [
+                "writes",
+                "reads",
+                "sets",
+                "returns",
+                "calls",
+                "checks",
+                "overwrites",
+                "always",
+                "never",
+                "must",
+                "not",
+            ]
+        )
         if not has_claim:
             return "uncertain"
         if "cache_put_if_absent" in defn_lower or "not overwrite" in defn_lower:
@@ -505,6 +569,7 @@ def _classify_id_usage(vid: str, definition: str, output: str) -> str:
 # ============================================================
 # MAIN DISPATCH
 # ============================================================
+
 
 def evaluate_output(case: dict, parsed: dict, eval_model: str | None = None) -> dict:
     """Evaluate model output from a canonical ParsedResponse.
@@ -540,7 +605,10 @@ def evaluate_output(case: dict, parsed: dict, eval_model: str | None = None) -> 
     # Step 2: LLM reasoning classifier — ONLY judges reasoning, NOT code
     # Pass parse_error and _raw_fallback for the parse gate (Fix D)
     classify = llm_classify(
-        case, code, reasoning, eval_model=eval_model,
+        case,
+        code,
+        reasoning,
+        eval_model=eval_model,
         parse_error=parsed.get("parse_error"),
         raw_fallback=parsed.get("_raw_fallback", False),
     )
@@ -570,9 +638,7 @@ def evaluate_output(case: dict, parsed: dict, eval_model: str | None = None) -> 
     # Backward-compat fields
     result["identified_correct_issue"] = classify["reasoning_correct"] or False
     result["final_output_correct"] = exec_pass
-    result["reasoning_action_gap"] = (
-        (classify["reasoning_correct"] is True) and (not exec_pass)
-    )
+    result["reasoning_action_gap"] = (classify["reasoning_correct"] is True) and (not exec_pass)
 
     # Step 4: Evidence metrics
     ev_metrics = compute_evidence_metrics(case, raw_output)

@@ -81,9 +81,7 @@ def test_c(mod):
 
     errors = []
     if user.get("verified") is not False:
-        errors.append(
-            f"verified not reset: verified={user.get('verified')!r}, expected False"
-        )
+        errors.append(f"verified not reset: verified={user.get('verified')!r}, expected False")
     if user.get("email") != "bob@example.com":
         errors.append(f"email not updated: {user.get('email')!r}")
 

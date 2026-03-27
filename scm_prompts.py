@@ -84,8 +84,7 @@ def build_scm_constrained_evidence(base: str, case_id: str) -> str:
     cc_trace = cc.get("failure_trace", "")
 
     inv_checks = "\n".join(
-        f"  {iid}: Does this still hold? Verified by which F*, E*?"
-        for iid in scm["invariants"]
+        f"  {iid}: Does this still hold? Verified by which F*, E*?" for iid in scm["invariants"]
     )
 
     return base + f"""
@@ -145,7 +144,9 @@ def build_scm_constrained_evidence_minimal(base: str, case_id: str) -> str:
     f_text = "\n".join(f"  {f} = {scm['functions'].get(f, '?')}" for f in funcs)
     e_text = "\n".join(f"  {e}: {scm['edges'].get(e, '?')}" for e in edges)
     i_text = "\n".join(f"  {i}: {scm['invariants'].get(i, '?')}" for i in invariants)
-    c_text = "\n".join(f"  {c}: {scm['constraints'].get(c, {}).get('text', '?')}" for c in constraints)
+    c_text = "\n".join(
+        f"  {c}: {scm['constraints'].get(c, {}).get('text', '?')}" for c in constraints
+    )
 
     return base + f"""
 
@@ -172,9 +173,7 @@ def build_evidence_only(base: str, case_id: str) -> str:
 
     funcs_text = "\n".join(f"  {fid} = {desc}" for fid, desc in scm["functions"].items())
     vars_text = "\n".join(f"  {vid} = {desc}" for vid, desc in scm["variables"].items())
-    constraints_text = "\n".join(
-        f"  {cid}: {c['text']}" for cid, c in scm["constraints"].items()
-    )
+    constraints_text = "\n".join(f"  {cid}: {c['text']}" for cid, c in scm["constraints"].items())
     invariants_text = "\n".join(f"  {iid}: {desc}" for iid, desc in scm["invariants"].items())
 
     return base + f"""

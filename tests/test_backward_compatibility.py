@@ -1,9 +1,12 @@
 """Test that existing conditions still work without crashes."""
+
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import os
+
 os.environ["OPENAI_API_KEY"] = "sk-dummy"
 
 from execution import run_single as _run_single, build_prompt as _build_prompt
@@ -39,8 +42,15 @@ def test_all_original_conditions_build_prompt():
     """Every original condition produces a non-empty prompt."""
     cases = load_cases(case_id="l3_state_pipeline")
     case = cases[0]
-    for cond in ["baseline", "diagnostic", "guardrail", "guardrail_strict",
-                 "counterfactual", "reason_then_act", "self_check"]:
+    for cond in [
+        "baseline",
+        "diagnostic",
+        "guardrail",
+        "guardrail_strict",
+        "counterfactual",
+        "reason_then_act",
+        "self_check",
+    ]:
         prompt, op = _build_prompt(case, cond)
         assert len(prompt) > 100, f"{cond} prompt too short"
 

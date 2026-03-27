@@ -23,9 +23,7 @@ def test_a(mod):
         ]
 
     if inv.reserved != 0:
-        return False, [
-            f"inventory reserved={inv.reserved} after failed order, expected 0"
-        ]
+        return False, [f"inventory reserved={inv.reserved} after failed order, expected 0"]
 
     return True, ["inventory correctly released after payment failure"]
 
@@ -55,15 +53,12 @@ def test_b(mod):
     avail = mod.available("SKU-100")
     if avail != 10:
         return False, [
-            f"available={avail} after failed payment, expected 10 "
-            f"(reservation not rolled back)"
+            f"available={avail} after failed payment, expected 10 " f"(reservation not rolled back)"
         ]
 
     reserved = mod.get_reserved("SKU-100")
     if reserved != 0:
-        return False, [
-            f"reserved={reserved} after failed payment, expected 0"
-        ]
+        return False, [f"reserved={reserved} after failed payment, expected 0"]
 
     return True, ["inventory released after payment gateway failure"]
 
@@ -96,8 +91,7 @@ def test_c(mod):
     avail = mod.available("WIDGET-1")
     if avail != 20:
         return False, [
-            f"available={avail} after failed payment, expected 20 "
-            f"(reservation not rolled back)"
+            f"available={avail} after failed payment, expected 20 " f"(reservation not rolled back)"
         ]
 
     # Check reasoning_evaluator_audit log cleaned
@@ -108,4 +102,6 @@ def test_c(mod):
             f"(reasoning_evaluator_audit entry not removed on rollback)"
         ]
 
-    return True, ["inventory released and reasoning_evaluator_audit log cleaned after payment failure"]
+    return True, [
+        "inventory released and reasoning_evaluator_audit log cleaned after payment failure"
+    ]

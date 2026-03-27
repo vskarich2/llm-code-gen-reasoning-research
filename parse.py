@@ -22,6 +22,7 @@ if not log.handlers:
 # JSON RESPONSE PARSING (3 tiers + orchestrator)
 # ============================================================
 
+
 def _try_json_direct(raw: str) -> dict | None:
     """Tier 1: Direct json.loads()."""
     try:
@@ -44,7 +45,8 @@ def _try_json_direct(raw: str) -> dict | None:
                 log.warning(
                     "SEVERE: 'code' field is dict with %d keys (%s) — "
                     "joining values as code blocks",
-                    len(code), ", ".join(list(code.keys())[:4])
+                    len(code),
+                    ", ".join(list(code.keys())[:4]),
                 )
                 code = "\n\n".join(
                     f"# {fname}\n{content}" if isinstance(content, str) else str(content)
@@ -53,13 +55,13 @@ def _try_json_direct(raw: str) -> dict | None:
             elif not isinstance(code, str):
                 log.warning(
                     "SEVERE: 'code' field is %s (len=%d), not str — coercing",
-                    type(code).__name__, len(str(code))
+                    type(code).__name__,
+                    len(str(code)),
                 )
                 code = str(code)
             if reasoning is not None and not isinstance(reasoning, str):
                 log.warning(
-                    "SEVERE: 'reasoning' field is %s, not str — coercing",
-                    type(reasoning).__name__
+                    "SEVERE: 'reasoning' field is %s, not str — coercing", type(reasoning).__name__
                 )
                 reasoning = str(reasoning)
             if reasoning is None:
@@ -91,14 +93,8 @@ def _try_json_lenient(raw: str) -> dict | None:
     # Try to extract reasoning and code by finding the field boundaries
     try:
         # Find "code" : " ... (everything to the last ")
-        code_match = re.search(
-            r'"code"\s*:\s*"(.*)"(?:\s*,\s*"confidence|\s*\})',
-            raw, re.DOTALL
-        )
-        reasoning_match = re.search(
-            r'"reasoning"\s*:\s*"(.*?)"\s*,\s*"code"',
-            raw, re.DOTALL
-        )
+        code_match = re.search(r'"code"\s*:\s*"(.*)"(?:\s*,\s*"confidence|\s*\})', raw, re.DOTALL)
+        reasoning_match = re.search(r'"reasoning"\s*:\s*"(.*?)"\s*,\s*"code"', raw, re.DOTALL)
         if code_match:
             code = code_match.group(1)
             # Unescape basic sequences
@@ -107,10 +103,7 @@ def _try_json_lenient(raw: str) -> dict | None:
             if reasoning_match:
                 reasoning = reasoning_match.group(1).replace("\\n", "\n").replace('\\"', '"')
             if code.strip():
-                log.warning(
-                    "Used lenient JSON parser for malformed response (len=%d)",
-                    len(raw)
-                )
+                log.warning("Used lenient JSON parser for malformed response (len=%d)", len(raw))
                 return {
                     "reasoning": reasoning,
                     "code": code,
@@ -133,7 +126,8 @@ def _try_json_substring(raw: str) -> dict | None:
             if code is None or not isinstance(code, str):
                 log.warning(
                     "SEVERE: JSON substring extracted but code=%r (type=%s)",
-                    code, type(code).__name__
+                    code,
+                    type(code).__name__,
                 )
                 return None
             if not code.strip():
@@ -208,10 +202,7 @@ def _try_file_dict_lenient(raw: str) -> dict | None:
     try:
         # Extract reasoning (before "files" key)
         reasoning = ""
-        reasoning_match = re.search(
-            r'"reasoning"\s*:\s*"(.*?)"\s*,\s*"files"',
-            raw, re.DOTALL
-        )
+        reasoning_match = re.search(r'"reasoning"\s*:\s*"(.*?)"\s*,\s*"files"', raw, re.DOTALL)
         if reasoning_match:
             reasoning = reasoning_match.group(1).replace("\\n", "\n").replace('\\"', '"')
 
@@ -225,7 +216,9 @@ def _try_file_dict_lenient(raw: str) -> dict | None:
         # Parse individual file entries: "path": "content" or "path": "UNCHANGED"
         files = {}
         # Split on pattern: "path": "
-        entries = re.finditer(r'"([^"]+)"\s*:\s*"((?:[^"\\]|\\.)*)(?:"|$)', files_content, re.DOTALL)
+        entries = re.finditer(
+            r'"([^"]+)"\s*:\s*"((?:[^"\\]|\\.)*)(?:"|$)', files_content, re.DOTALL
+        )
         for m in entries:
             path = m.group(1)
             content = m.group(2)
@@ -238,7 +231,8 @@ def _try_file_dict_lenient(raw: str) -> dict | None:
 
         log.warning(
             "Used lenient file-dict parser for malformed response (len=%d, %d files)",
-            len(raw), len(files)
+            len(raw),
+            len(files),
         )
         return {
             "reasoning": reasoning,
@@ -265,7 +259,8 @@ def _try_code_dict(raw: str) -> dict | None:
                     reasoning = str(reasoning)
                 log.info(
                     "code_dict response: 'code' key is dict with %d files (%s)",
-                    len(files), ", ".join(list(files.keys())[:4])
+                    len(files),
+                    ", ".join(list(files.keys())[:4]),
                 )
                 return {
                     "reasoning": reasoning or "",
@@ -414,7 +409,8 @@ def parse_model_response(raw: str) -> dict:
         "RAW FALLBACK: No JSON or code blocks found in model output (len=%d). "
         "Using raw text as code. This is NOT a model code failure — "
         "this is a PARSE failure. First 100 chars: %r",
-        len(raw), raw[:100]
+        len(raw),
+        raw[:100],
     )
     lineage.append("parse_tier_4_raw_fallback")
     return {
@@ -454,12 +450,12 @@ def _extract_json_block(raw: str) -> str:
     text = raw.strip()
 
     # Remove markdown fences (transport artifact, not content)
-    text = re.sub(r'^```(?:json)?\s*', '', text)
-    text = re.sub(r'\s*```$', '', text)
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
     text = text.strip()
 
     # Find first JSON object via bracket matching
-    start = text.find('{')
+    start = text.find("{")
     if start == -1:
         raise ValueError("NO_JSON_OBJECT_FOUND")
 
@@ -471,7 +467,7 @@ def _extract_json_block(raw: str) -> str:
         if escape_next:
             escape_next = False
             continue
-        if c == '\\' and in_string:
+        if c == "\\" and in_string:
             escape_next = True
             continue
         if c == '"' and not escape_next:
@@ -479,12 +475,12 @@ def _extract_json_block(raw: str) -> str:
             continue
         if in_string:
             continue
-        if c == '{':
+        if c == "{":
             depth += 1
-        elif c == '}':
+        elif c == "}":
             depth -= 1
             if depth == 0:
-                return text[start:i + 1]
+                return text[start : i + 1]
 
     raise ValueError("UNBALANCED_JSON")
 
@@ -581,6 +577,7 @@ def parse_structured_output(raw: str) -> dict:
 # CODE EXTRACTION (legacy — used by exec_eval)
 # ============================================================
 
+
 def extract_code(output: str) -> str:
     """Extract the last ```python block. Falls back to raw text."""
     blocks = re.findall(r"```python\s*\n(.*?)```", output, re.DOTALL)
@@ -598,7 +595,8 @@ def extract_all_code_blocks(output: str) -> list[tuple[str, str]]:
     blocks = []
     for m in re.finditer(
         r"(?:#\s*(\S+\.py)[^\n]*\n)?```python\s*\n(.*?)```",
-        output, re.DOTALL,
+        output,
+        re.DOTALL,
     ):
         name = m.group(1) or f"block_{len(blocks)}.py"
         blocks.append((name, m.group(2).strip()))
@@ -623,8 +621,9 @@ def strip_local_imports(code: str) -> str:
     """
     # Pass 1: multi-line local imports
     code = re.sub(
-        r"^from\s+(?!(?:" + "|".join(re.escape(m) for m in STDLIB_MODULES) +
-        r")\b)\w+\s+import\s*\(.*?\)",
+        r"^from\s+(?!(?:"
+        + "|".join(re.escape(m) for m in STDLIB_MODULES)
+        + r")\b)\w+\s+import\s*\(.*?\)",
         "",
         code,
         flags=re.MULTILINE | re.DOTALL,

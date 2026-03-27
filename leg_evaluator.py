@@ -89,13 +89,14 @@ Return ONLY this one line. No explanation. No commentary."""
 
 _CRIT_LITE_CONDITIONED_PROMPT = _CRIT_LITE_BLIND_PROMPT.replace(
     "## Developer's Reasoning\n{reasoning}",
-    "## Developer's Reasoning\n{reasoning}\n\n## System-Detected Failure Type\n{classifier_type}"
+    "## Developer's Reasoning\n{reasoning}\n\n## System-Detected Failure Type\n{classifier_type}",
 )
 
 
 # ============================================================
 # STRICT PARSER
 # ============================================================
+
 
 def parse_evaluator_output(raw):
     """Parse evaluator output. Strict contract:
@@ -150,8 +151,10 @@ def parse_evaluator_output(raw):
 # EVALUATOR FUNCTION
 # ============================================================
 
-def evaluate_reasoning(model, reasoning_text, code_k, error_obj,
-                       classifier_type=None, blind=True, eval_model=None):
+
+def evaluate_reasoning(
+    model, reasoning_text, code_k, error_obj, classifier_type=None, blind=True, eval_model=None
+):
     """CRIT-lite evaluator. ANALYSIS ONLY — never in retry loop.
 
     Args:
@@ -170,36 +173,40 @@ def evaluate_reasoning(model, reasoning_text, code_k, error_obj,
     error_message = (error_obj.get("message") or "")[:300]
     test_reasons = "\n".join(f"- {r}" for r in (error_obj.get("reasons") or [])[:5])
 
+    _eval_vars = {
+        "code": code_k[:1200],
+        "error_category": error_category,
+        "error_message": error_message,
+        "test_reasons": test_reasons,
+        "reasoning": reasoning_text[:800],
+    }
     if blind:
-        prompt = _CRIT_LITE_BLIND_PROMPT.format(
-            code=code_k[:1200],
-            error_category=error_category,
-            error_message=error_message,
-            test_reasons=test_reasons,
-            reasoning=reasoning_text[:800],
-        )
+        from assembly_engine import build as _assembly_build
+        _rendered = _assembly_build(["evaluate_reasoning_blind"], _eval_vars)
+        prompt = _rendered.final_prompt
     else:
-        prompt = _CRIT_LITE_CONDITIONED_PROMPT.format(
-            code=code_k[:1200],
-            error_category=error_category,
-            error_message=error_message,
-            test_reasons=test_reasons,
-            reasoning=reasoning_text[:800],
-            classifier_type=classifier_type or "UNKNOWN",
-        )
+        _eval_vars["classifier_type"] = classifier_type or "UNKNOWN"
+        from assembly_engine import build as _assembly_build
+        _rendered = _assembly_build(["evaluate_reasoning_conditioned"], _eval_vars)
+        prompt = _rendered.final_prompt
 
     try:
         use_model = eval_model or model
         raw = call_model(prompt, model=use_model, raw=True)
         return parse_evaluator_output(raw)
     except Exception as e:
-        return {"verdict": None, "inferred_type": None, "raw": None,
-                "parse_error": f"exception:{e}"}
+        return {
+            "verdict": None,
+            "inferred_type": None,
+            "raw": None,
+            "parse_error": f"exception:{e}",
+        }
 
 
 # ============================================================
 # LEG COMPUTATION (pure functions, no LLM calls)
 # ============================================================
+
 
 def compute_leg_true(entry):
     """Primary LEG metric. Uses ONLY 4 fields:
@@ -232,22 +239,19 @@ def compute_reasoning_matches_truth(entry):
 
 def compute_evaluator_bias(trajectory):
     """Measure confirmation bias between blind and conditioned evaluators."""
-    blind_yes = sum(1 for e in trajectory
-                    if e.get("llm_eval_blind_verdict") == "YES")
-    conditioned_yes = sum(1 for e in trajectory
-                          if e.get("llm_eval_conditioned_verdict") == "YES")
-    total = sum(1 for e in trajectory
-                if e.get("llm_eval_blind_verdict") is not None
-                and e.get("llm_eval_conditioned_verdict") is not None)
+    blind_yes = sum(1 for e in trajectory if e.get("llm_eval_blind_verdict") == "YES")
+    conditioned_yes = sum(1 for e in trajectory if e.get("llm_eval_conditioned_verdict") == "YES")
+    total = sum(
+        1
+        for e in trajectory
+        if e.get("llm_eval_blind_verdict") is not None
+        and e.get("llm_eval_conditioned_verdict") is not None
+    )
 
     bias_rate_relative = (
-        round((conditioned_yes - blind_yes) / blind_yes, 3)
-        if blind_yes > 0 else None
+        round((conditioned_yes - blind_yes) / blind_yes, 3) if blind_yes > 0 else None
     )
-    bias_rate_absolute = (
-        round((conditioned_yes - blind_yes) / total, 3)
-        if total > 0 else None
-    )
+    bias_rate_absolute = round((conditioned_yes - blind_yes) / total, 3) if total > 0 else None
 
     return {
         "blind_yes": blind_yes,

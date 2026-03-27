@@ -7,6 +7,7 @@ Covers:
   - Data integrity invariants (I1-I9)
   - Replay test
 """
+
 import sys
 import os
 import json
@@ -34,10 +35,10 @@ from retry_harness import (
     _GENERIC_WORDS,
 )
 
-
 # ============================================================
 # _compute_diff
 # ============================================================
+
 
 class TestComputeDiff:
     def test_identical(self):
@@ -84,6 +85,7 @@ class TestComputeDiff:
 # _is_stagnated
 # ============================================================
 
+
 class TestIsStagnated:
     def test_small_diff_no_improvement(self):
         assert _is_stagnated({"chars_changed": 5}, 0.2, 0.2) is True
@@ -104,6 +106,7 @@ class TestIsStagnated:
 # ============================================================
 # _keyword_overlap
 # ============================================================
+
 
 class TestKeywordOverlap:
     def test_identical(self):
@@ -126,6 +129,7 @@ class TestKeywordOverlap:
 # ============================================================
 # _classify_outcome
 # ============================================================
+
 
 class TestClassifyOutcome:
     def test_single_shot(self):
@@ -152,6 +156,7 @@ class TestClassifyOutcome:
 # ============================================================
 # _classify_trajectory_type
 # ============================================================
+
 
 class TestClassifyTrajectoryType:
     def test_single_shot(self):
@@ -204,21 +209,34 @@ class TestClassifyTrajectoryType:
 # _classify_regime
 # ============================================================
 
+
 class TestClassifyRegime:
     def test_heuristic(self):
-        t = [{"pass": True, "diff": None, "critique": None,
-              "reasoning_signals": {"estimated_valid": True}}]
+        t = [
+            {
+                "pass": True,
+                "diff": None,
+                "critique": None,
+                "reasoning_signals": {"estimated_valid": True},
+            }
+        ]
         regime, signals = _classify_regime(t)
         assert regime == "heuristic"
 
     def test_rei(self):
         t = [
-            {"pass": False, "diff": None,
-             "critique": {"root_cause": "alias bug", "_valid": True},
-             "reasoning_signals": {"estimated_valid": True}},
-            {"pass": True, "diff": {"chars_changed": 30},
-             "critique": None,
-             "reasoning_signals": {"estimated_valid": True}},
+            {
+                "pass": False,
+                "diff": None,
+                "critique": {"root_cause": "alias bug", "_valid": True},
+                "reasoning_signals": {"estimated_valid": True},
+            },
+            {
+                "pass": True,
+                "diff": {"chars_changed": 30},
+                "critique": None,
+                "reasoning_signals": {"estimated_valid": True},
+            },
         ]
         regime, signals = _classify_regime(t)
         assert regime == "REI"
@@ -227,19 +245,31 @@ class TestClassifyRegime:
 
     def test_csf(self):
         t = [
-            {"pass": False, "diff": None,
-             "critique": {"root_cause": "ordering bug", "_valid": True},
-             "reasoning_signals": {"estimated_valid": False}},
-            {"pass": False, "diff": {"chars_changed": 300},
-             "critique": {"root_cause": "completely different issue", "_valid": True},
-             "reasoning_signals": {"estimated_valid": False}},
+            {
+                "pass": False,
+                "diff": None,
+                "critique": {"root_cause": "ordering bug", "_valid": True},
+                "reasoning_signals": {"estimated_valid": False},
+            },
+            {
+                "pass": False,
+                "diff": {"chars_changed": 300},
+                "critique": {"root_cause": "completely different issue", "_valid": True},
+                "reasoning_signals": {"estimated_valid": False},
+            },
         ]
         regime, signals = _classify_regime(t)
         assert regime == "CSF"
 
     def test_returns_mechanism_signals(self):
-        t = [{"pass": False, "diff": None, "critique": None,
-              "reasoning_signals": {"estimated_valid": None}}]
+        t = [
+            {
+                "pass": False,
+                "diff": None,
+                "critique": None,
+                "reasoning_signals": {"estimated_valid": None},
+            }
+        ]
         regime, signals = _classify_regime(t)
         assert "reasoning_consistent" in signals
         assert "critique_consistent" in signals
@@ -253,12 +283,18 @@ class TestClassifyRegime:
     def test_invalid_critiques_excluded(self):
         """Critiques with _valid=False should not affect consistency."""
         t = [
-            {"pass": False, "diff": None,
-             "critique": {"root_cause": "x", "_valid": False},
-             "reasoning_signals": {"estimated_valid": True}},
-            {"pass": False, "diff": {"chars_changed": 30},
-             "critique": {"root_cause": "y", "_valid": False},
-             "reasoning_signals": {"estimated_valid": True}},
+            {
+                "pass": False,
+                "diff": None,
+                "critique": {"root_cause": "x", "_valid": False},
+                "reasoning_signals": {"estimated_valid": True},
+            },
+            {
+                "pass": False,
+                "diff": {"chars_changed": 30},
+                "critique": {"root_cause": "y", "_valid": False},
+                "reasoning_signals": {"estimated_valid": True},
+            },
         ]
         regime, signals = _classify_regime(t)
         # No valid critiques → vacuously consistent
@@ -269,30 +305,36 @@ class TestClassifyRegime:
 # _build_error_object
 # ============================================================
 
+
 class TestBuildErrorObject:
     def test_syntax_error(self):
-        ev = {"execution": {"syntax_error": "line 5: invalid", "ran": False},
-              "reasons": []}
+        ev = {"execution": {"syntax_error": "line 5: invalid", "ran": False}, "reasons": []}
         e = _build_error_object(ev)
         assert e["category"] == "syntax"
         assert "line 5" in e["message"]
 
     def test_runtime_error(self):
-        ev = {"execution": {"ran": False, "error_message": "NameError: x",
-                            "runtime_error": True}, "reasons": []}
+        ev = {
+            "execution": {"ran": False, "error_message": "NameError: x", "runtime_error": True},
+            "reasons": [],
+        }
         e = _build_error_object(ev)
         assert e["category"] == "runtime"
 
     def test_logic_error(self):
-        ev = {"execution": {"ran": True, "invariant_pass": False,
-                            "mutation_pass": None}, "reasons": ["DEFAULTS mutated"]}
+        ev = {
+            "execution": {"ran": True, "invariant_pass": False, "mutation_pass": None},
+            "reasons": ["DEFAULTS mutated"],
+        }
         e = _build_error_object(ev)
         assert e["category"] == "logic"
         assert "DEFAULTS" in e["message"]
 
     def test_spec_error(self):
-        ev = {"execution": {"ran": True, "invariant_pass": True,
-                            "mutation_pass": False}, "reasons": ["mutation failed"]}
+        ev = {
+            "execution": {"ran": True, "invariant_pass": True, "mutation_pass": False},
+            "reasons": ["mutation failed"],
+        }
         e = _build_error_object(ev)
         assert e["category"] == "spec"
 
@@ -306,8 +348,10 @@ class TestBuildErrorObject:
         for ev in [
             {"execution": {"syntax_error": "bad"}, "reasons": []},
             {"execution": {"ran": True, "invariant_pass": False}, "reasons": ["x"]},
-            {"execution": {"ran": True, "invariant_pass": True, "mutation_pass": True},
-             "reasons": []},
+            {
+                "execution": {"ran": True, "invariant_pass": True, "mutation_pass": True},
+                "reasons": [],
+            },
             {"execution": {}, "reasons": []},
         ]:
             e = _build_error_object(ev)
@@ -319,6 +363,7 @@ class TestBuildErrorObject:
 # ============================================================
 # _infer_failure_mode
 # ============================================================
+
 
 class TestInferFailureMode:
     def test_syntax(self):
@@ -357,10 +402,10 @@ class TestInferFailureMode:
 # _compute_metrics
 # ============================================================
 
+
 class TestComputeMetrics:
     def test_single_pass(self):
-        t = [{"score": 1.0, "pass": True, "diff": None,
-              "error": {"category": "logic"}}]
+        t = [{"score": 1.0, "pass": True, "diff": None, "error": {"category": "logic"}}]
         m = _compute_metrics(t)
         assert m["num_retries"] == 0
         assert m["total_attempts"] == 1
@@ -369,11 +414,13 @@ class TestComputeMetrics:
 
     def test_two_attempts(self):
         t = [
-            {"score": 0.2, "pass": False, "diff": None,
-             "error": {"category": "logic"}},
-            {"score": 1.0, "pass": True,
-             "diff": {"chars_changed": 50, "edit_dispersion": 1.0},
-             "error": {"category": "logic"}},
+            {"score": 0.2, "pass": False, "diff": None, "error": {"category": "logic"}},
+            {
+                "score": 1.0,
+                "pass": True,
+                "diff": {"chars_changed": 50, "edit_dispersion": 1.0},
+                "error": {"category": "logic"},
+            },
         ]
         m = _compute_metrics(t)
         assert m["num_retries"] == 1
@@ -384,22 +431,26 @@ class TestComputeMetrics:
 
     def test_mixed_error_types(self):
         t = [
-            {"score": 0.0, "pass": False, "diff": None,
-             "error": {"category": "syntax"}},
-            {"score": 0.2, "pass": False,
-             "diff": {"chars_changed": 100, "edit_dispersion": 0.5},
-             "error": {"category": "logic"}},
+            {"score": 0.0, "pass": False, "diff": None, "error": {"category": "syntax"}},
+            {
+                "score": 0.2,
+                "pass": False,
+                "diff": {"chars_changed": 100, "edit_dispersion": 0.5},
+                "error": {"category": "logic"},
+            },
         ]
         m = _compute_metrics(t)
         assert m["error_entropy"] > 0
 
     def test_no_convergence_efficiency_zero(self):
         t = [
-            {"score": 0.2, "pass": False, "diff": None,
-             "error": {"category": "logic"}},
-            {"score": 0.2, "pass": False,
-             "diff": {"chars_changed": 10, "edit_dispersion": 1.0},
-             "error": {"category": "logic"}},
+            {"score": 0.2, "pass": False, "diff": None, "error": {"category": "logic"}},
+            {
+                "score": 0.2,
+                "pass": False,
+                "diff": {"chars_changed": 10, "edit_dispersion": 1.0},
+                "error": {"category": "logic"},
+            },
         ]
         m = _compute_metrics(t)
         assert m["retry_efficiency"] == 0.0
@@ -409,23 +460,28 @@ class TestComputeMetrics:
 # _compute_critique_accuracy
 # ============================================================
 
+
 class TestCritiqueAccuracy:
     def test_hit(self):
         t = [
-            {"critique": {"root_cause": "DEFAULTS not copied", "_valid": True},
-             "score": 0.2},
-            {"critique": None, "score": 1.0,
-             "diff": {"diff_text": "+    config = DEFAULTS.copy()"}},
+            {"critique": {"root_cause": "DEFAULTS not copied", "_valid": True}, "score": 0.2},
+            {
+                "critique": None,
+                "score": 1.0,
+                "diff": {"diff_text": "+    config = DEFAULTS.copy()"},
+            },
         ]
         acc = _compute_critique_accuracy(t)
         assert acc == 1.0
 
     def test_miss(self):
         t = [
-            {"critique": {"root_cause": "wrong loop bounds", "_valid": True},
-             "score": 0.2},
-            {"critique": None, "score": 0.2,
-             "diff": {"diff_text": "+    config = DEFAULTS.copy()"}},
+            {"critique": {"root_cause": "wrong loop bounds", "_valid": True}, "score": 0.2},
+            {
+                "critique": None,
+                "score": 0.2,
+                "diff": {"diff_text": "+    config = DEFAULTS.copy()"},
+            },
         ]
         acc = _compute_critique_accuracy(t)
         assert acc == 0.0
@@ -436,20 +492,16 @@ class TestCritiqueAccuracy:
 
     def test_filters_generic_words(self):
         t = [
-            {"critique": {"root_cause": "the value is wrong", "_valid": True},
-             "score": 0.2},
-            {"critique": None, "score": 0.5,
-             "diff": {"diff_text": "+    value = 42"}},
+            {"critique": {"root_cause": "the value is wrong", "_valid": True}, "score": 0.2},
+            {"critique": None, "score": 0.5, "diff": {"diff_text": "+    value = 42"}},
         ]
         acc = _compute_critique_accuracy(t)
         assert acc == 0.0
 
     def test_invalid_critique_excluded(self):
         t = [
-            {"critique": {"root_cause": "DEFAULTS not copied", "_valid": False},
-             "score": 0.2},
-            {"critique": None, "score": 1.0,
-             "diff": {"diff_text": "+    DEFAULTS.copy()"}},
+            {"critique": {"root_cause": "DEFAULTS not copied", "_valid": False}, "score": 0.2},
+            {"critique": None, "score": 1.0, "diff": {"diff_text": "+    DEFAULTS.copy()"}},
         ]
         acc = _compute_critique_accuracy(t)
         assert acc is None  # no valid critiques
@@ -458,6 +510,7 @@ class TestCritiqueAccuracy:
 # ============================================================
 # _normalize
 # ============================================================
+
 
 class TestNormalize:
     def test_strips_trailing_whitespace(self):
@@ -474,10 +527,10 @@ class TestNormalize:
 # _clean_critique_for_log
 # ============================================================
 
+
 class TestCleanCritiqueForLog:
     def test_strips_internal_keys(self):
-        c = {"failure_type": "logic_error", "root_cause": "x",
-             "_valid": True, "_raw": "something"}
+        c = {"failure_type": "logic_error", "root_cause": "x", "_valid": True, "_raw": "something"}
         cleaned = _clean_critique_for_log(c)
         assert "_valid" not in cleaned
         assert "_raw" not in cleaned
@@ -491,6 +544,7 @@ class TestCleanCritiqueForLog:
 # _format_test_output
 # ============================================================
 
+
 class TestFormatTestOutput:
     def test_syntax_error(self):
         ev = {"execution": {"syntax_error": "line 5: bad"}, "reasons": []}
@@ -498,15 +552,16 @@ class TestFormatTestOutput:
         assert "SYNTAX ERROR" in out
 
     def test_logic_failure(self):
-        ev = {"execution": {"ran": True, "passed_tests": 0, "total_tests": 2},
-              "reasons": ["DEFAULTS mutated"]}
+        ev = {
+            "execution": {"ran": True, "passed_tests": 0, "total_tests": 2},
+            "reasons": ["DEFAULTS mutated"],
+        }
         out = _format_test_output(ev)
         assert "DEFAULTS mutated" in out
         assert "0/2" in out
 
     def test_no_run(self):
-        ev = {"execution": {"ran": False, "passed_tests": 0, "total_tests": 0},
-              "reasons": []}
+        ev = {"execution": {"ran": False, "passed_tests": 0, "total_tests": 0}, "reasons": []}
         out = _format_test_output(ev)
         assert "DID NOT RUN" in out
 
@@ -514,6 +569,7 @@ class TestFormatTestOutput:
 # ============================================================
 # _estimate_reasoning_validity
 # ============================================================
+
 
 class TestEstimateReasoningValidity:
     def test_heuristic_only(self):

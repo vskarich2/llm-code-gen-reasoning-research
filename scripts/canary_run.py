@@ -22,14 +22,19 @@ BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 REQUIRED_RESULT_FIELDS = [
-    "reasoning_correct", "failure_type", "classify_raw",
-    "classify_parse_error", "eval_model_actual", "parse_category",
+    "reasoning_correct",
+    "failure_type",
+    "classify_raw",
+    "classify_parse_error",
+    "eval_model_actual",
+    "parse_category",
 ]
 
 
 def run_canary(n_cases: int = 5, eval_model: str | None = None):
     """Run canary validation on n_cases using mock LLM."""
     import os
+
     # Force mock mode for canary
     old_key = os.environ.get("OPENAI_API_KEY")
     os.environ["OPENAI_API_KEY"] = ""
@@ -62,23 +67,15 @@ def run_canary(n_cases: int = 5, eval_model: str | None = None):
         check1 = non_empty_reasoning >= min(4, len(results))
 
         # Check 2: Classifier responds
-        classifier_responded = sum(
-            1 for r in results if r.get("classify_raw") is not None
-        )
+        classifier_responded = sum(1 for r in results if r.get("classify_raw") is not None)
         check2 = classifier_responded == len(results)
 
         # Check 3: Classifier parses
-        classifier_parsed = sum(
-            1 for r in results
-            if r.get("reasoning_correct") is not None
-        )
+        classifier_parsed = sum(1 for r in results if r.get("reasoning_correct") is not None)
         check3 = classifier_parsed >= min(4, len(results))
 
         # Check 4: All fields present
-        all_fields = all(
-            all(f in r for f in REQUIRED_RESULT_FIELDS)
-            for r in results
-        )
+        all_fields = all(all(f in r for f in REQUIRED_RESULT_FIELDS) for r in results)
         missing = []
         for r in results:
             for f in REQUIRED_RESULT_FIELDS:
@@ -102,9 +99,15 @@ def run_canary(n_cases: int = 5, eval_model: str | None = None):
 
         # Report
         print(f"CANARY RUN: {len(results)} cases")
-        print(f"  Check 1 (parsing): {'PASS' if check1 else 'FAIL'} ({non_empty_reasoning}/{len(results)} non-empty)")
-        print(f"  Check 2 (classifier responds): {'PASS' if check2 else 'FAIL'} ({classifier_responded}/{len(results)})")
-        print(f"  Check 3 (classifier parses): {'PASS' if check3 else 'FAIL'} ({classifier_parsed}/{len(results)})")
+        print(
+            f"  Check 1 (parsing): {'PASS' if check1 else 'FAIL'} ({non_empty_reasoning}/{len(results)} non-empty)"
+        )
+        print(
+            f"  Check 2 (classifier responds): {'PASS' if check2 else 'FAIL'} ({classifier_responded}/{len(results)})"
+        )
+        print(
+            f"  Check 3 (classifier parses): {'PASS' if check3 else 'FAIL'} ({classifier_parsed}/{len(results)})"
+        )
         print(f"  Check 4 (all fields): {'PASS' if check4 else 'FAIL'}")
         if missing:
             for m in missing:

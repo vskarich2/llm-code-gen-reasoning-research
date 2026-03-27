@@ -1,6 +1,8 @@
 """Test that exec_eval actually executes code and detects pass/fail."""
+
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from exec_eval import exec_evaluate, load_module_from_code, extract_code
@@ -60,7 +62,7 @@ def test_exec_evaluate_with_valid_code():
 
 def test_exec_evaluate_syntax_error():
     case = _dummy_case()
-    output = 'def broken(:'
+    output = "def broken(:"
     result = exec_evaluate(case, output)
     assert result["pass"] is False
     assert result["execution"]["syntax_error"] is not None

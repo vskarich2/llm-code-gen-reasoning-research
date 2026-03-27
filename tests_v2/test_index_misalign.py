@@ -46,9 +46,7 @@ def test_a(mod):
         return False, [f"get_entry(1) raised: {e}"]
 
     if entry1 != ("alpha", 10):
-        return False, [
-            f"get_entry(1) returned {entry1}, expected ('alpha', 10)."
-        ]
+        return False, [f"get_entry(1) returned {entry1}, expected ('alpha', 10)."]
 
     return True, ["insert at position correctly aligns labels and values"]
 
@@ -126,8 +124,7 @@ def test_c(mod):
         lines = r.render()
     except (IndexError, Exception) as e:
         return False, [
-            f"render() failed after insert_column: {e}. "
-            f"column_widths likely not updated."
+            f"render() failed after insert_column: {e}. " f"column_widths likely not updated."
         ]
 
     if not lines:

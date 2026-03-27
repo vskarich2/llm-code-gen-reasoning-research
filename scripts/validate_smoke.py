@@ -74,8 +74,10 @@ def validate_events(run_dir: Path, canary_id: str, verbose: bool) -> bool:
     if verbose:
         print("  Per-event breakdown:")
         for e in events[:10]:
-            print(f"    {e.get('case_id', '?')}/{e.get('condition', '?')}: "
-                  f"pass={e.get('pass')}, score={e.get('score', 0)}")
+            print(
+                f"    {e.get('case_id', '?')}/{e.get('condition', '?')}: "
+                f"pass={e.get('pass')}, score={e.get('score', 0)}"
+            )
 
     ok = True
     if passes == 0:

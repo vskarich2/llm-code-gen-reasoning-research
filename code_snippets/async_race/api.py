@@ -12,4 +12,5 @@ def handle_verified_request(items):
 
 def health_check():
     from state import get_counter
+
     return {"counter": get_counter()}

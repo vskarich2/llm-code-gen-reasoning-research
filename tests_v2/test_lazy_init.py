@@ -30,8 +30,7 @@ def test_a(mod):
 
     if result != "prod.example.com":
         return False, [
-            f"get_host() returned stale value: {result!r}, "
-            f"expected 'prod.example.com'"
+            f"get_host() returned stale value: {result!r}, " f"expected 'prod.example.com'"
         ]
 
     return True, ["get_host() reflects configure() changes"]
@@ -59,9 +58,7 @@ def test_b(mod):
         return False, [f"raised: {e}"]
 
     if result != 99:
-        return False, [
-            f"get_timeout() returned stale value: {result!r}, expected 99"
-        ]
+        return False, [f"get_timeout() returned stale value: {result!r}, expected 99"]
 
     return True, ["client reads config lazily after reset"]
 
@@ -93,9 +90,7 @@ def test_c(mod):
 
     errors = []
     if result.get("api_key") != "new-secret-key":
-        errors.append(
-            f"api_key stale: {result.get('api_key')!r}, expected 'new-secret-key'"
-        )
+        errors.append(f"api_key stale: {result.get('api_key')!r}, expected 'new-secret-key'")
     if "new-api.example.com" not in result.get("url", ""):
         errors.append(
             f"base_url stale: url={result.get('url')!r}, "

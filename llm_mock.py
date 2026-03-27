@@ -43,9 +43,20 @@ def _mock_classify(out):
     """
     # Check reasoning by looking for mechanism keywords
     mechanism_keywords = [
-        "rollback", "frozen", "overwrite", "cache_put", "raw_stats",
-        "commit", "failure window", "debit", "invariant", "atomic",
-        "conservation", "stale", "order", "dependency",
+        "rollback",
+        "frozen",
+        "overwrite",
+        "cache_put",
+        "raw_stats",
+        "commit",
+        "failure window",
+        "debit",
+        "invariant",
+        "atomic",
+        "conservation",
+        "stale",
+        "order",
+        "dependency",
     ]
     reasoning_correct = any(kw in out for kw in mechanism_keywords)
 
@@ -66,6 +77,7 @@ def _mock_classify(out):
 
 
 # ── Per-case mock handlers ───────────────────────────────────
+
 
 def _mock_hidden_dep(nudged, guardrail):
     if nudged:
@@ -170,34 +182,55 @@ def _mock_leg_reduction(out):
         "    return st, materialize(st)\n"
     )
     verification_pass = [
-        {"step": "Preserve commit() call", "status": "PASS", "evidence": "commit(st) present at line 7"},
-        {"step": "Preserve freeze_view() call", "status": "PASS", "evidence": "freeze_view(st) present at line 8"},
+        {
+            "step": "Preserve commit() call",
+            "status": "PASS",
+            "evidence": "commit(st) present at line 7",
+        },
+        {
+            "step": "Preserve freeze_view() call",
+            "status": "PASS",
+            "evidence": "freeze_view(st) present at line 8",
+        },
     ]
 
     if "process_batch" in out or "reducers" in out or "selectors" in out:
-        return json.dumps({
-            "bug_diagnosis": "commit() sets frozen=True which get_committed_total checks. Removing it breaks the invariant.",
-            "plan_steps": [
-                {"step": "Preserve commit() call", "intended_effect": "frozen flag is set to True"},
-                {"step": "Preserve freeze_view() call", "intended_effect": "view reflects stable state"},
-            ],
-            "revision_history": [{
-                "revision": 0,
-                "verification": verification_pass,
-                "invariants_checked": [
-                    {"invariant": "frozen==True after process_batch", "status": "PASS",
-                     "evidence": "commit(st) sets meta['frozen']=True"},
+        return json.dumps(
+            {
+                "bug_diagnosis": "commit() sets frozen=True which get_committed_total checks. Removing it breaks the invariant.",
+                "plan_steps": [
+                    {
+                        "step": "Preserve commit() call",
+                        "intended_effect": "frozen flag is set to True",
+                    },
+                    {
+                        "step": "Preserve freeze_view() call",
+                        "intended_effect": "view reflects stable state",
+                    },
                 ],
-                "issues_found": [],
-                "changes_made": None,
-                "changed_functions": [],
-                "code_before": "def process_batch(entries): ...",
-                "code_after": code_fixed,
-            }],
-            "verification": verification_pass,
-            "code": code_fixed,
-            "internal_revisions": 0,
-        })
+                "revision_history": [
+                    {
+                        "revision": 0,
+                        "verification": verification_pass,
+                        "invariants_checked": [
+                            {
+                                "invariant": "frozen==True after process_batch",
+                                "status": "PASS",
+                                "evidence": "commit(st) sets meta['frozen']=True",
+                            },
+                        ],
+                        "issues_found": [],
+                        "changes_made": None,
+                        "changed_functions": [],
+                        "code_before": "def process_batch(entries): ...",
+                        "code_after": code_fixed,
+                    }
+                ],
+                "verification": verification_pass,
+                "code": code_fixed,
+                "internal_revisions": 0,
+            }
+        )
 
     if "execute_transfer" in out or "transfer_service" in out:
         code_fixed_inv = (
@@ -211,54 +244,82 @@ def _mock_leg_reduction(out):
             "        raise\n"
         )
         v_pass = [
-            {"step": "Add try/except around credit", "status": "PASS", "evidence": "try: block wraps receiver.balance += amount"},
-            {"step": "Restore balance in except", "status": "PASS", "evidence": "except block has sender.balance += amount"},
+            {
+                "step": "Add try/except around credit",
+                "status": "PASS",
+                "evidence": "try: block wraps receiver.balance += amount",
+            },
+            {
+                "step": "Restore balance in except",
+                "status": "PASS",
+                "evidence": "except block has sender.balance += amount",
+            },
         ]
-        return json.dumps({
-            "bug_diagnosis": "Failure window between debit and credit. Exception after debit loses money.",
-            "plan_steps": [
-                {"step": "Add try/except around credit", "intended_effect": "catch failures after debit"},
-                {"step": "Restore balance in except", "intended_effect": "rollback on failure"},
-            ],
-            "revision_history": [{
-                "revision": 0,
-                "verification": v_pass,
-                "invariants_checked": [
-                    {"invariant": "sender.balance + receiver.balance == constant", "status": "PASS",
-                     "evidence": "except block restores sender.balance"},
+        return json.dumps(
+            {
+                "bug_diagnosis": "Failure window between debit and credit. Exception after debit loses money.",
+                "plan_steps": [
+                    {
+                        "step": "Add try/except around credit",
+                        "intended_effect": "catch failures after debit",
+                    },
+                    {"step": "Restore balance in except", "intended_effect": "rollback on failure"},
                 ],
-                "issues_found": [],
-                "changes_made": None,
-                "changed_functions": [],
-                "code_before": "def execute_transfer(sender, receiver, amount): ...",
-                "code_after": code_fixed_inv,
-            }],
-            "verification": v_pass,
-            "code": code_fixed_inv,
-            "internal_revisions": 0,
-        })
+                "revision_history": [
+                    {
+                        "revision": 0,
+                        "verification": v_pass,
+                        "invariants_checked": [
+                            {
+                                "invariant": "sender.balance + receiver.balance == constant",
+                                "status": "PASS",
+                                "evidence": "except block restores sender.balance",
+                            },
+                        ],
+                        "issues_found": [],
+                        "changes_made": None,
+                        "changed_functions": [],
+                        "code_before": "def execute_transfer(sender, receiver, amount): ...",
+                        "code_after": code_fixed_inv,
+                    }
+                ],
+                "verification": v_pass,
+                "code": code_fixed_inv,
+                "internal_revisions": 0,
+            }
+        )
 
     # Generic fallback
     generic_v = [{"step": "Fix identified issue", "status": "PASS", "evidence": "change applied"}]
-    return json.dumps({
-        "bug_diagnosis": "Identified root cause in code logic.",
-        "plan_steps": [{"step": "Fix identified issue", "intended_effect": "Correct behavior restored"}],
-        "revision_history": [{
-            "revision": 0,
-            "verification": generic_v,
-            "invariants_checked": [
-                {"invariant": "output matches expected", "status": "PASS", "evidence": "code produces correct result"},
+    return json.dumps(
+        {
+            "bug_diagnosis": "Identified root cause in code logic.",
+            "plan_steps": [
+                {"step": "Fix identified issue", "intended_effect": "Correct behavior restored"}
             ],
-            "issues_found": [],
-            "changes_made": None,
-            "changed_functions": [],
-            "code_before": "# original",
-            "code_after": "# no specific fix available\npass\n",
-        }],
-        "verification": generic_v,
-        "code": "# no specific fix available\npass\n",
-        "internal_revisions": 0,
-    })
+            "revision_history": [
+                {
+                    "revision": 0,
+                    "verification": generic_v,
+                    "invariants_checked": [
+                        {
+                            "invariant": "output matches expected",
+                            "status": "PASS",
+                            "evidence": "code produces correct result",
+                        },
+                    ],
+                    "issues_found": [],
+                    "changes_made": None,
+                    "changed_functions": [],
+                    "code_before": "# original",
+                    "code_after": "# no specific fix available\npass\n",
+                }
+            ],
+            "verification": generic_v,
+            "code": "# no specific fix available\npass\n",
+            "internal_revisions": 0,
+        }
+    )
 
 
 # ── Dispatch table ───────────────────────────────────────────

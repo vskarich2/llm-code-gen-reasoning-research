@@ -7,6 +7,6 @@ def process_batch(entries):
     cleaned = normalize(st["raw"])
     merged = collapse(cleaned)
     stage(st, merged)
-    commit(st)       # FIX: restored — sets frozen gate + sorts into stable
+    commit(st)  # FIX: restored — sets frozen gate + sorts into stable
     freeze_view(st)  # FIX: restored — rebuilds view from committed stable
     return st, materialize(st)

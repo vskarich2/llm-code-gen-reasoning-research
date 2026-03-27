@@ -51,9 +51,9 @@ ALLOWED_NONE_FIELDS = {
 class TestAuditFieldCompleteness:
     """Verify audit fields exist in logged records."""
 
-    def _run_mock_pipeline_and_get_record(self, tmp_path,
-                                           reasoning="The bug is aliasing",
-                                           parse_error=None):
+    def _run_mock_pipeline_and_get_record(
+        self, tmp_path, reasoning="The bug is aliasing", parse_error=None
+    ):
         """Run a mock case through the full pipeline and return the log record."""
         from execution import RunLogger
 
@@ -96,8 +96,15 @@ class TestAuditFieldCompleteness:
             "data_lineage": ["raw_output_received"],
         }
 
-        logger.write("test_case", "baseline", "test-model",
-                      "Fix the bug...", "raw model output here", parsed, ev)
+        logger.write(
+            "test_case",
+            "baseline",
+            "test-model",
+            "Fix the bug...",
+            "raw model output here",
+            parsed,
+            ev,
+        )
 
         lines = log_path.read_text().strip().splitlines()
         assert len(lines) == 1, f"Expected 1 log line, got {len(lines)}"
@@ -112,8 +119,7 @@ class TestAuditFieldCompleteness:
         audit = record["audit"]
         missing = [f for f in REQUIRED_AUDIT_FIELDS if f not in audit]
         assert missing == [], (
-            f"Missing audit fields: {missing}. "
-            f"Present: {sorted(audit.keys())}"
+            f"Missing audit fields: {missing}. " f"Present: {sorted(audit.keys())}"
         )
 
     def test_field_count(self, tmp_path):
@@ -128,12 +134,10 @@ class TestAuditFieldCompleteness:
         record = self._run_mock_pipeline_and_get_record(tmp_path)
         audit = record["audit"]
         must_be_populated = set(REQUIRED_AUDIT_FIELDS) - ALLOWED_NONE_FIELDS
-        none_but_shouldnt_be = [
-            f for f in must_be_populated if audit.get(f) is None
-        ]
-        assert none_but_shouldnt_be == [], (
-            f"Fields that should be populated but are None: {none_but_shouldnt_be}"
-        )
+        none_but_shouldnt_be = [f for f in must_be_populated if audit.get(f) is None]
+        assert (
+            none_but_shouldnt_be == []
+        ), f"Fields that should be populated but are None: {none_but_shouldnt_be}"
 
     def test_case_id_matches(self, tmp_path):
         record = self._run_mock_pipeline_and_get_record(tmp_path)
@@ -182,7 +186,10 @@ class TestAuditFieldCompleteness:
         logger = RunLogger(log_path, model="test-model", run_id="test-run")
 
         ev = {
-            "pass": False, "score": 0.0, "reasons": [], "failure_modes": [],
+            "pass": False,
+            "score": 0.0,
+            "reasons": [],
+            "failure_modes": [],
             "execution": {"status": "error", "ran": False},
             "identified_correct_issue": False,
             "alignment": {"category": "unclassified"},
@@ -214,8 +221,7 @@ class TestAuditFieldCompleteness:
             "data_lineage": ["raw_output_received"],
         }
 
-        logger.write("gated_case", "baseline", "test-model",
-                      "prompt", "raw output", parsed, ev)
+        logger.write("gated_case", "baseline", "test-model", "prompt", "raw output", parsed, ev)
 
         record = json.loads(log_path.read_text().strip())
         audit = record["audit"]

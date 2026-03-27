@@ -93,7 +93,9 @@ def test_c(mod):
     if charge is None:
         return False, ["charge not found"]
     if verify_audit is None:
-        return False, ["verify_completeness (reasoning_evaluator_audit.verify_completeness) not found"]
+        return False, [
+            "verify_completeness (reasoning_evaluator_audit.verify_completeness) not found"
+        ]
 
     try:
         # First call: direct charge (logged)

@@ -16,7 +16,14 @@ log = logging.getLogger("t3.diff_gate")
 
 OPERATION_ALIASES = {
     "commit": ["commit(", "session.commit(", "tx.commit(", "db.commit(", ".save(", ".flush("],
-    "write_cache": ["cache_put(", "cache_set(", "_store[", "write_cache(", "sync_user_to_cache(", "update_cache("],
+    "write_cache": [
+        "cache_put(",
+        "cache_set(",
+        "_store[",
+        "write_cache(",
+        "sync_user_to_cache(",
+        "update_cache(",
+    ],
     "debit": ["balance -=", "balance -", ".charge(", "withdraw(", ".debit("],
     "credit": ["balance +=", "balance +", ".credit(", ".refund(", "deposit("],
     "insert": ["insert(", ".append(", "upsert(", "apply_delta(", "_records["],
@@ -32,6 +39,7 @@ OPERATION_ALIASES = {
 # ============================================================
 # MAIN VALIDATE
 # ============================================================
+
 
 def validate(contract: dict, code: str, reference_code: str) -> dict:
     """Run all 6 check categories against candidate code.
@@ -68,6 +76,7 @@ def validate(contract: dict, code: str, reference_code: str) -> dict:
 # CHECK 1: must_change — structural
 # ============================================================
 
+
 def _check_must_change(contract: dict, code: str, ref: str) -> tuple[bool, list[str]]:
     violations = []
     for target in contract.get("must_change", []):
@@ -80,6 +89,7 @@ def _check_must_change(contract: dict, code: str, ref: str) -> tuple[bool, list[
 # ============================================================
 # CHECK 2: must_not_change — structural (body comparison)
 # ============================================================
+
 
 def _check_must_not_change(contract: dict, code: str, ref: str) -> tuple[bool, list[str]]:
     violations = []
@@ -140,6 +150,7 @@ def _effect_detector(name):
     def decorator(fn):
         _EFFECT_DETECTORS[name] = fn
         return fn
+
     return decorator
 
 
@@ -191,7 +202,10 @@ def _detect_prevent_duplicate(contract: dict, code: str) -> tuple[bool, str | No
                 continue
             guard = _scan_for_guard(lines, loop_start, i)
             if not guard:
-                return False, f"RETRY_SAFETY: '{fn_name}' called inside loop at line {i+1} without idempotency guard"
+                return (
+                    False,
+                    f"RETRY_SAFETY: '{fn_name}' called inside loop at line {i+1} without idempotency guard",
+                )
     return True, None
 
 
@@ -222,13 +236,27 @@ def _detect_rollback(contract: dict, code: str) -> tuple[bool, str | None]:
             if has_try and "except" in line.strip()[:8]:
                 # Scan except block for compensation
                 for j in range(i + 1, min(len(lines), i + 10)):
-                    if any(p in lines[j] for p in ["+=", "release(", "refund(", "rollback(", "restore", "revert", "undo"]):
+                    if any(
+                        p in lines[j]
+                        for p in [
+                            "+=",
+                            "release(",
+                            "refund(",
+                            "rollback(",
+                            "restore",
+                            "revert",
+                            "undo",
+                        ]
+                    ):
                         has_compensate = True
                         break
         if not has_try:
             return False, f"ROLLBACK: no try/except protecting window for condition '{cond}'"
         if not has_compensate:
-            return False, f"ROLLBACK: except block has no compensating action for condition '{cond}'"
+            return (
+                False,
+                f"ROLLBACK: except block has no compensating action for condition '{cond}'",
+            )
     return True, None
 
 
@@ -280,6 +308,7 @@ def _detect_defer_until_success(contract: dict, code: str) -> tuple[bool, str | 
 # CHECK 4: ordering constraints
 # ============================================================
 
+
 def _check_ordering(contract: dict, code: str, ref: str) -> tuple[bool, list[str]]:
     violations = []
     for se in contract.get("side_effects", []):
@@ -319,6 +348,7 @@ def _check_ordering(contract: dict, code: str, ref: str) -> tuple[bool, list[str
 # CHECK 5: retry safety
 # ============================================================
 
+
 def _check_retry_safety(contract: dict, code: str, ref: str) -> tuple[bool, list[str]]:
     violations = []
     forbidden = contract.get("retry_semantics", {}).get("duplicate_effects_forbidden", [])
@@ -343,6 +373,7 @@ def _check_retry_safety(contract: dict, code: str, ref: str) -> tuple[bool, list
 # ============================================================
 # CHECK 6: rollback
 # ============================================================
+
 
 def _check_rollback(contract: dict, code: str, ref: str) -> tuple[bool, list[str]]:
     violations = []
@@ -375,7 +406,9 @@ def _check_rollback(contract: dict, code: str, ref: str) -> tuple[bool, list[str
             )
 
     # Check must_not_persist
-    for operation in contract.get("rollback_semantics", {}).get("must_not_persist_after_failure", []):
+    for operation in contract.get("rollback_semantics", {}).get(
+        "must_not_persist_after_failure", []
+    ):
         op_name = _extract_op_name(operation)
         op_lines = _find_operation_lines(code, op_name)
         if not op_lines:
@@ -394,6 +427,7 @@ def _check_rollback(contract: dict, code: str, ref: str) -> tuple[bool, list[str
 # ============================================================
 # HELPERS
 # ============================================================
+
 
 def _find_operation_lines(code: str, op_name: str) -> list[int]:
     """Find all line numbers where an operation appears (via aliases)."""
@@ -426,7 +460,9 @@ def _scan_backwards_for_loop(lines: list[str], start: int, max_dist: int) -> int
         if not stripped:
             continue
         indent = len(line) - len(line.lstrip())
-        if indent < target_indent and any(kw in stripped for kw in ["for ", "while ", "range(", "retry", "attempt"]):
+        if indent < target_indent and any(
+            kw in stripped for kw in ["for ", "while ", "range(", "retry", "attempt"]
+        ):
             return i
     return None
 
@@ -435,10 +471,20 @@ def _scan_for_guard(lines: list[str], start: int, end: int) -> bool:
     """Check for an idempotency guard between start and end lines."""
     for i in range(start, end):
         line = lines[i].strip()
-        if line.startswith("if ") and any(g in line for g in [
-            "not ", "already", "exists", "in seen", "in processed",
-            "idempotency", "not in ", "_done", "_applied",
-        ]):
+        if line.startswith("if ") and any(
+            g in line
+            for g in [
+                "not ",
+                "already",
+                "exists",
+                "in seen",
+                "in processed",
+                "idempotency",
+                "not in ",
+                "_done",
+                "_applied",
+            ]
+        ):
             return True
     return False
 
@@ -468,11 +514,20 @@ def _extract_op_name(description: str) -> str:
 
     # Semantic synonyms — map common description words to alias keys
     _SYNONYMS = {
-        "balance": "debit", "decrement": "debit", "subtract": "debit", "charge": "debit",
-        "increment": "credit", "add": "credit", "refund": "credit",
-        "write": "write_cache", "cache": "write_cache",
-        "save": "commit", "persist": "commit", "flush": "commit",
-        "reserve": "insert", "append": "insert",
+        "balance": "debit",
+        "decrement": "debit",
+        "subtract": "debit",
+        "charge": "debit",
+        "increment": "credit",
+        "add": "credit",
+        "refund": "credit",
+        "write": "write_cache",
+        "cache": "write_cache",
+        "save": "commit",
+        "persist": "commit",
+        "flush": "commit",
+        "reserve": "insert",
+        "append": "insert",
     }
     for word in desc_lower.replace("_", " ").split():
         if word in _SYNONYMS:
@@ -510,7 +565,7 @@ def _extract_except_body(lines: list[str], try_line: int) -> str:
         if in_except:
             if stripped and not stripped.startswith(("try:", "finally:", "else:")):
                 indent = len(lines[i]) - len(lines[i].lstrip())
-                except_indent = len(lines[i-1]) - len(lines[i-1].lstrip()) if i > 0 else 0
+                except_indent = len(lines[i - 1]) - len(lines[i - 1].lstrip()) if i > 0 else 0
                 if indent <= except_indent and stripped:
                     break
                 body.append(stripped)

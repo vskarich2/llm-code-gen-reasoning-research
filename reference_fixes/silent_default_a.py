@@ -11,6 +11,7 @@ FLAGS = {
 def _normalize_key(flag_name):
     """Convert camelCase to snake_case for consistent lookup."""
     import re
+
     # Insert underscore before uppercase letters and lowercase them
     s1 = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", flag_name)
     return s1.lower()

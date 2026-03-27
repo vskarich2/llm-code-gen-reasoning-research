@@ -24,5 +24,5 @@ def clear():
 
 
 def update_and_notify(key, value):
-    publish({"key": key, "value": value})    # BUG: before set_state
+    publish({"key": key, "value": value})  # BUG: before set_state
     set_state(key, value)

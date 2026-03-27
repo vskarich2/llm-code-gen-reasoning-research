@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from live_metrics import (
@@ -42,6 +43,7 @@ def _valid_event(**overrides):
 # A1. Event schema validation
 # ============================================================
 
+
 class TestEventSchema:
     def test_emit_event_missing_key_raises(self, tmp_path):
         event = _valid_event()
@@ -69,6 +71,7 @@ class TestEventSchema:
         assert isinstance(written["timestamp"], str)
         # Verify it's parseable as ISO 8601
         from datetime import datetime
+
         datetime.fromisoformat(written["timestamp"])
 
     def test_emit_event_field_types_enforced(self, tmp_path):
@@ -98,6 +101,7 @@ class TestEventSchema:
 # ============================================================
 # A2. Event durability
 # ============================================================
+
 
 class TestEventDurability:
     def test_emit_event_readable_from_disk(self, tmp_path):
@@ -143,6 +147,7 @@ class TestEventDurability:
 # A3. Safe partial-file reading
 # ============================================================
 
+
 class TestSafeFileReading:
     def _write_raw(self, path, content):
         with open(path, "w") as f:
@@ -184,6 +189,7 @@ class TestSafeFileReading:
 # A4. Run discovery safety
 # ============================================================
 
+
 class TestRunDiscovery:
     def test_discovery_ignores_dir_without_events(self, tmp_path):
         run_dir = tmp_path / "run_test-model_t1_abc123"
@@ -224,6 +230,7 @@ class TestRunDiscovery:
 # A5. Trial completeness logic
 # ============================================================
 
+
 class TestTrialCompleteness:
     def _setup_run(self, tmp_path, model, trial, n_events, total_jobs=116):
         run_dir = tmp_path / f"run_{model}_t{trial}_abc{trial}"
@@ -256,9 +263,9 @@ class TestTrialCompleteness:
         assert progress[0]["actual"] == 0
 
     def test_per_model_summary(self, tmp_path):
-        self._setup_run(tmp_path, "m", 1, 116)    # COMPLETE
-        self._setup_run(tmp_path, "m", 2, 50)     # IN_PROGRESS
-        self._setup_run(tmp_path, "m", 3, 0)      # NOT_STARTED
+        self._setup_run(tmp_path, "m", 1, 116)  # COMPLETE
+        self._setup_run(tmp_path, "m", 2, 50)  # IN_PROGRESS
+        self._setup_run(tmp_path, "m", 3, 0)  # NOT_STARTED
         progress = compute_trial_progress("m", tmp_path, 3)
         statuses = {p["status"] for p in progress}
         assert "COMPLETE" in statuses
@@ -272,6 +279,7 @@ class TestTrialCompleteness:
 # ============================================================
 # A6. Atomic dashboard writing
 # ============================================================
+
 
 class TestAtomicDashboard:
     def test_dashboard_exists_after_write(self, tmp_path):
@@ -296,10 +304,20 @@ class TestAtomicDashboard:
 
     def test_dashboard_rejects_mixed_model_events(self):
         events = [
-            {"model": "A", "pass": True, "condition": "baseline",
-             "reasoning_correct": True, "code_correct": True},
-            {"model": "B", "pass": False, "condition": "baseline",
-             "reasoning_correct": False, "code_correct": False},
+            {
+                "model": "A",
+                "pass": True,
+                "condition": "baseline",
+                "reasoning_correct": True,
+                "code_correct": True,
+            },
+            {
+                "model": "B",
+                "pass": False,
+                "condition": "baseline",
+                "reasoning_correct": False,
+                "code_correct": False,
+            },
         ]
         with pytest.raises(AssertionError, match="multiple models"):
             compute_metrics(events, 100)
@@ -316,6 +334,7 @@ class TestAtomicDashboard:
 # A7. Merge validation (tested via the functions in merge_and_validate)
 # ============================================================
 
+
 class TestMergeValidation:
     """These test the validation logic conceptually.
     Full integration tested via scripts/merge_and_validate.py.
@@ -329,13 +348,19 @@ class TestMergeValidation:
         ]
         tuples = [(e["model"], e["case_id"], e["condition"], e["trial"]) for e in events]
         from collections import Counter
+
         counts = Counter(tuples)
         duplicates = {t: c for t, c in counts.items() if c > 1}
         assert len(duplicates) > 0
 
     def test_merge_detects_missing_tuple(self):
         """Missing one tuple from the expected set."""
-        expected = {("m", "c1", "bl", 1), ("m", "c1", "bl", 2), ("m", "c2", "bl", 1), ("m", "c2", "bl", 2)}
+        expected = {
+            ("m", "c1", "bl", 1),
+            ("m", "c1", "bl", 2),
+            ("m", "c2", "bl", 1),
+            ("m", "c2", "bl", 2),
+        }
         actual = {("m", "c1", "bl", 1), ("m", "c1", "bl", 2), ("m", "c2", "bl", 1)}
         missing = expected - actual
         assert len(missing) == 1
@@ -348,8 +373,12 @@ class TestMergeValidation:
             {"model": "a", "trial": 1, "case_id": "c2", "condition": "bl"},
             {"model": "a", "trial": 1, "case_id": "c1", "condition": "bl"},
         ]
-        sorted1 = sorted(events, key=lambda e: (e["model"], e["trial"], e["case_id"], e["condition"]))
-        sorted2 = sorted(events, key=lambda e: (e["model"], e["trial"], e["case_id"], e["condition"]))
+        sorted1 = sorted(
+            events, key=lambda e: (e["model"], e["trial"], e["case_id"], e["condition"])
+        )
+        sorted2 = sorted(
+            events, key=lambda e: (e["model"], e["trial"], e["case_id"], e["condition"])
+        )
         assert sorted1 == sorted2
         assert sorted1[0]["model"] == "a"
         assert sorted1[0]["case_id"] == "c1"

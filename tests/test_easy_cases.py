@@ -7,6 +7,7 @@ Validates:
   4. All 3 reasoning conditions execute without crashing
   5. Easy cases are registered and loadable
 """
+
 import sys
 import os
 import json
@@ -23,9 +24,7 @@ EASY_IDS = ["easy_temporal", "easy_conservation", "easy_state_machine", "easy_al
 def _load_case(case_id):
     cases = json.loads((BASE / "cases.json").read_text())
     for c in cases:
-        c["code_files_contents"] = {
-            fp: (BASE / fp).read_text().strip() for fp in c["code_files"]
-        }
+        c["code_files_contents"] = {fp: (BASE / fp).read_text().strip() for fp in c["code_files"]}
     return [c for c in cases if c["id"] == case_id][0]
 
 
@@ -40,6 +39,7 @@ def _wrap(code):
 # ════════════════════════════════════════════════════════════
 # 1. EASY CASES EXIST AND LOAD
 # ════════════════════════════════════════════════════════════
+
 
 def test_easy_cases_registered():
     cases = json.loads((BASE / "cases.json").read_text())
@@ -59,8 +59,10 @@ def test_easy_cases_have_difficulty_field():
 # 2. REFERENCE CODE PASSES INVARIANTS
 # ════════════════════════════════════════════════════════════
 
+
 def test_easy_temporal_reference_passes():
     from exec_eval import exec_evaluate
+
     case = _load_case("easy_temporal")
     r = exec_evaluate(case, _concat_ref(case))
     assert r["pass"], f"easy_temporal reference should pass: {r['reasons']}"
@@ -68,6 +70,7 @@ def test_easy_temporal_reference_passes():
 
 def test_easy_conservation_reference_passes():
     from exec_eval import exec_evaluate
+
     case = _load_case("easy_conservation")
     r = exec_evaluate(case, _concat_ref(case))
     assert r["pass"], f"easy_conservation reference should pass: {r['reasons']}"
@@ -75,6 +78,7 @@ def test_easy_conservation_reference_passes():
 
 def test_easy_state_machine_reference_passes():
     from exec_eval import exec_evaluate
+
     case = _load_case("easy_state_machine")
     r = exec_evaluate(case, _concat_ref(case))
     assert r["pass"], f"easy_state_machine reference should pass: {r['reasons']}"
@@ -82,6 +86,7 @@ def test_easy_state_machine_reference_passes():
 
 def test_easy_aliasing_reference_passes():
     from exec_eval import exec_evaluate
+
     case = _load_case("easy_aliasing")
     r = exec_evaluate(case, _concat_ref(case))
     assert r["pass"], f"easy_aliasing reference should pass: {r['reasons']}"
@@ -91,9 +96,11 @@ def test_easy_aliasing_reference_passes():
 # 3. MUTATIONS BREAK INVARIANTS
 # ════════════════════════════════════════════════════════════
 
+
 def test_easy_temporal_mutation_fails():
     """Remove logging → invariant fails."""
     from exec_eval import exec_evaluate
+
     case = _load_case("easy_temporal")
     broken = (
         "_log = []\n"
@@ -115,6 +122,7 @@ def test_easy_temporal_mutation_fails():
 def test_easy_conservation_mutation_fails():
     """Remove debit → total not conserved."""
     from exec_eval import exec_evaluate
+
     case = _load_case("easy_conservation")
     broken = (
         "def transfer(src, dst, amount):\n"
@@ -132,6 +140,7 @@ def test_easy_conservation_mutation_fails():
 def test_easy_state_machine_mutation_fails():
     """Remove guard → invalid transition succeeds."""
     from exec_eval import exec_evaluate
+
     case = _load_case("easy_state_machine")
     broken = (
         "def transition(item, new_status):\n"
@@ -148,6 +157,7 @@ def test_easy_state_machine_mutation_fails():
 def test_easy_aliasing_mutation_fails():
     """Return copy instead of reference → mutation not visible."""
     from exec_eval import exec_evaluate
+
     case = _load_case("easy_aliasing")
     broken = (
         "_data = {'items': []}\n"
@@ -170,8 +180,10 @@ def test_easy_aliasing_mutation_fails():
 # 4. REASONING INTERFACE CONDITIONS
 # ════════════════════════════════════════════════════════════
 
+
 def test_reasoning_conditions_registered():
     from runner import ALL_CONDITIONS, VALID_CONDITIONS
+
     for c in ["structured_reasoning", "free_form_reasoning", "branching_reasoning"]:
         assert c in ALL_CONDITIONS, f"{c} not in ALL_CONDITIONS"
         assert c in VALID_CONDITIONS
@@ -179,6 +191,7 @@ def test_reasoning_conditions_registered():
 
 def test_reasoning_prompts_differ():
     from execution import build_prompt
+
     case = _load_case("easy_temporal")
     base, _ = build_prompt(case, "baseline")
     sr, _ = build_prompt(case, "structured_reasoning")
@@ -196,6 +209,7 @@ def test_reasoning_prompts_differ():
 
 def test_structured_has_steps():
     from reasoning_prompts import build_structured_reasoning
+
     p = build_structured_reasoning("base")
     assert "Step 1" in p
     assert "Step 4" in p
@@ -203,6 +217,7 @@ def test_structured_has_steps():
 
 def test_free_form_is_minimal():
     from reasoning_prompts import build_free_form_reasoning
+
     p = build_free_form_reasoning("base")
     assert "Step 1" not in p
     assert len(p) < len(build_free_form_reasoning("base")) + 200
@@ -210,6 +225,7 @@ def test_free_form_is_minimal():
 
 def test_branching_has_two_approaches():
     from reasoning_prompts import build_branching_reasoning
+
     p = build_branching_reasoning("base")
     assert "APPROACH A" in p
     assert "APPROACH B" in p
@@ -220,8 +236,10 @@ def test_branching_has_two_approaches():
 # 5. REASONING CONDITIONS EXECUTE
 # ════════════════════════════════════════════════════════════
 
+
 def test_all_reasoning_conditions_run():
     from execution import run_single
+
     case = _load_case("easy_temporal")
     for cond in ["structured_reasoning", "free_form_reasoning", "branching_reasoning"]:
         cid, cn, ev = run_single(case, "gpt-4.1-nano", cond)

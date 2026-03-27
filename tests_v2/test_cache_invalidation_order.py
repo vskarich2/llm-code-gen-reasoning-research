@@ -33,8 +33,6 @@ def test(mod):
         return False, [f"raised: {e}"]
 
     if r2 != "v2":
-        return False, [
-            f"stale cache: read_record returned {r2!r}, expected 'v2'"
-        ]
+        return False, [f"stale cache: read_record returned {r2!r}, expected 'v2'"]
 
     return True, ["cache properly updated after second write"]

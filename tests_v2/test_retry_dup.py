@@ -17,9 +17,7 @@ def test_a(mod):
     sent = mod.get_sent()
 
     if len(sent) != 1:
-        return False, [
-            f"expected 1 message in _sent after successful send, got {len(sent)}"
-        ]
+        return False, [f"expected 1 message in _sent after successful send, got {len(sent)}"]
 
     if sent[0] != "hello":
         return False, [f"expected 'hello', got {sent[0]!r}"]
@@ -43,15 +41,11 @@ def test_b(mod):
     messages = mod.get_messages()
 
     if len(messages) != 1:
-        return False, [
-            f"expected 1 message in store after successful send, got {len(messages)}"
-        ]
+        return False, [f"expected 1 message in store after successful send, got {len(messages)}"]
 
     notifications = mod.get_notifications()
     if len(notifications) != 1:
-        return False, [
-            f"expected 1 notification, got {len(notifications)}"
-        ]
+        return False, [f"expected 1 notification, got {len(notifications)}"]
 
     return True, ["send_with_retry stores and notifies exactly once"]
 
@@ -74,8 +68,6 @@ def test_c(mod):
     messages = mod.get_messages()
 
     if len(messages) != 1:
-        return False, [
-            f"expected 1 message in store after ingest, got {len(messages)}"
-        ]
+        return False, [f"expected 1 message in store after ingest, got {len(messages)}"]
 
     return True, ["ingest stores message exactly once through nested retry"]

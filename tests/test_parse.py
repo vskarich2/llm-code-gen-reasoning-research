@@ -1,6 +1,8 @@
 """Tier 1 (T1.4): Parse logic — JSON parsing, code extraction, import stripping."""
+
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from parse import parse_model_response

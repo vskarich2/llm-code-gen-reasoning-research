@@ -44,6 +44,7 @@ FIELD_TYPES = {
 # EVENT EMITTER (called from worker processes)
 # ============================================================
 
+
 def emit_event(event: dict, events_path: Path) -> None:
     """Validate and write one event to events_path. Durable (fsync).
 
@@ -78,6 +79,7 @@ def emit_event(event: dict, events_path: Path) -> None:
 # ============================================================
 # SAFE EVENT FILE READER
 # ============================================================
+
 
 def read_events_safe(events_path: Path) -> list[dict]:
     """Read all valid events from a JSONL file. Skip corrupt/incomplete lines.
@@ -116,6 +118,7 @@ def read_events_safe(events_path: Path) -> list[dict]:
 # RUN DIRECTORY DISCOVERY + AGGREGATION
 # ============================================================
 
+
 def aggregate_model_events(model: str, ablation_dir: Path) -> list[dict]:
     """Discover all run directories for a model and read their events.
 
@@ -141,6 +144,7 @@ def aggregate_model_events(model: str, ablation_dir: Path) -> list[dict]:
 # ============================================================
 # TRIAL PROGRESS
 # ============================================================
+
 
 def compute_trial_progress(model: str, ablation_dir: Path, n_trials: int) -> list[dict]:
     """Compute per-trial completion status for a model.
@@ -192,13 +196,15 @@ def compute_trial_progress(model: str, ablation_dir: Path, n_trials: int) -> lis
         else:
             status = "NOT_STARTED"
 
-        progress.append({
-            "trial": trial,
-            "actual": actual,
-            "expected": expected,
-            "status": status,
-            "metadata_error": metadata_error,
-        })
+        progress.append(
+            {
+                "trial": trial,
+                "actual": actual,
+                "expected": expected,
+                "status": status,
+                "metadata_error": metadata_error,
+            }
+        )
 
     return progress
 
@@ -206,6 +212,7 @@ def compute_trial_progress(model: str, ablation_dir: Path, n_trials: int) -> lis
 # ============================================================
 # METRICS COMPUTATION (pure function)
 # ============================================================
+
 
 def compute_metrics(events: list[dict], total_jobs: int) -> dict:
     """Compute all dashboard metrics from a flat event list.
@@ -227,9 +234,9 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
 
     # Enforce model purity
     models_seen = set(e.get("model") for e in events)
-    assert len(models_seen) <= 1, (
-        f"compute_metrics received events from multiple models: {models_seen}"
-    )
+    assert (
+        len(models_seen) <= 1
+    ), f"compute_metrics received events from multiple models: {models_seen}"
 
     # Enforce required metric fields
     for e in events:
@@ -256,13 +263,15 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
         # per Phase 0 reasoning_evaluator_audit. Kept for informational purposes only. Do NOT use for
         # scientific conclusions.)
         leg_count = sum(
-            1 for e in ce
+            1
+            for e in ce
             if e.get("reasoning_correct") is True and e.get("code_correct") is not True
         )
         leg_rate = leg_count / cn
 
         lucky_count = sum(
-            1 for e in ce
+            1
+            for e in ce
             if e.get("reasoning_correct") is not True and e.get("code_correct") is True
         )
         lucky_rate = lucky_count / cn
@@ -305,6 +314,7 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
     # --- CASE STABILITY ---
     # Per (case_id, condition): count distinct pass values across trials
     from collections import defaultdict
+
     case_cond_passes = defaultdict(set)
     for e in events:
         key = (e.get("case_id"), e.get("condition"))
@@ -338,9 +348,13 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
     for e in events:
         cid = e.get("case_id", "?")
         case_stats[cid]["pass"].append(1 if e.get("pass") else 0)
-        is_leg = 1 if (e.get("reasoning_correct") is True and e.get("code_correct") is not True) else 0
+        is_leg = (
+            1 if (e.get("reasoning_correct") is True and e.get("code_correct") is not True) else 0
+        )
         case_stats[cid]["leg"].append(is_leg)
-        is_lucky = 1 if (e.get("reasoning_correct") is not True and e.get("code_correct") is True) else 0
+        is_lucky = (
+            1 if (e.get("reasoning_correct") is not True and e.get("code_correct") is True) else 0
+        )
         case_stats[cid]["lucky"].append(is_lucky)
 
     # Sort case_ids for deterministic ordering
@@ -355,8 +369,12 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
     # Intervention delta per case
     case_deltas = []
     for cid in sorted_cases:
-        bl_events = [e for e in events if e.get("case_id") == cid and e.get("condition") == "baseline"]
-        lr_events = [e for e in events if e.get("case_id") == cid and e.get("condition") == "leg_reduction"]
+        bl_events = [
+            e for e in events if e.get("case_id") == cid and e.get("condition") == "baseline"
+        ]
+        lr_events = [
+            e for e in events if e.get("case_id") == cid and e.get("condition") == "leg_reduction"
+        ]
         if bl_events and lr_events:
             bl_pass = sum(1 for e in bl_events if e.get("pass")) / len(bl_events)
             lr_pass = sum(1 for e in lr_events if e.get("pass")) / len(lr_events)
@@ -377,6 +395,7 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
 # DASHBOARD GUARDS
 # ============================================================
 
+
 def validate_metrics(metrics: dict, model: str) -> list[str]:
     """Post-computation validation. Returns list of warnings.
 
@@ -396,9 +415,7 @@ def validate_metrics(metrics: dict, model: str) -> list[str]:
         )
 
     if metrics.get("pass_rate", 0) == 0:
-        errors.append(
-            f"overall pass_rate == 0 for {model} ({completed} evals)."
-        )
+        errors.append(f"overall pass_rate == 0 for {model} ({completed} evals).")
 
     return errors
 
@@ -406,6 +423,7 @@ def validate_metrics(metrics: dict, model: str) -> list[str]:
 # ============================================================
 # FORMATTING HELPERS
 # ============================================================
+
 
 def _fmt_pct(val, width=8):
     if val is None:
@@ -422,6 +440,7 @@ def _fmt_num(val, width=8):
 # ============================================================
 # DASHBOARD WRITER
 # ============================================================
+
 
 def write_dashboard(metrics: dict, dashboard_path: Path) -> None:
     """Write dashboard to file atomically (temp + fsync + replace)."""
@@ -475,14 +494,18 @@ def write_dashboard(metrics: dict, dashboard_path: Path) -> None:
         w("  Lucky = code correct but reasoning wrong (UNRELIABLE — classifier disqualified)")
         w("  E|R   = P(code correct | reasoning correct) (UNRELIABLE)")
         w("  NOTE: LEG/Lucky/E|R depend on reasoning classifier which failed Phase 0 controls.")
-        w("        See reasoning_evaluator_audit/phase0_report.md. Only Pass rate is scientifically valid.")
+        w(
+            "        See reasoning_evaluator_audit/phase0_report.md. Only Pass rate is scientifically valid."
+        )
         w("")
         w(f"  {'Condition':<20} {'N':>5} {'Pass':>8} {'LEG':>8} {'Lucky':>8} {'E|R':>8}")
         w(f"  {'─' * 60}")
         for cond, cm in sorted(cond_metrics.items()):
             er = f"{cm['exec_reasoning']:.4f}" if cm["exec_reasoning"] is not None else "N/A"
-            w(f"  {cond:<20} {cm['n']:>5} {cm['pass_rate']:>7.4f} {cm['leg_rate']:>7.4f} "
-              f"{cm['lucky_fix_rate']:>7.4f} {er:>8}")
+            w(
+                f"  {cond:<20} {cm['n']:>5} {cm['pass_rate']:>7.4f} {cm['leg_rate']:>7.4f} "
+                f"{cm['lucky_fix_rate']:>7.4f} {er:>8}"
+            )
         w("")
 
     # --- DELTAS ---
@@ -518,12 +541,17 @@ def write_dashboard(metrics: dict, dashboard_path: Path) -> None:
 
     # --- TOP CASES ---
     for label, key, desc in [
-        ("LEG Rate", "top5_leg",
-         "Cases with the highest reasoning-correct-but-code-wrong rate."),
-        ("Lucky Fix Rate", "top5_lucky",
-         "Cases with the highest code-correct-but-reasoning-wrong rate."),
-        ("Intervention Delta", "top5_delta",
-         "Cases where leg_reduction improved pass rate the most vs baseline."),
+        ("LEG Rate", "top5_leg", "Cases with the highest reasoning-correct-but-code-wrong rate."),
+        (
+            "Lucky Fix Rate",
+            "top5_lucky",
+            "Cases with the highest code-correct-but-reasoning-wrong rate.",
+        ),
+        (
+            "Intervention Delta",
+            "top5_delta",
+            "Cases where leg_reduction improved pass rate the most vs baseline.",
+        ),
     ]:
         top = metrics.get(key, [])
         if top:
@@ -546,7 +574,7 @@ def write_dashboard(metrics: dict, dashboard_path: Path) -> None:
             w(f"    Pass rate:  {cm['pass_rate']:.4f}")
             w(f"    LEG rate:   {cm['leg_rate']:.4f}")
             w(f"    Lucky fix:  {cm['lucky_fix_rate']:.4f}")
-            er_str = f"{cm['exec_reasoning']:.4f}" if cm['exec_reasoning'] is not None else "N/A"
+            er_str = f"{cm['exec_reasoning']:.4f}" if cm["exec_reasoning"] is not None else "N/A"
             w(f"    Exec|Reas:  {er_str}")
     w("")
 

@@ -28,10 +28,10 @@ from scripts.paper_analysis import (
 )
 from live_metrics import compute_metrics
 
-
 # ============================================================
 # FIXTURES
 # ============================================================
+
 
 def _make_events(model="m1", cases=None, conditions=None, trials=None, pass_fn=None):
     """Generate synthetic events. pass_fn(case_id, condition, trial) -> bool."""
@@ -43,23 +43,26 @@ def _make_events(model="m1", cases=None, conditions=None, trials=None, pass_fn=N
         for cond in conditions:
             for trial in trials:
                 p = pass_fn(case_id, cond, trial) if pass_fn else True
-                events.append({
-                    "model": model,
-                    "trial": trial,
-                    "run_id": f"run_{trial}",
-                    "case_id": case_id,
-                    "condition": cond,
-                    "timestamp": "2026-01-01T00:00:00",
-                    "pass": p,
-                    "reasoning_correct": p,  # default: aligned
-                    "code_correct": p,
-                })
+                events.append(
+                    {
+                        "model": model,
+                        "trial": trial,
+                        "run_id": f"run_{trial}",
+                        "case_id": case_id,
+                        "condition": cond,
+                        "timestamp": "2026-01-01T00:00:00",
+                        "pass": p,
+                        "reasoning_correct": p,  # default: aligned
+                        "code_correct": p,
+                    }
+                )
     return events
 
 
 # ============================================================
 # B1. Mean consistency
 # ============================================================
+
 
 class TestMeanConsistency:
     def test_numpy_pandas_mean_agree(self):
@@ -71,7 +74,7 @@ class TestMeanConsistency:
             cases=["c1", "c2", "c3", "c4"],
             conditions=["baseline", "leg_reduction"],
             trials=[1, 2],
-            pass_fn=lambda c, cond, t: (c in ["c1", "c2"]) if cond == "baseline" else (c == "c1")
+            pass_fn=lambda c, cond, t: (c in ["c1", "c2"]) if cond == "baseline" else (c == "c1"),
         )
         case_df = build_case_level_df(events)
         # c1/baseline: both trials pass → 1.0
@@ -90,25 +93,97 @@ class TestCaseAggregation:
         """B1a. 2 cases, 2 conditions, 2 trials with known values."""
         events = [
             # c1/baseline: t1=pass, t2=fail → 0.5
-            {"model": "m", "trial": 1, "run_id": "r1", "case_id": "c1", "condition": "baseline",
-             "timestamp": "t", "pass": True, "reasoning_correct": True, "code_correct": True},
-            {"model": "m", "trial": 2, "run_id": "r2", "case_id": "c1", "condition": "baseline",
-             "timestamp": "t", "pass": False, "reasoning_correct": False, "code_correct": False},
+            {
+                "model": "m",
+                "trial": 1,
+                "run_id": "r1",
+                "case_id": "c1",
+                "condition": "baseline",
+                "timestamp": "t",
+                "pass": True,
+                "reasoning_correct": True,
+                "code_correct": True,
+            },
+            {
+                "model": "m",
+                "trial": 2,
+                "run_id": "r2",
+                "case_id": "c1",
+                "condition": "baseline",
+                "timestamp": "t",
+                "pass": False,
+                "reasoning_correct": False,
+                "code_correct": False,
+            },
             # c2/baseline: t1=pass, t2=pass → 1.0
-            {"model": "m", "trial": 1, "run_id": "r1", "case_id": "c2", "condition": "baseline",
-             "timestamp": "t", "pass": True, "reasoning_correct": True, "code_correct": True},
-            {"model": "m", "trial": 2, "run_id": "r2", "case_id": "c2", "condition": "baseline",
-             "timestamp": "t", "pass": True, "reasoning_correct": True, "code_correct": True},
+            {
+                "model": "m",
+                "trial": 1,
+                "run_id": "r1",
+                "case_id": "c2",
+                "condition": "baseline",
+                "timestamp": "t",
+                "pass": True,
+                "reasoning_correct": True,
+                "code_correct": True,
+            },
+            {
+                "model": "m",
+                "trial": 2,
+                "run_id": "r2",
+                "case_id": "c2",
+                "condition": "baseline",
+                "timestamp": "t",
+                "pass": True,
+                "reasoning_correct": True,
+                "code_correct": True,
+            },
             # c1/leg_reduction: both pass → 1.0
-            {"model": "m", "trial": 1, "run_id": "r1", "case_id": "c1", "condition": "leg_reduction",
-             "timestamp": "t", "pass": True, "reasoning_correct": True, "code_correct": True},
-            {"model": "m", "trial": 2, "run_id": "r2", "case_id": "c1", "condition": "leg_reduction",
-             "timestamp": "t", "pass": True, "reasoning_correct": True, "code_correct": True},
+            {
+                "model": "m",
+                "trial": 1,
+                "run_id": "r1",
+                "case_id": "c1",
+                "condition": "leg_reduction",
+                "timestamp": "t",
+                "pass": True,
+                "reasoning_correct": True,
+                "code_correct": True,
+            },
+            {
+                "model": "m",
+                "trial": 2,
+                "run_id": "r2",
+                "case_id": "c1",
+                "condition": "leg_reduction",
+                "timestamp": "t",
+                "pass": True,
+                "reasoning_correct": True,
+                "code_correct": True,
+            },
             # c2/leg_reduction: both fail → 0.0
-            {"model": "m", "trial": 1, "run_id": "r1", "case_id": "c2", "condition": "leg_reduction",
-             "timestamp": "t", "pass": False, "reasoning_correct": False, "code_correct": False},
-            {"model": "m", "trial": 2, "run_id": "r2", "case_id": "c2", "condition": "leg_reduction",
-             "timestamp": "t", "pass": False, "reasoning_correct": False, "code_correct": False},
+            {
+                "model": "m",
+                "trial": 1,
+                "run_id": "r1",
+                "case_id": "c2",
+                "condition": "leg_reduction",
+                "timestamp": "t",
+                "pass": False,
+                "reasoning_correct": False,
+                "code_correct": False,
+            },
+            {
+                "model": "m",
+                "trial": 2,
+                "run_id": "r2",
+                "case_id": "c2",
+                "condition": "leg_reduction",
+                "timestamp": "t",
+                "pass": False,
+                "reasoning_correct": False,
+                "code_correct": False,
+            },
         ]
         case_df = build_case_level_df(events)
 
@@ -124,21 +199,75 @@ class TestExecReasoning:
         """B1b. P(code_correct | reasoning_correct) with mixed data."""
         events = [
             # reasoning_correct=True, code_correct=True (2 events)
-            {"model": "m", "condition": "baseline", "reasoning_correct": True, "code_correct": True,
-             "trial": 1, "run_id": "r", "case_id": "c1", "timestamp": "t", "pass": True},
-            {"model": "m", "condition": "baseline", "reasoning_correct": True, "code_correct": True,
-             "trial": 2, "run_id": "r", "case_id": "c1", "timestamp": "t", "pass": True},
+            {
+                "model": "m",
+                "condition": "baseline",
+                "reasoning_correct": True,
+                "code_correct": True,
+                "trial": 1,
+                "run_id": "r",
+                "case_id": "c1",
+                "timestamp": "t",
+                "pass": True,
+            },
+            {
+                "model": "m",
+                "condition": "baseline",
+                "reasoning_correct": True,
+                "code_correct": True,
+                "trial": 2,
+                "run_id": "r",
+                "case_id": "c1",
+                "timestamp": "t",
+                "pass": True,
+            },
             # reasoning_correct=True, code_correct=False (1 event)
-            {"model": "m", "condition": "baseline", "reasoning_correct": True, "code_correct": False,
-             "trial": 1, "run_id": "r", "case_id": "c2", "timestamp": "t", "pass": False},
+            {
+                "model": "m",
+                "condition": "baseline",
+                "reasoning_correct": True,
+                "code_correct": False,
+                "trial": 1,
+                "run_id": "r",
+                "case_id": "c2",
+                "timestamp": "t",
+                "pass": False,
+            },
             # reasoning_correct=False, code_correct=True (1 event)
-            {"model": "m", "condition": "baseline", "reasoning_correct": False, "code_correct": True,
-             "trial": 1, "run_id": "r", "case_id": "c3", "timestamp": "t", "pass": True},
+            {
+                "model": "m",
+                "condition": "baseline",
+                "reasoning_correct": False,
+                "code_correct": True,
+                "trial": 1,
+                "run_id": "r",
+                "case_id": "c3",
+                "timestamp": "t",
+                "pass": True,
+            },
             # reasoning_correct=False, code_correct=False (2 events)
-            {"model": "m", "condition": "baseline", "reasoning_correct": False, "code_correct": False,
-             "trial": 1, "run_id": "r", "case_id": "c4", "timestamp": "t", "pass": False},
-            {"model": "m", "condition": "baseline", "reasoning_correct": False, "code_correct": False,
-             "trial": 2, "run_id": "r", "case_id": "c4", "timestamp": "t", "pass": False},
+            {
+                "model": "m",
+                "condition": "baseline",
+                "reasoning_correct": False,
+                "code_correct": False,
+                "trial": 1,
+                "run_id": "r",
+                "case_id": "c4",
+                "timestamp": "t",
+                "pass": False,
+            },
+            {
+                "model": "m",
+                "condition": "baseline",
+                "reasoning_correct": False,
+                "code_correct": False,
+                "trial": 2,
+                "run_id": "r",
+                "case_id": "c4",
+                "timestamp": "t",
+                "pass": False,
+            },
         ]
         er = compute_exec_reasoning(events, "m", "baseline")
         # P(code_correct | reasoning_correct) = 2/3 ≈ 0.6667
@@ -149,14 +278,50 @@ class TestLEGDefinition:
     def test_leg_definition_correct(self):
         """B1c. LEG = reasoning_correct AND NOT code_correct ONLY."""
         events = [
-            {"model": "m", "condition": "bl", "reasoning_correct": True, "code_correct": True,
-             "trial": 1, "run_id": "r", "case_id": "c1", "timestamp": "t", "pass": True},
-            {"model": "m", "condition": "bl", "reasoning_correct": True, "code_correct": False,
-             "trial": 1, "run_id": "r", "case_id": "c2", "timestamp": "t", "pass": False},
-            {"model": "m", "condition": "bl", "reasoning_correct": False, "code_correct": True,
-             "trial": 1, "run_id": "r", "case_id": "c3", "timestamp": "t", "pass": True},
-            {"model": "m", "condition": "bl", "reasoning_correct": False, "code_correct": False,
-             "trial": 1, "run_id": "r", "case_id": "c4", "timestamp": "t", "pass": False},
+            {
+                "model": "m",
+                "condition": "bl",
+                "reasoning_correct": True,
+                "code_correct": True,
+                "trial": 1,
+                "run_id": "r",
+                "case_id": "c1",
+                "timestamp": "t",
+                "pass": True,
+            },
+            {
+                "model": "m",
+                "condition": "bl",
+                "reasoning_correct": True,
+                "code_correct": False,
+                "trial": 1,
+                "run_id": "r",
+                "case_id": "c2",
+                "timestamp": "t",
+                "pass": False,
+            },
+            {
+                "model": "m",
+                "condition": "bl",
+                "reasoning_correct": False,
+                "code_correct": True,
+                "trial": 1,
+                "run_id": "r",
+                "case_id": "c3",
+                "timestamp": "t",
+                "pass": True,
+            },
+            {
+                "model": "m",
+                "condition": "bl",
+                "reasoning_correct": False,
+                "code_correct": False,
+                "trial": 1,
+                "run_id": "r",
+                "case_id": "c4",
+                "timestamp": "t",
+                "pass": False,
+            },
         ]
         case_df = build_case_level_df(events)
         # Only c2 is LEG (reasoning_correct=True, code_correct=False)
@@ -171,8 +336,17 @@ class TestTrialAveraging:
     def test_trial_averaging_per_case(self):
         """B1d. Case c1, baseline, 4 trials with pass=[T,F,T,T] → 0.75."""
         events = [
-            {"model": "m", "trial": t, "run_id": f"r{t}", "case_id": "c1", "condition": "baseline",
-             "timestamp": "t", "pass": p, "reasoning_correct": p, "code_correct": p}
+            {
+                "model": "m",
+                "trial": t,
+                "run_id": f"r{t}",
+                "case_id": "c1",
+                "condition": "baseline",
+                "timestamp": "t",
+                "pass": p,
+                "reasoning_correct": p,
+                "code_correct": p,
+            }
             for t, p in [(1, True), (2, False), (3, True), (4, True)]
         ]
         case_df = build_case_level_df(events)
@@ -183,15 +357,34 @@ class TestTrialAveraging:
 # B2. Paired t-test correctness
 # ============================================================
 
+
 class TestPairedTtest:
     def _make_paired_case_df(self, baseline, treatment, cases=None):
         cases = cases or [f"c{i}" for i in range(len(baseline))]
         rows = []
         for i, (bl, tr) in enumerate(zip(baseline, treatment)):
-            rows.append({"model": "m", "case_id": cases[i], "condition": "baseline",
-                         "pass_rate": bl, "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 2})
-            rows.append({"model": "m", "case_id": cases[i], "condition": "leg_reduction",
-                         "pass_rate": tr, "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 2})
+            rows.append(
+                {
+                    "model": "m",
+                    "case_id": cases[i],
+                    "condition": "baseline",
+                    "pass_rate": bl,
+                    "leg_rate": 0,
+                    "lucky_fix_rate": 0,
+                    "n_trials": 2,
+                }
+            )
+            rows.append(
+                {
+                    "model": "m",
+                    "case_id": cases[i],
+                    "condition": "leg_reduction",
+                    "pass_rate": tr,
+                    "leg_rate": 0,
+                    "lucky_fix_rate": 0,
+                    "n_trials": 2,
+                }
+            )
         return pd.DataFrame(rows)
 
     def test_paired_ttest_known_fixture(self):
@@ -210,15 +403,43 @@ class TestPairedTtest:
 
     def test_paired_ttest_misaligned_raises(self):
         rows = [
-            {"model": "m", "case_id": "c1", "condition": "baseline", "pass_rate": 0.1,
-             "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 2},
-            {"model": "m", "case_id": "c2", "condition": "baseline", "pass_rate": 0.2,
-             "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 2},
+            {
+                "model": "m",
+                "case_id": "c1",
+                "condition": "baseline",
+                "pass_rate": 0.1,
+                "leg_rate": 0,
+                "lucky_fix_rate": 0,
+                "n_trials": 2,
+            },
+            {
+                "model": "m",
+                "case_id": "c2",
+                "condition": "baseline",
+                "pass_rate": 0.2,
+                "leg_rate": 0,
+                "lucky_fix_rate": 0,
+                "n_trials": 2,
+            },
             # leg_reduction has c3 instead of c2 — misaligned!
-            {"model": "m", "case_id": "c1", "condition": "leg_reduction", "pass_rate": 0.3,
-             "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 2},
-            {"model": "m", "case_id": "c3", "condition": "leg_reduction", "pass_rate": 0.4,
-             "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 2},
+            {
+                "model": "m",
+                "case_id": "c1",
+                "condition": "leg_reduction",
+                "pass_rate": 0.3,
+                "leg_rate": 0,
+                "lucky_fix_rate": 0,
+                "n_trials": 2,
+            },
+            {
+                "model": "m",
+                "case_id": "c3",
+                "condition": "leg_reduction",
+                "pass_rate": 0.4,
+                "leg_rate": 0,
+                "lucky_fix_rate": 0,
+                "n_trials": 2,
+            },
         ]
         case_df = pd.DataFrame(rows)
         with pytest.raises(ValueError, match="Case alignment mismatch"):
@@ -227,14 +448,42 @@ class TestPairedTtest:
     def test_case_alignment_enforced_before_stats(self):
         """Deliberately shuffle one condition's case ordering."""
         rows = [
-            {"model": "m", "case_id": "c1", "condition": "baseline", "pass_rate": 0.1,
-             "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 2},
-            {"model": "m", "case_id": "c2", "condition": "baseline", "pass_rate": 0.2,
-             "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 2},
-            {"model": "m", "case_id": "c2", "condition": "leg_reduction", "pass_rate": 0.3,
-             "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 2},
-            {"model": "m", "case_id": "c3", "condition": "leg_reduction", "pass_rate": 0.4,
-             "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 2},
+            {
+                "model": "m",
+                "case_id": "c1",
+                "condition": "baseline",
+                "pass_rate": 0.1,
+                "leg_rate": 0,
+                "lucky_fix_rate": 0,
+                "n_trials": 2,
+            },
+            {
+                "model": "m",
+                "case_id": "c2",
+                "condition": "baseline",
+                "pass_rate": 0.2,
+                "leg_rate": 0,
+                "lucky_fix_rate": 0,
+                "n_trials": 2,
+            },
+            {
+                "model": "m",
+                "case_id": "c2",
+                "condition": "leg_reduction",
+                "pass_rate": 0.3,
+                "leg_rate": 0,
+                "lucky_fix_rate": 0,
+                "n_trials": 2,
+            },
+            {
+                "model": "m",
+                "case_id": "c3",
+                "condition": "leg_reduction",
+                "pass_rate": 0.4,
+                "leg_rate": 0,
+                "lucky_fix_rate": 0,
+                "n_trials": 2,
+            },
         ]
         case_df = pd.DataFrame(rows)
         with pytest.raises(ValueError, match="Case alignment mismatch"):
@@ -254,6 +503,7 @@ class TestPairedTtest:
 # B3. Bootstrap correctness
 # ============================================================
 
+
 class TestBootstrap:
     def _make_case_df(self, n=20):
         rng_data = np.random.default_rng(seed=123)
@@ -261,10 +511,28 @@ class TestBootstrap:
         for i in range(n):
             bl = rng_data.uniform(0, 1)
             lr = bl + rng_data.uniform(-0.1, 0.3)
-            rows.append({"model": "m", "case_id": f"c{i}", "condition": "baseline",
-                         "pass_rate": bl, "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 8})
-            rows.append({"model": "m", "case_id": f"c{i}", "condition": "leg_reduction",
-                         "pass_rate": lr, "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 8})
+            rows.append(
+                {
+                    "model": "m",
+                    "case_id": f"c{i}",
+                    "condition": "baseline",
+                    "pass_rate": bl,
+                    "leg_rate": 0,
+                    "lucky_fix_rate": 0,
+                    "n_trials": 8,
+                }
+            )
+            rows.append(
+                {
+                    "model": "m",
+                    "case_id": f"c{i}",
+                    "condition": "leg_reduction",
+                    "pass_rate": lr,
+                    "leg_rate": 0,
+                    "lucky_fix_rate": 0,
+                    "n_trials": 8,
+                }
+            )
         return pd.DataFrame(rows)
 
     def test_bootstrap_preserves_pairing(self):
@@ -293,10 +561,28 @@ class TestBootstrap:
         """Fixture with clear positive effect and low variance."""
         rows = []
         for i in range(30):
-            rows.append({"model": "m", "case_id": f"c{i}", "condition": "baseline",
-                         "pass_rate": 0.5, "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 8})
-            rows.append({"model": "m", "case_id": f"c{i}", "condition": "leg_reduction",
-                         "pass_rate": 0.6, "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 8})
+            rows.append(
+                {
+                    "model": "m",
+                    "case_id": f"c{i}",
+                    "condition": "baseline",
+                    "pass_rate": 0.5,
+                    "leg_rate": 0,
+                    "lucky_fix_rate": 0,
+                    "n_trials": 8,
+                }
+            )
+            rows.append(
+                {
+                    "model": "m",
+                    "case_id": f"c{i}",
+                    "condition": "leg_reduction",
+                    "pass_rate": 0.6,
+                    "leg_rate": 0,
+                    "lucky_fix_rate": 0,
+                    "n_trials": 8,
+                }
+            )
         case_df = pd.DataFrame(rows)
         rng = np.random.default_rng(seed=42)
         ci = bootstrap_ci(case_df, "m", "pass_rate", rng)
@@ -324,6 +610,7 @@ class TestBootstrap:
 # B4. Interaction analysis
 # ============================================================
 
+
 class TestInteraction:
     def _make_interaction_df(self):
         rows = []
@@ -334,10 +621,28 @@ class TestInteraction:
                 # model_b gets stronger intervention effect
                 delta = 0.05 if model == "model_a" else 0.20
                 lr = bl + delta + rng.uniform(-0.02, 0.02)
-                rows.append({"model": model, "case_id": f"c{i}", "condition": "baseline",
-                             "pass_rate": bl, "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 8})
-                rows.append({"model": model, "case_id": f"c{i}", "condition": "leg_reduction",
-                             "pass_rate": lr, "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 8})
+                rows.append(
+                    {
+                        "model": model,
+                        "case_id": f"c{i}",
+                        "condition": "baseline",
+                        "pass_rate": bl,
+                        "leg_rate": 0,
+                        "lucky_fix_rate": 0,
+                        "n_trials": 8,
+                    }
+                )
+                rows.append(
+                    {
+                        "model": model,
+                        "case_id": f"c{i}",
+                        "condition": "leg_reduction",
+                        "pass_rate": lr,
+                        "leg_rate": 0,
+                        "lucky_fix_rate": 0,
+                        "n_trials": 8,
+                    }
+                )
         return pd.DataFrame(rows)
 
     def test_ols_interaction_runs(self):
@@ -372,6 +677,7 @@ class TestInteraction:
 # B5. Multiple-comparison correction
 # ============================================================
 
+
 class TestFDR:
     def test_fdr_known_pvalues(self):
         pvals = [0.001, 0.01, 0.05, 0.10, 0.50]
@@ -402,14 +708,33 @@ class TestFDR:
 # B6. No-NaN / no-inf
 # ============================================================
 
+
 class TestNaNInf:
     def _make_case_df(self, vals_bl, vals_lr):
         rows = []
         for i, (bl, lr) in enumerate(zip(vals_bl, vals_lr)):
-            rows.append({"model": "m", "case_id": f"c{i}", "condition": "baseline",
-                         "pass_rate": bl, "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 2})
-            rows.append({"model": "m", "case_id": f"c{i}", "condition": "leg_reduction",
-                         "pass_rate": lr, "leg_rate": 0, "lucky_fix_rate": 0, "n_trials": 2})
+            rows.append(
+                {
+                    "model": "m",
+                    "case_id": f"c{i}",
+                    "condition": "baseline",
+                    "pass_rate": bl,
+                    "leg_rate": 0,
+                    "lucky_fix_rate": 0,
+                    "n_trials": 2,
+                }
+            )
+            rows.append(
+                {
+                    "model": "m",
+                    "case_id": f"c{i}",
+                    "condition": "leg_reduction",
+                    "pass_rate": lr,
+                    "leg_rate": 0,
+                    "lucky_fix_rate": 0,
+                    "n_trials": 2,
+                }
+            )
         return pd.DataFrame(rows)
 
     def test_stats_rejects_nan_input(self):
@@ -423,8 +748,17 @@ class TestNaNInf:
             paired_ttest(case_df, "m")
 
     def test_stats_rejects_empty_input(self):
-        case_df = pd.DataFrame(columns=["model", "case_id", "condition", "pass_rate",
-                                         "leg_rate", "lucky_fix_rate", "n_trials"])
+        case_df = pd.DataFrame(
+            columns=[
+                "model",
+                "case_id",
+                "condition",
+                "pass_rate",
+                "leg_rate",
+                "lucky_fix_rate",
+                "n_trials",
+            ]
+        )
         with pytest.raises(ValueError, match="Empty|alignment|mismatch"):
             paired_ttest(case_df, "m")
 
@@ -433,6 +767,7 @@ class TestReproducibility:
     def test_stats_summary_contains_seed_and_bootstrap(self):
         """Verified at integration level — seed=42 and bootstrap_samples=1000."""
         from scripts.paper_analysis import SEED, BOOTSTRAP_SAMPLES
+
         assert SEED == 42
         assert BOOTSTRAP_SAMPLES == 1000
 
@@ -440,6 +775,7 @@ class TestReproducibility:
 # ============================================================
 # B7. Dashboard vs analysis consistency
 # ============================================================
+
 
 class TestDashboardAnalysisConsistency:
     def test_dashboard_vs_analysis_consistency(self):
@@ -449,7 +785,9 @@ class TestDashboardAnalysisConsistency:
             cases=["c1", "c2", "c3", "c4", "c5"],
             conditions=["baseline", "leg_reduction"],
             trials=[1, 2],
-            pass_fn=lambda c, cond, t: c in ["c1", "c2"] if cond == "baseline" else c in ["c1", "c3"]
+            pass_fn=lambda c, cond, t: (
+                c in ["c1", "c2"] if cond == "baseline" else c in ["c1", "c3"]
+            ),
         )
 
         # Dashboard path (event-level)
@@ -467,13 +805,14 @@ class TestDashboardAnalysisConsistency:
 # B8. Order invariance
 # ============================================================
 
+
 class TestOrderInvariance:
     def test_order_invariance(self):
         events = _make_events(
             cases=["c1", "c2", "c3"],
             conditions=["baseline", "leg_reduction"],
             trials=[1, 2, 3],
-            pass_fn=lambda c, cond, t: (hash(c + cond) + t) % 3 != 0
+            pass_fn=lambda c, cond, t: (hash(c + cond) + t) % 3 != 0,
         )
         # Compute metrics on original order
         metrics1 = compute_metrics(events.copy(), 18)

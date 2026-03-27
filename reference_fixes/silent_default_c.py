@@ -9,7 +9,6 @@ Lookup order:
 from env import get_env_bool
 from config import get_config_bool
 
-
 HARDCODED_DEFAULTS = {
     "dark_mode": False,
     "beta": False,
@@ -18,7 +17,7 @@ HARDCODED_DEFAULTS = {
 
 # Maps flag names to their env var keys
 _ENV_KEY_MAP = {
-    "dark_mode": "FEATURE_DARK_MODE",      # FIX: correct underscore in env key
+    "dark_mode": "FEATURE_DARK_MODE",  # FIX: correct underscore in env key
     "beta": "FEATURE_BETA",
     "analytics": "FEATURE_ANALYTICS",
 }
@@ -47,10 +46,12 @@ def get_flag_source(flag_name):
     env_key = _ENV_KEY_MAP.get(flag_name)
     if env_key:
         from env import get_env
+
         if get_env(env_key) is not None:
             return "env"
 
     from config import get_config
+
     if get_config(flag_name) is not None:
         return "config"
 

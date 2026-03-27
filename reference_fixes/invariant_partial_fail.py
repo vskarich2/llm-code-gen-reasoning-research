@@ -22,7 +22,9 @@ def execute_transfer(sender, receiver, amount):
     try:
         if random.random() < 0.3:
             emit_failure_alert(
-                sender.account_id, receiver.account_id, amount,
+                sender.account_id,
+                receiver.account_id,
+                amount,
                 "connection reset during credit phase",
             )
             raise RuntimeError("transient failure during credit")

@@ -13,33 +13,33 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from reconstructor import reconstruct_strict, _normalize_file_content, ReconstructionResult
 
-
 # ============================================================
 # TEST-1: Markdown fences in file content (RC-1)
 # ============================================================
 
+
 class TestMarkdownFenceNormalization:
 
     def test_fences_stripped(self):
-        content = '```python\ndef create_config():\n    return dict(DEFAULTS)\n```'
+        content = "```python\ndef create_config():\n    return dict(DEFAULTS)\n```"
         normalized = _normalize_file_content(content)
-        assert '```' not in normalized
-        assert 'def create_config' in normalized
+        assert "```" not in normalized
+        assert "def create_config" in normalized
         ast.parse(normalized)  # must not raise
 
     def test_fences_with_language_tag(self):
-        content = '```python\ndef f():\n    pass\n```'
+        content = "```python\ndef f():\n    pass\n```"
         normalized = _normalize_file_content(content)
-        assert normalized.strip() == 'def f():\n    pass'
+        assert normalized.strip() == "def f():\n    pass"
 
     def test_fences_without_language_tag(self):
-        content = '```\ndef f():\n    pass\n```'
+        content = "```\ndef f():\n    pass\n```"
         normalized = _normalize_file_content(content)
-        assert 'def f' in normalized
-        assert '```' not in normalized
+        assert "def f" in normalized
+        assert "```" not in normalized
 
     def test_no_fences_unchanged(self):
-        content = 'def f():\n    return 42'
+        content = "def f():\n    return 42"
         normalized = _normalize_file_content(content)
         assert normalized == content
 
@@ -59,24 +59,25 @@ class TestMarkdownFenceNormalization:
 # TEST-2: Escaped newlines in file content (RC-2)
 # ============================================================
 
+
 class TestEscapedNewlineNormalization:
 
     def test_escaped_newlines_unescaped(self):
-        content = 'def f():\\n    return 42'
+        content = "def f():\\n    return 42"
         normalized = _normalize_file_content(content)
-        assert '\n' in normalized
-        assert '\\n' not in normalized
+        assert "\n" in normalized
+        assert "\\n" not in normalized
         ast.parse(normalized)
 
     def test_escaped_tabs_unescaped(self):
-        content = 'def f():\\n\\treturn 42'
+        content = "def f():\\n\\treturn 42"
         normalized = _normalize_file_content(content)
-        assert '\n' in normalized
-        assert '\t' in normalized
+        assert "\n" in normalized
+        assert "\t" in normalized
 
     def test_real_newlines_not_double_unescaped(self):
         """Content with real newlines must NOT be modified."""
-        content = 'def f():\n    return 42'
+        content = "def f():\n    return 42"
         normalized = _normalize_file_content(content)
         assert normalized == content
 
@@ -85,7 +86,7 @@ class TestEscapedNewlineNormalization:
         content = 'def f():\n    x = "line1\\nline2"\n    return x'
         normalized = _normalize_file_content(content)
         # Has real newlines → unescape should NOT fire
-        assert '\\n' in normalized  # preserved inside string literal
+        assert "\\n" in normalized  # preserved inside string literal
 
     def test_reconstruct_with_escaped_content(self):
         manifest_paths = ["a.py"]
@@ -93,13 +94,16 @@ class TestEscapedNewlineNormalization:
         model_files = {"a.py": "def f():\\n    return 42"}
 
         recon = reconstruct_strict(manifest_paths, manifest_files, model_files)
-        assert recon.status == "SUCCESS", f"Expected SUCCESS, got {recon.status}: {recon.syntax_errors}"
-        assert '\n' in recon.files["a.py"]
+        assert (
+            recon.status == "SUCCESS"
+        ), f"Expected SUCCESS, got {recon.status}: {recon.syntax_errors}"
+        assert "\n" in recon.files["a.py"]
 
 
 # ============================================================
 # TEST-3: All files UNCHANGED (RC-4)
 # ============================================================
+
 
 class TestAllUnchanged:
 
@@ -122,14 +126,16 @@ class TestAllUnchanged:
         """
         import execution
         import inspect
+
         source = inspect.getsource(execution._do_reconstruction)
         assert "HARD INVARIANT: reconstruction SUCCESS must produce non-empty code" not in source
-        assert "assert parsed[\"code\"] and parsed[\"code\"].strip()" not in source
+        assert 'assert parsed["code"] and parsed["code"].strip()' not in source
 
 
 # ============================================================
 # TEST-4: Reconstruction FAILED_SYNTAX_ERRORS with recoverable content (RC-5)
 # ============================================================
+
 
 class TestReconstructionRecovery:
 
@@ -158,6 +164,7 @@ class TestReconstructionRecovery:
         """execution.py must have a recovery path for FAILED_SYNTAX_ERRORS."""
         import execution
         import inspect
+
         source = inspect.getsource(execution._do_reconstruction)
         assert "FAILED_SYNTAX_ERRORS" in source
         assert "_reconstruction_recovered" in source
@@ -167,13 +174,16 @@ class TestReconstructionRecovery:
 # TEST-5: Lenient file-dict parser (RC-3)
 # ============================================================
 
+
 class TestLenientFileDict:
 
     def test_malformed_json_with_literal_newlines(self):
         """File-dict JSON with literal newlines must be parsed by lenient tier."""
         from parse import _try_file_dict_lenient
 
-        raw = '{"reasoning": "The bug is aliasing", "files": {"config.py": "def f():\n    return 1"}}'
+        raw = (
+            '{"reasoning": "The bug is aliasing", "files": {"config.py": "def f():\n    return 1"}}'
+        )
         result = _try_file_dict_lenient(raw)
         assert result is not None, "Lenient file-dict parser missed malformed JSON"
         assert result["response_format"] == "file_dict_lenient"
@@ -211,16 +221,16 @@ class TestLenientFileDict:
 # TEST-6: Regression — existing valid cases unchanged
 # ============================================================
 
+
 class TestRegression:
 
     def test_valid_file_dict_unchanged(self):
         """Valid file-dict JSON must still be parsed by strict tier."""
         from parse import parse_model_response
 
-        raw = json.dumps({
-            "reasoning": "Fixed the bug",
-            "files": {"a.py": "def f():\n    return 42"}
-        })
+        raw = json.dumps(
+            {"reasoning": "Fixed the bug", "files": {"a.py": "def f():\n    return 42"}}
+        )
         result = parse_model_response(raw)
         assert result["response_format"] == "file_dict"
         assert result["files"]["a.py"] == "def f():\n    return 42"
@@ -262,6 +272,7 @@ class TestRegression:
     def test_sanity_guard_no_crash(self):
         """Sanity guard must not raise RuntimeError."""
         from runner import _validate_execution_sanity
+
         # Simulate a run with 0% ran rate
         results = [{"baseline": {"pass": False, "score": 0}} for _ in range(20)]
         # This must NOT crash

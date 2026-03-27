@@ -6,10 +6,10 @@ Diagnostic operators guide reasoning. Guardrail operators constrain actions.
 
 from nudges.operators import NudgeOperator, register
 
-
 # ═══════════════════════════════════════════════════════════════
 # DIAGNOSTIC OPERATORS (reasoning guidance)
 # ═══════════════════════════════════════════════════════════════
+
 
 def _dependency_check_diagnostic(base: str) -> str:
     return base + """
@@ -30,12 +30,15 @@ Only make changes that preserve all cross-file behavioral contracts.
 Explain which dependencies you traced and what you preserved.
 """
 
-register(NudgeOperator(
-    name="DEPENDENCY_CHECK",
-    kind="diagnostic",
-    description="Forces tracing of downstream consumers and side-effect dependencies.",
-    build_prompt=_dependency_check_diagnostic,
-))
+
+register(
+    NudgeOperator(
+        name="DEPENDENCY_CHECK",
+        kind="diagnostic",
+        description="Forces tracing of downstream consumers and side-effect dependencies.",
+        build_prompt=_dependency_check_diagnostic,
+    )
+)
 
 
 def _invariant_guard_diagnostic(base: str) -> str:
@@ -57,12 +60,15 @@ Do not confuse visibility with consistency.
 Explain what invariant you are protecting and how.
 """
 
-register(NudgeOperator(
-    name="INVARIANT_GUARD",
-    kind="diagnostic",
-    description="Forces reasoning about invariants, failure windows, and atomicity.",
-    build_prompt=_invariant_guard_diagnostic,
-))
+
+register(
+    NudgeOperator(
+        name="INVARIANT_GUARD",
+        kind="diagnostic",
+        description="Forces reasoning about invariants, failure windows, and atomicity.",
+        build_prompt=_invariant_guard_diagnostic,
+    )
+)
 
 
 def _temporal_robustness_diagnostic(base: str) -> str:
@@ -85,12 +91,15 @@ Preserve the semantic contract between pipeline stages and their consumers.
 Explain which ordering constraints you identified.
 """
 
-register(NudgeOperator(
-    name="TEMPORAL_ROBUSTNESS",
-    kind="diagnostic",
-    description="Forces tracing of data flow ordering and semantic stage boundaries.",
-    build_prompt=_temporal_robustness_diagnostic,
-))
+
+register(
+    NudgeOperator(
+        name="TEMPORAL_ROBUSTNESS",
+        kind="diagnostic",
+        description="Forces tracing of data flow ordering and semantic stage boundaries.",
+        build_prompt=_temporal_robustness_diagnostic,
+    )
+)
 
 
 def _state_lifecycle_diagnostic(base: str) -> str:
@@ -114,17 +123,21 @@ downstream readers still get the same values.
 Explain which state distinction you preserved and why.
 """
 
-register(NudgeOperator(
-    name="STATE_LIFECYCLE",
-    kind="diagnostic",
-    description="Forces tracing of staged state transitions and selector dependencies.",
-    build_prompt=_state_lifecycle_diagnostic,
-))
+
+register(
+    NudgeOperator(
+        name="STATE_LIFECYCLE",
+        kind="diagnostic",
+        description="Forces tracing of staged state transitions and selector dependencies.",
+        build_prompt=_state_lifecycle_diagnostic,
+    )
+)
 
 
 # ═══════════════════════════════════════════════════════════════
 # GUARDRAIL OPERATORS (action constraints)
 # ═══════════════════════════════════════════════════════════════
+
 
 def _dependency_check_guardrail(base: str) -> str:
     return base + """
@@ -149,12 +162,15 @@ MANDATORY CONSTRAINTS — you must follow ALL of these:
 If you cannot prove semantic equivalence, keep the original code.
 """
 
-register(NudgeOperator(
-    name="DEPENDENCY_CHECK_GUARDRAIL",
-    kind="guardrail",
-    description="Constrains actions: forbids removing write-path operations without equivalence proof.",
-    build_prompt=_dependency_check_guardrail,
-))
+
+register(
+    NudgeOperator(
+        name="DEPENDENCY_CHECK_GUARDRAIL",
+        kind="guardrail",
+        description="Constrains actions: forbids removing write-path operations without equivalence proof.",
+        build_prompt=_dependency_check_guardrail,
+    )
+)
 
 
 def _invariant_guard_guardrail(base: str) -> str:
@@ -182,12 +198,15 @@ MANDATORY CONSTRAINTS — you must follow ALL of these:
 If your refactor does not include rollback or atomic assignment, it is wrong.
 """
 
-register(NudgeOperator(
-    name="INVARIANT_GUARD_GUARDRAIL",
-    kind="guardrail",
-    description="Constrains actions: requires rollback/atomicity, forbids observability-only fixes.",
-    build_prompt=_invariant_guard_guardrail,
-))
+
+register(
+    NudgeOperator(
+        name="INVARIANT_GUARD_GUARDRAIL",
+        kind="guardrail",
+        description="Constrains actions: requires rollback/atomicity, forbids observability-only fixes.",
+        build_prompt=_invariant_guard_guardrail,
+    )
+)
 
 
 def _temporal_robustness_guardrail(base: str) -> str:
@@ -215,12 +234,15 @@ If you cannot prove that every consumer still receives the same
 semantic values, keep the original pipeline structure.
 """
 
-register(NudgeOperator(
-    name="TEMPORAL_ROBUSTNESS_GUARDRAIL",
-    kind="guardrail",
-    description="Constrains actions: forbids reordering stats computation or swapping metrics functions.",
-    build_prompt=_temporal_robustness_guardrail,
-))
+
+register(
+    NudgeOperator(
+        name="TEMPORAL_ROBUSTNESS_GUARDRAIL",
+        kind="guardrail",
+        description="Constrains actions: forbids reordering stats computation or swapping metrics functions.",
+        build_prompt=_temporal_robustness_guardrail,
+    )
+)
 
 
 def _state_lifecycle_guardrail(base: str) -> str:
@@ -248,17 +270,21 @@ If you cannot prove equivalence for ALL consumers, keep the original
 multi-step sequence.
 """
 
-register(NudgeOperator(
-    name="STATE_LIFECYCLE_GUARDRAIL",
-    kind="guardrail",
-    description="Constrains actions: forbids removing state transitions without consumer equivalence proof.",
-    build_prompt=_state_lifecycle_guardrail,
-))
+
+register(
+    NudgeOperator(
+        name="STATE_LIFECYCLE_GUARDRAIL",
+        kind="guardrail",
+        description="Constrains actions: forbids removing state transitions without consumer equivalence proof.",
+        build_prompt=_state_lifecycle_guardrail,
+    )
+)
 
 
 # ═══════════════════════════════════════════════════════════════
 # STRICT GUARDRAIL OPERATORS (hard prohibitions from case metadata)
 # ═══════════════════════════════════════════════════════════════
+
 
 def build_strict_guardrail(base: str, hard_constraints: list[str]) -> str:
     """Build a strict guardrail prompt from case-level hard_constraints."""
@@ -281,6 +307,7 @@ You must find an alternative approach that satisfies all of them.
 # ═══════════════════════════════════════════════════════════════
 # COUNTERFACTUAL SIMULATION OPERATOR
 # ═══════════════════════════════════════════════════════════════
+
 
 def _counterfactual_generic(base: str) -> str:
     return base + """
@@ -306,17 +333,21 @@ Explicitly reason through at least one concrete scenario before
 giving your final answer.
 """
 
-register(NudgeOperator(
-    name="COUNTERFACTUAL",
-    kind="counterfactual",
-    description="Forces explicit counterfactual simulation of intermediate-state observers.",
-    build_prompt=_counterfactual_generic,
-))
+
+register(
+    NudgeOperator(
+        name="COUNTERFACTUAL",
+        kind="counterfactual",
+        description="Forces explicit counterfactual simulation of intermediate-state observers.",
+        build_prompt=_counterfactual_generic,
+    )
+)
 
 
 # ═══════════════════════════════════════════════════════════════
 # REASON-THEN-ACT OPERATOR
 # ═══════════════════════════════════════════════════════════════
+
 
 def _reason_then_act_generic(base: str) -> str:
     return base + """
@@ -343,17 +374,21 @@ Based ONLY on your Step 1 analysis, produce the refactored code.
 If Step 1 reveals that a simplification is unsafe, do NOT make it.
 """
 
-register(NudgeOperator(
-    name="REASON_THEN_ACT",
-    kind="reason_then_act",
-    description="Forces explicit reasoning about state/invariants before code generation.",
-    build_prompt=_reason_then_act_generic,
-))
+
+register(
+    NudgeOperator(
+        name="REASON_THEN_ACT",
+        kind="reason_then_act",
+        description="Forces explicit reasoning about state/invariants before code generation.",
+        build_prompt=_reason_then_act_generic,
+    )
+)
 
 
 # ═══════════════════════════════════════════════════════════════
 # SELF-CHECK OPERATOR (post-generation verification)
 # ═══════════════════════════════════════════════════════════════
+
 
 def _self_check_generic(base: str) -> str:
     return base + """
@@ -380,17 +415,21 @@ BEFORE outputting your final answer:
    If you cannot verify correctness, keep the original code unchanged.
 """
 
-register(NudgeOperator(
-    name="SELF_CHECK",
-    kind="self_check",
-    description="Post-generation verification: forces model to trace a concrete scenario through its own output.",
-    build_prompt=_self_check_generic,
-))
+
+register(
+    NudgeOperator(
+        name="SELF_CHECK",
+        kind="self_check",
+        description="Post-generation verification: forces model to trace a concrete scenario through its own output.",
+        build_prompt=_self_check_generic,
+    )
+)
 
 
 # ═══════════════════════════════════════════════════════════════
 # COUNTERFACTUAL CHECK OPERATOR
 # ═══════════════════════════════════════════════════════════════
+
 
 def _counterfactual_check_generic(base: str) -> str:
     return base + """
@@ -413,17 +452,21 @@ Before submitting your solution, you MUST perform a counterfactual failure analy
 Only return code that survives both counterfactual scenarios.
 """
 
-register(NudgeOperator(
-    name="COUNTERFACTUAL_CHECK",
-    kind="counterfactual_check",
-    description="Forces model to enumerate concrete failure scenarios before finalizing code.",
-    build_prompt=_counterfactual_check_generic,
-))
+
+register(
+    NudgeOperator(
+        name="COUNTERFACTUAL_CHECK",
+        kind="counterfactual_check",
+        description="Forces model to enumerate concrete failure scenarios before finalizing code.",
+        build_prompt=_counterfactual_check_generic,
+    )
+)
 
 
 # ═══════════════════════════════════════════════════════════════
 # TEST-DRIVEN OPERATOR
 # ═══════════════════════════════════════════════════════════════
+
 
 def _test_driven_generic(base: str) -> str:
     return base + """
@@ -446,9 +489,12 @@ Write your code so that these requirements are testable via simple assertions.
 If a requirement cannot be met, keep the original implementation unchanged.
 """
 
-register(NudgeOperator(
-    name="TEST_DRIVEN",
-    kind="test_driven",
-    description="Injects testable behavioral invariants the model must satisfy.",
-    build_prompt=_test_driven_generic,
-))
+
+register(
+    NudgeOperator(
+        name="TEST_DRIVEN",
+        kind="test_driven",
+        description="Injects testable behavioral invariants the model must satisfy.",
+        build_prompt=_test_driven_generic,
+    )
+)

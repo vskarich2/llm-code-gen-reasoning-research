@@ -6,6 +6,7 @@ from config import get_config
 #
 #
 
+
 def get_db_url():
     """Return the database URL the client is using."""
     return get_config()["db_url"]

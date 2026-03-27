@@ -41,6 +41,7 @@ def _get_client():
             _client = None  # stale connection, retry below
     try:
         import redis as _redis_mod
+
         _client = _redis_mod.Redis.from_url(
             REDIS_URL,
             socket_connect_timeout=REDIS_TIMEOUT,
@@ -57,7 +58,9 @@ def _get_client():
     except Exception as e:
         _client = None
         if not _warned:
-            _log.warning("Redis unavailable (%s): %s — streaming disabled until reconnect", REDIS_URL, e)
+            _log.warning(
+                "Redis unavailable (%s): %s — streaming disabled until reconnect", REDIS_URL, e
+            )
             _warned = True
         return None
 

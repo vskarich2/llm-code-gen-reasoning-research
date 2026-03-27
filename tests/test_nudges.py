@@ -13,8 +13,8 @@ from nudges.router import apply_diagnostic, apply_guardrail, get_operator_names
 # Import core to trigger registration
 import nudges.core  # noqa: F401
 
-
 # ── Operator registration ────────────────────────────────────
+
 
 def test_core_operators_registered():
     ops = list_operators()
@@ -58,6 +58,7 @@ def test_get_unknown_raises():
 
 # ── Mapping ──────────────────────────────────────────────────
 
+
 def test_mapping_returns_correct_operators():
     assignment = get_operators_for_case("hidden_dep_multihop")
     assert assignment is not None
@@ -77,6 +78,7 @@ def test_all_mapped_cases_have_valid_operators():
 
 
 # ── Router ───────────────────────────────────────────────────
+
 
 def test_router_modifies_prompt():
     base = "Refactor this code."

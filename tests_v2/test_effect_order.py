@@ -20,9 +20,7 @@ def test_a(mod):
     snapshots = mod.get_snapshots()
 
     if len(snapshots) != len(items):
-        return False, [
-            f"expected {len(items)} snapshots (one per item), got {len(snapshots)}"
-        ]
+        return False, [f"expected {len(items)} snapshots (one per item), got {len(snapshots)}"]
 
     return True, ["one snapshot per item"]
 
@@ -46,9 +44,7 @@ def test_b(mod):
     events = mod.get_events()
 
     if len(events) != len(items):
-        return False, [
-            f"expected {len(items)} events (one per item), got {len(events)}"
-        ]
+        return False, [f"expected {len(items)} events (one per item), got {len(events)}"]
 
     event_ids = [e["item_id"] for e in events]
     expected_ids = [i["id"] for i in items]

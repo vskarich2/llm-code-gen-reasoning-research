@@ -1,0 +1,190 @@
+nudge_texts:
+  diagnostic__hidden_dependency: "\nSTOP. Before returning your answer, perform a dependency reasoning_evaluator_audit:\n\n1. In cache_writer.py, there are two similarly-named write helpers:\n   - sync_user_to_cache()\
+    \ calls cache_put() — ALWAYS overwrites\n   - refresh_user_snapshot() calls cache_put_if_absent() — only writes on MISS\n   These are NOT interchangeable. Swapping one for the other means\n   updated\
+    \ user names never reach the cache.\n\n2. Trace who READS from the cache:\n   - cache_reader.py imports _store and exposes get_display_name()\n   - It reads whatever sync_user_to_cache() wrote via cache_put()\n\
+    \n3. If save_user() stops calling sync_user_to_cache(), then\n   get_display_name() returns stale or missing data after a user edit.\n\n4. refresh_user_snapshot() uses cache_put_if_absent(), which will\
+    \ NOT\n   overwrite existing entries. After a rename, the old name persists.\n\n5. migrate_legacy_user(), sync_user_to_db(), bulk_warm_cache()\n   are distractors — NOT part of the live write-through\
+    \ path.\n\nPreserve sync_user_to_cache() in save_user.\nExplain which dependency you preserved and why.\n"
+  diagnostic__temporal_causal_error: "\nSTOP. Before returning your answer, trace which data each function expects:\n\n1. compute_raw_stats() must receive the ORIGINAL untransformed data.\n   build_report()\
+    \ depends on raw_stats containing actual sensor values.\n   If you compute raw_stats on normalized data, raw_max becomes 1.0.\n\n2. compute_quality_score() must receive the CLEANED (post-transform)\
+    \ data.\n\n3. summarize_for_display() is a UI helper — NOT a replacement for\n   compute_raw_stats(). Different keys, different semantics.\n\n4. Check: does compute_raw_stats still receive the original\
+    \ `data`?\n\nPreserve: raw_stats on raw data, quality on cleaned data.\nExplain which ordering constraint you preserved.\n"
+  diagnostic__invariant_violation: "\nSTOP. Before returning your answer, reason about the failure window:\n\n1. The INVARIANT: total money across sender + receiver is conserved.\n\n2. FAILURE WINDOW: after\
+    \ sender.balance -= amount but before\n   receiver.balance += amount, a RuntimeError can occur. Money is lost.\n\n3. Existing helpers (record_transfer_attempt, emit_transfer_event,\n   emit_failure_alert,\
+    \ record_debit/credit) are observability only.\n   Adding more does NOT fix consistency.\n\n4. Correct fixes: try/except with rollback, compute-then-assign,\n   or any mechanism ensuring the invariant\
+    \ holds on exception.\n\nDo NOT just add logging, retries, or reasoning_evaluator_audit calls.\nExplain what invariant you are protecting.\n"
+  diagnostic__state_semantic_violation: "\nSTOP. Before returning your answer, trace the state lifecycle:\n\n1. stage(st, data) writes to pending AND view, bumps version\n   commit(st) copies pending ->\
+    \ stable, sets frozen=True\n   freeze_view(st) rebuilds view from stable\n\n2. get_committed_total(st) checks frozen == True, then sums stable.\n   If frozen is False, returns None — NOT zero.\n\n3.\
+    \ Removing commit() -> frozen stays False -> total returns None.\n\n4. Removing freeze_view() -> view is from stage, not stable.\n\n5. Merging stage+commit -> preview() (which calls stage WITHOUT commit)\n\
+    \   would set frozen=True, breaking preview semantics.\n\nDo NOT remove commit(). Do NOT merge stage() and commit().\nExplain which downstream selectors depend on each step.\n"
+  diagnostic__generic_dependency: "\n\nBefore finalizing your answer, perform a dependency reasoning_evaluator_audit:\n\n1. For every function you plan to modify, list ALL its side effects\n   (writes to\
+    \ shared state, caches, databases, module-level dicts).\n2. For each side effect, trace which other functions READ that state —\n   search ALL files, not just the one you are editing.\n3. If two functions\
+    \ have similar names, check whether they have\n   IDENTICAL semantics. Similar names often hide different behavior\n   (e.g., always-write vs write-if-absent, overwrite vs merge).\n4. For each change\
+    \ you propose, ask: \"does any downstream reader\n   still get the same value at the same time?\"\n\nOnly make changes that preserve all cross-file behavioral contracts.\nExplain which dependencies\
+    \ you traced and what you preserved.\n"
+  diagnostic__generic_invariant: "\n\nBefore finalizing your answer, reason about failure invariants:\n\n1. Identify the key correctness invariant (e.g., conservation of value,\n   consistency of paired\
+    \ operations, atomicity of multi-step mutations).\n2. Identify the FAILURE WINDOW: the point between two related operations\n   where an exception would leave the system in an inconsistent state.\n\
+    3. Distinguish between OBSERVABILITY helpers (logging, auditing, alerting,\n   telemetry) and CORRECTNESS mechanisms (rollback, atomic assignment,\n   compensation). Only correctness mechanisms fix\
+    \ invariant violations.\n4. Ask: \"if an exception occurs at every possible point in my refactored\n   code, does the invariant still hold?\"\n\nDo not confuse visibility with consistency.\nExplain\
+    \ what invariant you are protecting and how.\n"
+  diagnostic__generic_temporal: "\n\nBefore finalizing your answer, trace the data flow step by step:\n\n1. Identify which values are computed from ORIGINAL (pre-transform) data\n   and which are computed\
+    \ from TRANSFORMED (post-transform) data.\n   These are semantically different — do not conflate them.\n2. For each consumer of pipeline output, check: does it expect raw\n   values or processed values?\
+    \ What breaks if you swap them?\n3. If two functions compute similar statistics (averages, maximums),\n   check whether they use the same keys, the same rounding, and the\n   same input data. Similar\
+    \ output shape does NOT mean interchangeable.\n4. For any reordering you propose, verify: does every intermediate\n   variable still hold the same value as before?\n\nPreserve the semantic contract\
+    \ between pipeline stages and their consumers.\nExplain which ordering constraints you identified.\n"
+  diagnostic__generic_state: "\n\nBefore finalizing your answer, trace the state lifecycle:\n\n1. Identify all distinct state representations (e.g., raw, pending,\n   stable, view, committed). Each may\
+    \ serve a different purpose.\n2. For each state transition (staging, committing, freezing, projecting),\n   determine what fields change and what flags are set.\n3. Trace which downstream selectors/consumers\
+    \ read each representation.\n   A selector that checks a flag before reading means that flag is\n   load-bearing — removing the step that sets it breaks the selector.\n4. Check whether any API function\
+    \ intentionally skips a transition\n   (e.g., preview without commit). If so, merging those transitions\n   would break that API function.\n\nDo not remove or merge state transitions unless you can\
+    \ prove all\ndownstream readers still get the same values.\nExplain which state distinction you preserved and why.\n"
+  guardrail__hidden_dependency: "\nMANDATORY CONSTRAINTS — you must follow ALL of these:\n\n1. You may NOT remove or replace any function call in save_user()\n   unless you can prove that every downstream\
+    \ reader of the cache\n   still receives the SAME data at the SAME time.\n\n2. Specifically: get_display_name() in cache_reader.py reads from\n   the shared _store. If you change what writes to _store,\
+    \ you MUST\n   show that get_display_name still returns the correct current name\n   after every save_user call.\n\n3. You may NOT substitute cache_put_if_absent for cache_put.\n   cache_put_if_absent\
+    \ does NOT overwrite existing entries.\n   This is a DIFFERENT operation, not a safe replacement.\n\n4. You may NOT remove cache write operations to \"reduce coupling\"\n   unless you replace them with\
+    \ an equivalent write path.\n\nIf you cannot prove semantic equivalence, keep the original code.\nReturn updated code only after verifying all constraints.\n"
+  guardrail__temporal_causal_error: "\nMANDATORY CONSTRAINTS — you must follow ALL of these:\n\n1. You may NOT move compute_raw_stats() to run on any data other\n   than the original untransformed input.\
+    \ The output keys (raw_mean,\n   raw_max, raw_min, raw_range) must reflect actual sensor values.\n\n2. You may NOT replace compute_raw_stats with summarize_for_display.\n   They have different key names,\
+    \ different rounding, and different\n   semantic contracts. build_report() depends on raw_stats keys.\n\n3. You may NOT merge the stats computation with post-transform steps.\n   Stats and transforms\
+    \ operate on DIFFERENT representations of the\n   data. Merging them conflates pre-transform and post-transform semantics.\n\n4. You may reorder or simplify transform steps ONLY IF the final\n   cleaned\
+    \ output is identical.\n\nIf you cannot prove that raw_stats still describes original data,\nkeep the original pipeline structure.\nReturn updated code only after verifying all constraints.\n"
+  guardrail__invariant_violation: "\nMANDATORY CONSTRAINTS — you must follow ALL of these:\n\n1. You may NOT separate sender.balance -= amount from its error\n   handling without adding a rollback mechanism.\n\
+    \n2. If the credit to receiver fails, sender.balance MUST be restored.\n   This is not optional. No amount of logging fixes lost money.\n\n3. You may NOT add retries as a substitute for rollback. A\
+    \ retry\n   that fails still leaves the invariant violated.\n\n4. You may NOT rely on record_transfer_attempt, emit_transfer_event,\n   emit_failure_alert, or any reasoning_evaluator_audit/ledger call\
+    \ as a consistency\n   mechanism. They are observability, not correctness.\n\n5. The ONLY acceptable patterns are:\n   a) try/except where except restores sender.balance\n   b) compute new balances\
+    \ first, then assign both atomically\n   c) explicit compensation/rollback on any exception path\n\nIf your refactor does not include rollback or atomic assignment,\nit is wrong. Return code only after\
+    \ verifying.\n"
+  guardrail__state_semantic_violation: "\nMANDATORY CONSTRAINTS — you must follow ALL of these:\n\n1. You may NOT remove commit() from process_batch or process_incremental.\n   commit() sets meta[\"frozen\"\
+    ] = True. get_committed_total() returns\n   None when frozen is False. Removing commit breaks api.ingest().\n\n2. You may NOT merge stage() and commit() into a single function.\n   preview() in api.py\
+    \ calls stage() WITHOUT commit(). If they are\n   merged, preview() would set frozen=True, breaking preview semantics.\n\n3. You may NOT remove freeze_view() without proving that view\n   still correctly\
+    \ reflects committed (stable) state after the change.\n\n4. You may NOT route selector-facing data through project() or any\n   display-oriented helper in place of the stable/committed path.\n\n5. For\
+    \ ANY step you propose to remove, you MUST identify every\n   selector and API function that reads its output and prove they\n   still return the same values.\n\nIf you cannot prove equivalence, keep\
+    \ the original 3-step sequence:\nstage() -> commit() -> freeze_view().\nReturn code only after verifying all constraints.\n"
+  guardrail__generic_dependency: "\n\nMANDATORY CONSTRAINTS — you must follow ALL of these:\n\n1. You may NOT remove or replace any function call that writes to shared\n   state unless you can prove that\
+    \ every downstream reader still receives\n   the SAME data at the SAME time.\n\n2. You may NOT substitute one write function for a similarly-named one\n   unless you have verified they have IDENTICAL\
+    \ semantics (same write\n   policy, same overwrite behavior, same key format).\n\n3. You may NOT remove cache/state write operations to \"reduce coupling\"\n   unless you provide an equivalent write\
+    \ path that preserves all\n   downstream read contracts.\n\n4. For ANY change to a write path, you MUST name every function that\n   reads from the same shared state and confirm it still works.\n\n\
+    If you cannot prove semantic equivalence, keep the original code.\n"
+  guardrail__generic_invariant: "\n\nMANDATORY CONSTRAINTS — you must follow ALL of these:\n\n1. You may NOT separate a debit/decrement from its paired credit/increment\n   without adding explicit rollback\
+    \ or atomic assignment.\n\n2. If any operation between the debit and credit can raise an exception,\n   the except path MUST restore the original value.\n\n3. You may NOT add retries as a substitute\
+    \ for rollback. A retry that\n   fails still leaves the invariant violated.\n\n4. You may NOT rely on logging, auditing, alerting, or telemetry calls\n   as correctness mechanisms. They are observability,\
+    \ not consistency.\n\n5. The ONLY acceptable patterns are:\n   a) try/except where except restores the debited value\n   b) compute both new values first, then assign both atomically\n   c) explicit\
+    \ compensation on every exception path\n\nIf your refactor does not include rollback or atomic assignment, it is wrong.\n"
+  guardrail__generic_temporal: "\n\nMANDATORY CONSTRAINTS — you must follow ALL of these:\n\n1. You may NOT move any statistics computation to run on transformed\n   data if it was originally computed on\
+    \ raw data. The output keys\n   and values must reflect the original input, not a normalized or\n   clipped version.\n\n2. You may NOT replace one metrics function with a similarly-named one\n   unless\
+    \ they produce IDENTICAL keys and values. Different key names\n   or different rounding means they are NOT interchangeable.\n\n3. You may NOT merge pre-transform and post-transform computations\n  \
+    \ into a single pass. They operate on different representations\n   and serve different consumers.\n\n4. You may reorder transform steps ONLY IF the final output is\n   byte-identical to the original.\n\
+    \nIf you cannot prove that every consumer still receives the same\nsemantic values, keep the original pipeline structure.\n"
+  guardrail__generic_state: "\n\nMANDATORY CONSTRAINTS — you must follow ALL of these:\n\n1. You may NOT remove any state transition step (stage, commit,\n   freeze, etc.) unless you can prove that every\
+    \ selector and API\n   function that reads state still returns the SAME value.\n\n2. You may NOT merge two state transitions into one if ANY caller\n   uses them independently (e.g., preview calling\
+    \ stage without commit).\n\n3. You may NOT remove a step that sets a flag (e.g., frozen=True)\n   if any downstream selector checks that flag before reading state.\n\n4. You may NOT route selector-facing\
+    \ data through a display/projection\n   helper in place of the committed/stable state path.\n\n5. For ANY step you propose to remove, you MUST name every function\n   that reads its output and prove\
+    \ they still return the same values.\n\nIf you cannot prove equivalence for ALL consumers, keep the original\nmulti-step sequence.\n"
+  reasoning__counterfactual: "\n\nBefore finalizing your solution, you MUST perform this counterfactual check:\n\n1. Pick the most important state transition in the code (e.g., staging,\n   committing,\
+    \ writing to shared state, mutating balances).\n\n2. Consider a scenario where:\n   - a downstream consumer reads state BETWEEN two of your changes\n   - OR an exception occurs midway through your refactored\
+    \ sequence\n\n3. In that scenario, will the consumer see DIFFERENT data than it would\n   have seen with the original code?\n\n4. If YES: your solution changes observable behavior — it is INCORRECT.\n\
+    \   You must revert that specific change.\n\n5. If NO for ALL consumers: your solution is valid.\n\nExplicitly reason through at least one concrete scenario before\ngiving your final answer.\n"
+  reasoning__reason_then_act: "\n\nYou MUST complete both steps IN ORDER. Do not skip Step 1.\n\nSTEP 1 — REASONING (required before any code)\n\nAnswer ALL of the following:\n\na) What distinct state representations\
+    \ exist in this code?\n   (e.g., raw, pending, committed, cached, projected, displayed)\n\nb) For each representation, which functions READ it and which WRITE it?\n\nc) What invariants must hold? (e.g.,\
+    \ conservation, ordering, visibility gates)\n\nd) Which of the proposed simplifications would break an invariant or\n   change what a reader sees?\n\nSTEP 2 — CODE\n\nBased ONLY on your Step 1 analysis,\
+    \ produce the refactored code.\nIf Step 1 reveals that a simplification is unsafe, do NOT make it.\n"
+  reasoning__self_check: "\n\nAfter producing your solution, you MUST perform a verification step\nBEFORE outputting your final answer:\n\n1. Re-read your proposed code changes and check:\n   - Did you\
+    \ remove or merge any function that has downstream readers\n     in OTHER files?\n   - Did you change when data becomes visible to other components?\n   - Did you break any flag, gate, or guard that\
+    \ a consumer checks?\n\n2. For each function you changed, trace ONE concrete scenario:\n   - Call the public API with sample data\n   - Walk through your new code step by step\n   - Verify the return\
+    \ value is identical to the original\n\n3. If you find ANY inconsistency:\n   - Revert that specific change\n   - Explain what you reverted and why\n\n4. Only output the FINAL code after completing\
+    \ this check.\n   If you cannot verify correctness, keep the original code unchanged.\n"
+  reasoning__counterfactual_check: "\n\nBefore submitting your solution, you MUST perform a counterfactual failure analysis:\n\n1. Identify at least two realistic ways your implementation could fail:\n\
+    \   a) A runtime scenario where your code produces wrong output\n   b) An edge case where an invariant is violated\n\n2. For each failure mode:\n   - Describe the concrete input or sequence of calls\n\
+    \   - Explain what goes wrong and why\n   - Show how your implementation handles (or fails to handle) it\n\n3. If either failure mode is NOT handled:\n   - Fix your implementation before returning it\n\
+    \   - Explain what you changed\n\nOnly return code that survives both counterfactual scenarios.\n"
+  reasoning__test_driven: "\n\nYour implementation MUST satisfy the following behavioral requirements:\n\n1. All public functions preserve their input/output contract:\n   - Same inputs produce same outputs\
+    \ as the original code\n   - Side effects (state mutations, writes) occur in the same order\n\n2. All invariants hold under repeated and concurrent calls:\n   - No state is lost between sequential operations\n\
+    \   - No partial updates are visible to downstream consumers\n\n3. Error paths preserve consistency:\n   - If an exception occurs mid-operation, system state is not corrupted\n   - Partial work is rolled\
+    \ back or never committed\n\nWrite your code so that these requirements are testable via simple assertions.\nIf a requirement cannot be met, keep the original implementation unchanged.\n"
+  reasoning__structured: '
+
+
+    Follow these steps in order:
+
+
+    Step 1: Identify all dependencies and shared state across files.
+
+    Step 2: List any invariants that must be preserved (ordering, conservation, gates).
+
+    Step 3: For each change you plan to make, verify it does not break any invariant.
+
+    Step 4: Write the refactored code.
+
+    '
+  reasoning__free_form: '
+
+
+    Think carefully about this code before making changes, then return the updated code.
+
+    '
+  reasoning__branching: '
+
+
+    Before writing code, consider TWO different approaches to this refactoring:
+
+
+    APPROACH A:
+
+    - Describe approach A briefly
+
+    - What would change?
+
+    - What could break?
+
+
+    APPROACH B:
+
+    - Describe approach B briefly
+
+    - What would change?
+
+    - What could break?
+
+
+    EVALUATION:
+
+    - Which approach preserves all existing behavior?
+
+    - Which approach risks breaking downstream consumers?
+
+
+    Pick the safer approach and write the code.
+
+    '
+  reasoning__alignment_extra: '
+
+
+    IMPORTANT: In the "plan" field of your JSON response, list each change as a separate step.
+
+    Each step should specify which function you are changing and what you are changing.
+
+    Example: ["In create_config: return DEFAULTS.copy() instead of DEFAULTS", "In reset: clear cache"]'
+cge_instructions:
+  elicit: 'Before writing any code, analyze this codebase and identify the causal dependencies.
+
+
+    Produce an Execution Contract as JSON with this exact schema:
+
+
+    Return ONLY the JSON contract. Do not write code yet.'
+  code: 'Write refactored code that satisfies ALL contract terms. Specifically:
+
+    - Modify ONLY the functions listed in must_change
+
+    - Do NOT modify functions listed in must_not_change
+
+    - Implement ALL required_effects
+
+    - Maintain ALL invariants
+
+    - Respect the ordering, retry, and rollback constraints
+
+
+    Return the code only.'
+  retry: 'Fix EACH violation specifically. Do not change anything else.
+
+    Return corrected code only.'

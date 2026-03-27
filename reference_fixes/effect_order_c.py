@@ -29,5 +29,7 @@ def process_batch(items):
     for item in items:
         increment(item["value"])
         emit_event(item["id"], item["value"])
-        audit_log(item["id"], "processed", f"value={item['value']}")  # FIX: reasoning_evaluator_audit per-item
+        audit_log(
+            item["id"], "processed", f"value={item['value']}"
+        )  # FIX: reasoning_evaluator_audit per-item
     return len(items)

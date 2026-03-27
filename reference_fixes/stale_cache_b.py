@@ -37,4 +37,5 @@ def reset():
     """Clear DB and cache."""
     _db.clear()
     from cache import clear
+
     clear()

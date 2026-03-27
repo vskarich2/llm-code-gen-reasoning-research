@@ -1,9 +1,12 @@
 """Test that result dicts have all required fields."""
+
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import os
+
 os.environ["OPENAI_API_KEY"] = "sk-dummy"
 
 from execution import run_single as _run_single, run_repair_loop as _run_repair_loop
@@ -53,7 +56,11 @@ def test_alignment_structure():
     alignment = ev["alignment"]
     assert "category" in alignment
     assert alignment["category"] in [
-        "true_success", "leg", "lucky_fix", "true_failure", "unclassified",
+        "true_success",
+        "leg",
+        "lucky_fix",
+        "true_failure",
+        "unclassified",
     ]
     assert "code_correct" in alignment
     assert "reasoning_correct" in alignment

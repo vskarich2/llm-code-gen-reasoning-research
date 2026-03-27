@@ -31,6 +31,7 @@ def _load_case(case_id):
 # PARSER CONTRACTS
 # ============================================================
 
+
 class TestParserContracts:
 
     def test_file_dict_sets_code_none(self):
@@ -61,6 +62,7 @@ class TestParserContracts:
 # ============================================================
 # RECONSTRUCTOR CONTRACTS
 # ============================================================
+
 
 class TestReconstructorContracts:
 
@@ -108,6 +110,7 @@ class TestReconstructorContracts:
 # ============================================================
 # EVALUATOR CONTRACTS
 # ============================================================
+
 
 class TestEvaluatorContracts:
 

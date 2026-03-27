@@ -10,11 +10,15 @@ def record_credit(account_id, amount):
 
 
 def record_transfer_attempt(from_id, to_id, amount, status="pending"):
-    _entries.append({
-        "type": "transfer_attempt",
-        "from": from_id, "to": to_id,
-        "amount": amount, "status": status,
-    })
+    _entries.append(
+        {
+            "type": "transfer_attempt",
+            "from": from_id,
+            "to": to_id,
+            "amount": amount,
+            "status": status,
+        }
+    )
 
 
 def get_entries():

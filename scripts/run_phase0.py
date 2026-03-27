@@ -30,7 +30,6 @@ from failure_classifier import FAILURE_TYPE_SET
 from runner import load_cases
 from validate_cases_v2 import load_reference_code, load_case_code
 
-
 BASE = Path(__file__).resolve().parents[1]
 AUDIT_DIR = BASE / "reasoning_evaluator_audit"
 RESULTS_DIR = AUDIT_DIR / "phase0_results"
@@ -118,6 +117,7 @@ def _save_results(experiment_id, results):
 # P0-1: H1 Brevity Bias (15 cases x 4 compressions)
 # ============================================================
 
+
 def run_p0_1(cases_subset=None, dry_run=False):
     """H1: Does compressing reasoning (same E1-E3) flip YES->NO?"""
     locked = _load_locked_set()
@@ -148,7 +148,9 @@ def run_p0_1(cases_subset=None, dry_run=False):
             r_full = {"reasoning_correct": True, "experiment_id": "P0-1-dry"}
 
         # Version 2: First sentence only
-        first_sentence = bl_reasoning.split(".")[0] + "." if "." in bl_reasoning else bl_reasoning[:100]
+        first_sentence = (
+            bl_reasoning.split(".")[0] + "." if "." in bl_reasoning else bl_reasoning[:100]
+        )
 
         if not dry_run:
             r_short = _classify(case, ref_code, first_sentence, "P0-1")
@@ -187,9 +189,11 @@ def run_p0_1(cases_subset=None, dry_run=False):
         results.append(entry)
 
         status = "FLIP" if flip else "ok"
-        print(f"  {cid:30s} full={str(r_full.get('reasoning_correct')):<5} "
-              f"short={str(r_short.get('reasoning_correct')):<5} "
-              f"terse={str(r_terse.get('reasoning_correct')):<5} {status}")
+        print(
+            f"  {cid:30s} full={str(r_full.get('reasoning_correct')):<5} "
+            f"short={str(r_short.get('reasoning_correct')):<5} "
+            f"terse={str(r_terse.get('reasoning_correct')):<5} {status}"
+        )
 
     print(f"\n  P0-1 SUMMARY: {flips}/{len(results)} flips, {api_calls} API calls")
     print(f"  CONFIRMED (>=5): {flips >= 5}, FALSIFIED (<=2): {flips <= 2}")
@@ -203,15 +207,31 @@ def run_p0_1(cases_subset=None, dry_run=False):
 # P0-2: H1 Negative Control — terse-correct must be YES
 # ============================================================
 
+
 def run_p0_2(dry_run=False):
     """Control: 5 terse but semantically correct reasoning -> all must be YES."""
     # Use cases we KNOW are terse-correct from the forensic reasoning_evaluator_audit
     control_cases = [
-        ("alias_config_a", "create_config returns a reference to DEFAULTS instead of a copy, so caller mutations corrupt shared state."),
-        ("mutable_default_a", "enqueue uses a mutable default argument (queue=[]), so the same list accumulates across calls."),
-        ("stale_cache_a", "update_product modifies the DB but does not invalidate the cache entry, so get_product returns stale data."),
-        ("partial_update_a", "update_profile sets 'name' without updating 'display_name', leaving them out of sync."),
-        ("wrong_condition_a", "is_rate_limited uses > instead of >=, allowing one extra request past the limit."),
+        (
+            "alias_config_a",
+            "create_config returns a reference to DEFAULTS instead of a copy, so caller mutations corrupt shared state.",
+        ),
+        (
+            "mutable_default_a",
+            "enqueue uses a mutable default argument (queue=[]), so the same list accumulates across calls.",
+        ),
+        (
+            "stale_cache_a",
+            "update_product modifies the DB but does not invalidate the cache entry, so get_product returns stale data.",
+        ),
+        (
+            "partial_update_a",
+            "update_profile sets 'name' without updating 'display_name', leaving them out of sync.",
+        ),
+        (
+            "wrong_condition_a",
+            "is_rate_limited uses > instead of >=, allowing one extra request past the limit.",
+        ),
     ]
 
     results = []
@@ -232,18 +252,22 @@ def run_p0_2(dry_run=False):
         if verdict is not True:
             all_yes = False
 
-        results.append({
-            "case_id": cid,
-            "reasoning": terse_reasoning,
-            "verdict": verdict,
-            "expected": True,
-            "pass": verdict is True,
-        })
+        results.append(
+            {
+                "case_id": cid,
+                "reasoning": terse_reasoning,
+                "verdict": verdict,
+                "expected": True,
+                "pass": verdict is True,
+            }
+        )
 
         status = "PASS" if verdict is True else "FAIL"
         print(f"  {cid:30s} verdict={verdict:<5} {status}")
 
-    print(f"\n  P0-2 SUMMARY: {'ALL YES — PASS' if all_yes else 'CONTROL FAILED — CLASSIFIER DISQUALIFIED'}")
+    print(
+        f"\n  P0-2 SUMMARY: {'ALL YES — PASS' if all_yes else 'CONTROL FAILED — CLASSIFIER DISQUALIFIED'}"
+    )
 
     if not dry_run:
         _save_results("P0-2", results)
@@ -254,14 +278,30 @@ def run_p0_2(dry_run=False):
 # P0-3: H1 Negative Control — verbose-wrong must be NO
 # ============================================================
 
+
 def run_p0_3(dry_run=False):
     """Control: 5 verbose but semantically wrong reasoning -> all must be NO."""
     control_cases = [
-        ("alias_config_a", "The bug is caused by an integer overflow in the timeout computation. When the system clock wraps around at midnight, the configuration values become negative, causing assertion failures in downstream consumers. The fix is to add modular arithmetic to handle the wrap-around case and normalize all timeout values to positive integers before returning them to callers."),
-        ("mutable_default_a", "The issue is a race condition in the queue module. When two threads call enqueue simultaneously, the GIL does not protect the list append operation, causing items to be silently dropped. The fix is to add a threading lock around the critical section and use a thread-safe deque instead of a plain list."),
-        ("stale_cache_a", "The database connection pool is exhausted because get_product opens a new connection for every call but never closes it. After 100 calls, the pool is full and subsequent requests hang. The fix is to implement connection pooling with a context manager that returns connections after use."),
-        ("partial_update_a", "The profile update fails because the user dict is frozen (immutable) after initial creation. Attempting to modify any field raises a TypeError. The fix is to convert the frozen dict to a regular dict before updates and re-freeze it afterwards."),
-        ("wrong_condition_a", "The rate limiter fails because it stores timestamps in UTC but compares them against local time. In timezones west of UTC, this causes the limiter to expire entries too early, and in eastern timezones, entries persist too long. The fix is to normalize all timestamps to UTC before comparison."),
+        (
+            "alias_config_a",
+            "The bug is caused by an integer overflow in the timeout computation. When the system clock wraps around at midnight, the configuration values become negative, causing assertion failures in downstream consumers. The fix is to add modular arithmetic to handle the wrap-around case and normalize all timeout values to positive integers before returning them to callers.",
+        ),
+        (
+            "mutable_default_a",
+            "The issue is a race condition in the queue module. When two threads call enqueue simultaneously, the GIL does not protect the list append operation, causing items to be silently dropped. The fix is to add a threading lock around the critical section and use a thread-safe deque instead of a plain list.",
+        ),
+        (
+            "stale_cache_a",
+            "The database connection pool is exhausted because get_product opens a new connection for every call but never closes it. After 100 calls, the pool is full and subsequent requests hang. The fix is to implement connection pooling with a context manager that returns connections after use.",
+        ),
+        (
+            "partial_update_a",
+            "The profile update fails because the user dict is frozen (immutable) after initial creation. Attempting to modify any field raises a TypeError. The fix is to convert the frozen dict to a regular dict before updates and re-freeze it afterwards.",
+        ),
+        (
+            "wrong_condition_a",
+            "The rate limiter fails because it stores timestamps in UTC but compares them against local time. In timezones west of UTC, this causes the limiter to expire entries too early, and in eastern timezones, entries persist too long. The fix is to normalize all timestamps to UTC before comparison.",
+        ),
     ]
 
     results = []
@@ -282,18 +322,22 @@ def run_p0_3(dry_run=False):
         if verdict is not False:
             all_no = False
 
-        results.append({
-            "case_id": cid,
-            "reasoning": wrong_reasoning[:100],
-            "verdict": verdict,
-            "expected": False,
-            "pass": verdict is False,
-        })
+        results.append(
+            {
+                "case_id": cid,
+                "reasoning": wrong_reasoning[:100],
+                "verdict": verdict,
+                "expected": False,
+                "pass": verdict is False,
+            }
+        )
 
         status = "PASS" if verdict is False else "FAIL"
         print(f"  {cid:30s} verdict={verdict:<5} {status}")
 
-    print(f"\n  P0-3 SUMMARY: {'ALL NO — PASS' if all_no else 'CONTROL FAILED — CLASSIFIER DISQUALIFIED'}")
+    print(
+        f"\n  P0-3 SUMMARY: {'ALL NO — PASS' if all_no else 'CONTROL FAILED — CLASSIFIER DISQUALIFIED'}"
+    )
 
     if not dry_run:
         _save_results("P0-3", results)
@@ -303,6 +347,7 @@ def run_p0_3(dry_run=False):
 # ============================================================
 # P0-6: H3 Parse Failure Census
 # ============================================================
+
 
 def run_p0_6(dry_run=False):
     """H3: Count parse failures across conditions in existing run data."""
@@ -333,14 +378,21 @@ def run_p0_6(dry_run=False):
         n = d["total"]
         pe_rate = d["parse_error"] / n * 100 if n else 0
         empty_rate = d["empty_reasoning"] / n * 100 if n else 0
-        results.append({
-            "condition": cond, "total": n,
-            "parse_errors": d["parse_error"], "parse_error_rate": round(pe_rate, 1),
-            "empty_reasoning": d["empty_reasoning"], "empty_rate": round(empty_rate, 1),
-        })
-        print(f"  {cond:20s}: {n:>3} events, "
-              f"parse_error={d['parse_error']:>3} ({pe_rate:.1f}%), "
-              f"empty_reasoning={d['empty_reasoning']:>3} ({empty_rate:.1f}%)")
+        results.append(
+            {
+                "condition": cond,
+                "total": n,
+                "parse_errors": d["parse_error"],
+                "parse_error_rate": round(pe_rate, 1),
+                "empty_reasoning": d["empty_reasoning"],
+                "empty_rate": round(empty_rate, 1),
+            }
+        )
+        print(
+            f"  {cond:20s}: {n:>3} events, "
+            f"parse_error={d['parse_error']:>3} ({pe_rate:.1f}%), "
+            f"empty_reasoning={d['empty_reasoning']:>3} ({empty_rate:.1f}%)"
+        )
 
     # Verdict
     any_above_5 = any(r["parse_error_rate"] >= 5 for r in results)
@@ -354,6 +406,7 @@ def run_p0_6(dry_run=False):
 # ============================================================
 # P0-STAB: Stochastic Stability (temp=0)
 # ============================================================
+
 
 def run_p0_stab(n_cases=10, n_runs=3, dry_run=False):
     """Stability: same input at temp=0 should produce identical output."""
@@ -384,16 +437,20 @@ def run_p0_stab(n_cases=10, n_runs=3, dry_run=False):
         if not consistent:
             unstable += 1
 
-        results.append({
-            "case_id": cid,
-            "verdicts": verdicts,
-            "consistent": consistent,
-        })
+        results.append(
+            {
+                "case_id": cid,
+                "verdicts": verdicts,
+                "consistent": consistent,
+            }
+        )
         status = "STABLE" if consistent else "UNSTABLE"
         print(f"  {cid:30s} verdicts={verdicts} {status}")
 
-    print(f"\n  P0-STAB: {unstable}/{len(results)} unstable. "
-          f"{'100% consistent — PASS' if unstable == 0 else 'UNSTABLE — NEED VOTING'}")
+    print(
+        f"\n  P0-STAB: {unstable}/{len(results)} unstable. "
+        f"{'100% consistent — PASS' if unstable == 0 else 'UNSTABLE — NEED VOTING'}"
+    )
 
     if not dry_run:
         _save_results("P0-STAB", results)
@@ -416,10 +473,12 @@ ALL_EXPERIMENTS = {
 def main():
     parser = argparse.ArgumentParser(description="Phase 0 Measurement Audit")
     parser.add_argument("--config", default="configs/default.yaml", help="Config file")
-    parser.add_argument("--experiment", default=None,
-                        help="Run specific experiment (e.g., P0-1). Default: all.")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Skip API calls, test infrastructure only")
+    parser.add_argument(
+        "--experiment", default=None, help="Run specific experiment (e.g., P0-1). Default: all."
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Skip API calls, test infrastructure only"
+    )
     args = parser.parse_args()
 
     # Load config
@@ -444,7 +503,9 @@ def main():
 
     if args.experiment:
         if args.experiment not in ALL_EXPERIMENTS:
-            print(f"Unknown experiment: {args.experiment}. Available: {list(ALL_EXPERIMENTS.keys())}")
+            print(
+                f"Unknown experiment: {args.experiment}. Available: {list(ALL_EXPERIMENTS.keys())}"
+            )
             sys.exit(1)
         ALL_EXPERIMENTS[args.experiment](dry_run=args.dry_run)
     else:

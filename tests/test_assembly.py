@@ -12,6 +12,7 @@ Verifies:
 
 Run: .venv/bin/python -m pytest tests/test_assembly.py -v
 """
+
 import json
 import os
 import sys
@@ -42,6 +43,7 @@ def _get_case(case_id):
 # Assembly function unit tests
 # ============================================================
 
+
 class TestAssemblyFunction:
 
     def test_single_file_no_assembly(self):
@@ -56,6 +58,7 @@ class TestAssemblyFunction:
         # Even if model returns code with all definitions, assembly still runs
         all_code = "\n\n".join(case["code_files_contents"].values())
         from exec_eval import _strip_local_imports
+
         complete = _strip_local_imports(all_code)
         asm = _assemble_program(complete, case)
         assert asm["assembly_used"], "Multi-file must always assemble"
@@ -100,6 +103,7 @@ class TestAssemblyFunction:
 # Runtime assembly error detection
 # ============================================================
 
+
 class TestAssemblyErrorDetection:
 
     def test_name_error_at_load_is_assembly_error(self):
@@ -141,7 +145,9 @@ def reset():
         result = exec_evaluate(case, broken)
         assert not result["pass"]
         ex = result["execution"]
-        assert ex["assembly_error"], f"NameError during test should be assembly_error, got: {result['reasons']}"
+        assert ex[
+            "assembly_error"
+        ], f"NameError during test should be assembly_error, got: {result['reasons']}"
         assert result["score"] == 0.0
 
     def test_undefined_call_in_model_code_is_assembly_error(self):
@@ -185,22 +191,29 @@ class TestAssemblyErrorScoring:
         broken = "raise NameError('missing')"
         result = exec_evaluate(case, broken)
         if result["execution"].get("assembly_error"):
-            assert result["score"] == 0.0, \
-                f"Assembly error should be 0.0, got {result['score']}"
+            assert result["score"] == 0.0, f"Assembly error should be 0.0, got {result['score']}"
 
 
 # ============================================================
 # Multi-file reference fix integration
 # ============================================================
 
+
 class TestReferenceFixAssembly:
 
-    @pytest.mark.parametrize("case_id", [
-        "partial_rollback_b", "partial_rollback_c",
-        "stale_cache_b", "stale_cache_c",
-        "lazy_init_b", "lazy_init_c",
-        "alias_config_b", "alias_config_c",
-    ])
+    @pytest.mark.parametrize(
+        "case_id",
+        [
+            "partial_rollback_b",
+            "partial_rollback_c",
+            "stale_cache_b",
+            "stale_cache_c",
+            "lazy_init_b",
+            "lazy_init_c",
+            "alias_config_b",
+            "alias_config_c",
+        ],
+    )
     def test_reference_fix_passes(self, case_id):
         """Single-file reference fix + assembly with originals → passes."""
         ref_path = BASE / "reference_fixes" / f"{case_id}.py"
@@ -214,14 +227,14 @@ class TestReferenceFixAssembly:
         if len(case["code_files"]) > 1:
             assert result["execution"]["assembly_used"]
 
-        assert result["pass"], \
-            f"{case_id}: ref fix should pass. Reasons: {result.get('reasons')}"
+        assert result["pass"], f"{case_id}: ref fix should pass. Reasons: {result.get('reasons')}"
         assert not result["execution"]["assembly_error"]
 
 
 # ============================================================
 # Edge cases
 # ============================================================
+
 
 class TestEdgeCases:
 
@@ -232,8 +245,9 @@ class TestEdgeCases:
         model = "def submit_order(product_id, qty, price):\n    pass"
         asm = _assemble_program(model, case)
         assert asm["assembly_used"]
-        assert asm["rename_error"], \
-            "Model renamed place_order to submit_order — rename_error should be True"
+        assert asm[
+            "rename_error"
+        ], "Model renamed place_order to submit_order — rename_error should be True"
         assert asm["expected_func"] == "place_order"
 
     def test_rename_error_blocks_execution(self):
@@ -257,8 +271,9 @@ class TestEdgeCases:
         case = _get_case("partial_rollback_b")
         ref_code = (BASE / "reference_fixes" / "partial_rollback_b.py").read_text()
         result = exec_evaluate(case, ref_code)
-        assert not result["execution"].get("rename_error", False), \
-            "Correct override should not trigger rename_error"
+        assert not result["execution"].get(
+            "rename_error", False
+        ), "Correct override should not trigger rename_error"
 
     def test_empty_model_code_still_assembles(self):
         """Empty model output + multi-file case → assembly provides original."""

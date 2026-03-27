@@ -22,9 +22,27 @@ from exec_eval import _CASE_TESTS, _load_v2_test, load_module_from_code
 BASE = Path(__file__).parent
 
 _STDLIB = {
-    "os", "sys", "json", "re", "math", "copy", "collections", "functools",
-    "itertools", "typing", "pathlib", "datetime", "abc", "dataclasses",
-    "enum", "logging", "hashlib", "random", "io", "string", "textwrap",
+    "os",
+    "sys",
+    "json",
+    "re",
+    "math",
+    "copy",
+    "collections",
+    "functools",
+    "itertools",
+    "typing",
+    "pathlib",
+    "datetime",
+    "abc",
+    "dataclasses",
+    "enum",
+    "logging",
+    "hashlib",
+    "random",
+    "io",
+    "string",
+    "textwrap",
 }
 
 
@@ -63,7 +81,10 @@ def check_case(case: dict) -> dict:
     # CHECK 1: Test function resolves
     test_fn = _CASE_TESTS.get(cid) or _load_v2_test(case)
     if test_fn is None:
-        checks["test_resolves"] = (False, "NO TEST FOUND — _CASE_TESTS and _load_v2_test both returned None")
+        checks["test_resolves"] = (
+            False,
+            "NO TEST FOUND — _CASE_TESTS and _load_v2_test both returned None",
+        )
         return {"ok": False, "checks": checks}
     checks["test_resolves"] = (True, f"{test_fn.__name__} from {test_fn.__module__}")
 
@@ -93,7 +114,10 @@ def check_case(case: dict) -> dict:
 
     # CHECK 5: Test FAILS on buggy code (bug is real)
     if passed:
-        checks["test_detects_bug"] = (False, f"Test PASSES on buggy code — bug not detected. Reasons: {reasons}")
+        checks["test_detects_bug"] = (
+            False,
+            f"Test PASSES on buggy code — bug not detected. Reasons: {reasons}",
+        )
         return {"ok": False, "checks": checks}
     checks["test_detects_bug"] = (True, f"test correctly fails: {reasons[0][:80]}")
 

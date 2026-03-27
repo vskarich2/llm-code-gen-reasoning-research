@@ -23,15 +23,17 @@ _log = logging.getLogger("t3.registry")
 # CONDITION REQUIREMENTS
 # ============================================================
 
+
 @dataclass(frozen=True)
 class ConditionSpec:
     """Declares what a condition needs to run."""
+
     name: str
-    requires_nudge_mapping: bool = False    # needs entry in CASE_TO_OPERATORS
-    requires_scm_data: bool = False         # needs entry in scm_data
+    requires_nudge_mapping: bool = False  # needs entry in CASE_TO_OPERATORS
+    requires_scm_data: bool = False  # needs entry in scm_data
     requires_hard_constraints: bool = False  # needs case["hard_constraints"] non-empty
     requires_case_specific_data: bool = False  # any case-specific asset
-    universal: bool = False                  # safe for ALL cases without any lookup
+    universal: bool = False  # safe for ALL cases without any lookup
     description: str = ""
 
 
@@ -39,93 +41,133 @@ class ConditionSpec:
 CONDITION_SPECS: dict[str, ConditionSpec] = {
     # === UNIVERSAL — safe for all cases ===
     "baseline": ConditionSpec(
-        name="baseline", universal=True,
-        description="Terse prompt, no augmentation"),
+        name="baseline", universal=True, description="Terse prompt, no augmentation"
+    ),
     "structured_reasoning": ConditionSpec(
-        name="structured_reasoning", universal=True,
-        description="Generic structured reasoning template"),
+        name="structured_reasoning",
+        universal=True,
+        description="Generic structured reasoning template",
+    ),
     "free_form_reasoning": ConditionSpec(
-        name="free_form_reasoning", universal=True,
-        description="Generic free-form reasoning template"),
+        name="free_form_reasoning",
+        universal=True,
+        description="Generic free-form reasoning template",
+    ),
     "branching_reasoning": ConditionSpec(
-        name="branching_reasoning", universal=True,
-        description="Generic branching reasoning (ToT-lite)"),
+        name="branching_reasoning",
+        universal=True,
+        description="Generic branching reasoning (ToT-lite)",
+    ),
     "contract_gated": ConditionSpec(
-        name="contract_gated", universal=True,
-        description="CGE: elicit contract → generate → gate → retry"),
+        name="contract_gated",
+        universal=True,
+        description="CGE: elicit contract → generate → gate → retry",
+    ),
     "retry_no_contract": ConditionSpec(
-        name="retry_no_contract", universal=True,
-        description="Retry loop with test feedback, no contract"),
+        name="retry_no_contract",
+        universal=True,
+        description="Retry loop with test feedback, no contract",
+    ),
     "retry_with_contract": ConditionSpec(
-        name="retry_with_contract", universal=True,
-        description="Retry loop with contract context on retry"),
+        name="retry_with_contract",
+        universal=True,
+        description="Retry loop with contract context on retry",
+    ),
     "retry_adaptive": ConditionSpec(
-        name="retry_adaptive", universal=True,
-        description="Retry with failure-classifier-guided hints"),
+        name="retry_adaptive",
+        universal=True,
+        description="Retry with failure-classifier-guided hints",
+    ),
     "retry_alignment": ConditionSpec(
-        name="retry_alignment", universal=True,
-        description="Retry with plan-code alignment measurement"),
+        name="retry_alignment",
+        universal=True,
+        description="Retry with plan-code alignment measurement",
+    ),
     "leg_reduction": ConditionSpec(
-        name="leg_reduction", universal=True,
-        description="Intra-call self-correction: plan → code → verify → revise"),
-
+        name="leg_reduction",
+        universal=True,
+        description="Intra-call self-correction: plan → code → verify → revise",
+    ),
     # === RESTRICTED — need per-case nudge mappings ===
     "diagnostic": ConditionSpec(
-        name="diagnostic", requires_nudge_mapping=True,
-        description="Case-specific diagnostic reasoning scaffold"),
+        name="diagnostic",
+        requires_nudge_mapping=True,
+        description="Case-specific diagnostic reasoning scaffold",
+    ),
     "guardrail": ConditionSpec(
-        name="guardrail", requires_nudge_mapping=True,
-        description="Case-specific action constraints"),
+        name="guardrail",
+        requires_nudge_mapping=True,
+        description="Case-specific action constraints",
+    ),
     "guardrail_strict": ConditionSpec(
-        name="guardrail_strict", requires_nudge_mapping=True,
+        name="guardrail_strict",
+        requires_nudge_mapping=True,
         requires_hard_constraints=True,
-        description="Guardrail + hard constraints"),
+        description="Guardrail + hard constraints",
+    ),
     "repair_loop": ConditionSpec(
-        name="repair_loop", requires_nudge_mapping=True,
-        description="2-attempt repair with diagnostic on attempt 1"),
-
+        name="repair_loop",
+        requires_nudge_mapping=True,
+        description="2-attempt repair with diagnostic on attempt 1",
+    ),
     # === RESTRICTED — need per-case operator mappings ===
     "counterfactual": ConditionSpec(
-        name="counterfactual", requires_case_specific_data=True,
-        description="Counterfactual simulation prompt"),
+        name="counterfactual",
+        requires_case_specific_data=True,
+        description="Counterfactual simulation prompt",
+    ),
     "reason_then_act": ConditionSpec(
-        name="reason_then_act", requires_case_specific_data=True,
-        description="Reason-then-act scaffold"),
+        name="reason_then_act",
+        requires_case_specific_data=True,
+        description="Reason-then-act scaffold",
+    ),
     "self_check": ConditionSpec(
-        name="self_check", requires_case_specific_data=True,
-        description="Post-generation self-check"),
+        name="self_check",
+        requires_case_specific_data=True,
+        description="Post-generation self-check",
+    ),
     "counterfactual_check": ConditionSpec(
-        name="counterfactual_check", requires_case_specific_data=True,
-        description="Counterfactual failure check"),
+        name="counterfactual_check",
+        requires_case_specific_data=True,
+        description="Counterfactual failure check",
+    ),
     "test_driven": ConditionSpec(
-        name="test_driven", requires_case_specific_data=True,
-        description="Test-driven invariant prompting"),
-
+        name="test_driven",
+        requires_case_specific_data=True,
+        description="Test-driven invariant prompting",
+    ),
     # === RESTRICTED — need SCM data ===
     "scm_descriptive": ConditionSpec(
-        name="scm_descriptive", requires_scm_data=True,
-        description="SCM descriptive causal graph"),
+        name="scm_descriptive", requires_scm_data=True, description="SCM descriptive causal graph"
+    ),
     "scm_constrained": ConditionSpec(
-        name="scm_constrained", requires_scm_data=True,
-        description="SCM with constraints"),
+        name="scm_constrained", requires_scm_data=True, description="SCM with constraints"
+    ),
     "scm_constrained_evidence": ConditionSpec(
-        name="scm_constrained_evidence", requires_scm_data=True,
-        description="SCM with evidence annotations"),
+        name="scm_constrained_evidence",
+        requires_scm_data=True,
+        description="SCM with evidence annotations",
+    ),
     "scm_constrained_evidence_minimal": ConditionSpec(
-        name="scm_constrained_evidence_minimal", requires_scm_data=True,
-        description="SCM evidence (minimal)"),
+        name="scm_constrained_evidence_minimal",
+        requires_scm_data=True,
+        description="SCM evidence (minimal)",
+    ),
     "evidence_only": ConditionSpec(
-        name="evidence_only", requires_scm_data=True,
-        description="Evidence IDs only, no graph"),
+        name="evidence_only", requires_scm_data=True, description="Evidence IDs only, no graph"
+    ),
     "length_matched_control": ConditionSpec(
-        name="length_matched_control", requires_scm_data=True,
-        description="Length-matched filler (control for SCM)"),
+        name="length_matched_control",
+        requires_scm_data=True,
+        description="Length-matched filler (control for SCM)",
+    ),
 }
 
 
 # ============================================================
 # COMPATIBILITY CHECK
 # ============================================================
+
 
 def check_compatibility(case: dict, condition: str) -> tuple[bool, str]:
     """Check if a (case, condition) pair is valid.
@@ -144,6 +186,7 @@ def check_compatibility(case: dict, condition: str) -> tuple[bool, str]:
 
     if spec.requires_nudge_mapping:
         from nudges.mapping import get_operators_for_case
+
         assignment = get_operators_for_case(case_id)
         if assignment is None:
             return False, (
@@ -166,6 +209,7 @@ def check_compatibility(case: dict, condition: str) -> tuple[bool, str]:
 
     if spec.requires_scm_data:
         from scm_data import get_scm
+
         scm = get_scm(case_id)
         if scm is None:
             return False, (
@@ -177,6 +221,7 @@ def check_compatibility(case: dict, condition: str) -> tuple[bool, str]:
         # These conditions use generic operators as fallback —
         # but we still need to verify the operator exists
         from nudges.operators import get as get_operator
+
         fallback_map = {
             "counterfactual": "COUNTERFACTUAL",
             "reason_then_act": "REASON_THEN_ACT",
@@ -206,7 +251,9 @@ def validate_run(cases: list[dict], conditions: list[str]) -> None:
         for cond in conditions:
             ok, reason = check_compatibility(case, cond)
             if not ok:
-                errors.append(f"  INCOMPATIBLE: condition={cond}, case={case.get('id','?')}: {reason}")
+                errors.append(
+                    f"  INCOMPATIBLE: condition={cond}, case={case.get('id','?')}: {reason}"
+                )
 
     if errors:
         msg = (
@@ -217,8 +264,12 @@ def validate_run(cases: list[dict], conditions: list[str]) -> None:
         _log.error(msg)
         raise RuntimeError(msg)
 
-    _log.info("Pre-flight passed: %d cases × %d conditions = %d valid pairs",
-              len(cases), len(conditions), len(cases) * len(conditions))
+    _log.info(
+        "Pre-flight passed: %d cases × %d conditions = %d valid pairs",
+        len(cases),
+        len(conditions),
+        len(cases) * len(conditions),
+    )
 
 
 def get_safe_conditions(cases: list[dict] | None = None) -> list[str]:

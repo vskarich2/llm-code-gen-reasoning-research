@@ -1,6 +1,8 @@
 """Test that all conditions are registered and accessible."""
+
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from runner import ALL_CONDITIONS, VALID_CONDITIONS, COND_LABELS, COND_DESCRIPTIONS
@@ -31,14 +33,22 @@ def test_descriptions_exist():
 
 
 def test_old_conditions_still_exist():
-    for c in ["baseline", "diagnostic", "guardrail", "guardrail_strict",
-              "counterfactual", "reason_then_act", "self_check"]:
+    for c in [
+        "baseline",
+        "diagnostic",
+        "guardrail",
+        "guardrail_strict",
+        "counterfactual",
+        "reason_then_act",
+        "self_check",
+    ]:
         assert c in VALID_CONDITIONS, f"{c} missing"
         assert c in COND_LABELS, f"{c} missing label"
 
 
 def test_operators_registered():
     from nudges.operators import get
+
     get("COUNTERFACTUAL_CHECK")  # should not raise
     get("TEST_DRIVEN")  # should not raise
 

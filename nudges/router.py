@@ -97,10 +97,15 @@ def apply_test_driven(case_id: str, base_prompt: str) -> str:
 def get_operator_names(case_id: str) -> dict[str, str | None]:
     assignment = get_operators_for_case(case_id)
     if not assignment:
-        return {"diagnostic": None, "guardrail": None,
-                "counterfactual": "COUNTERFACTUAL", "reason_then_act": "REASON_THEN_ACT",
-                "self_check": "SELF_CHECK", "counterfactual_check": "COUNTERFACTUAL_CHECK",
-                "test_driven": "TEST_DRIVEN"}
+        return {
+            "diagnostic": None,
+            "guardrail": None,
+            "counterfactual": "COUNTERFACTUAL",
+            "reason_then_act": "REASON_THEN_ACT",
+            "self_check": "SELF_CHECK",
+            "counterfactual_check": "COUNTERFACTUAL_CHECK",
+            "test_driven": "TEST_DRIVEN",
+        }
     return {
         "diagnostic": assignment.diagnostic,
         "guardrail": assignment.guardrail,

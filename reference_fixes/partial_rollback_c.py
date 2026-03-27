@@ -33,6 +33,7 @@ def place_order(product_id, qty, price):
     _notifications.append({"order_id": order_id, "status": "confirmed"})
     return {"status": "confirmed", "payment": result}
 
+
 def retry_payment(product_id, qty, price):
     """Trap: adding retry on payment makes partial state worse."""
     order_id = f"ORD-{product_id}-{qty}"
@@ -42,6 +43,7 @@ def retry_payment(product_id, qty, price):
         except ValueError:
             continue
     return None
+
 
 def get_notifications():
     return list(_notifications)

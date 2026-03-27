@@ -6,7 +6,7 @@ Invariant: after two updates with different values, store contains the latest va
 
 def test(mod):
     """Non-diagnostic: reports wrong value, does not name the cause."""
-    if hasattr(mod, 'reset'):
+    if hasattr(mod, "reset"):
         mod.reset()
 
     mod.update_product("P1", lambda: 42)

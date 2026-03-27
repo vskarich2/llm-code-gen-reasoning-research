@@ -21,10 +21,10 @@ sys.path.insert(0, str(BASE))
 from exec_eval import exec_evaluate, load_module_from_code, _load_v2_test, _assemble_program
 from validate_cases_v2 import load_case_code, load_reference_code, load_test_func
 
-
 # ============================================================
 # HELPERS
 # ============================================================
+
 
 def _all_cases():
     cases_path = BASE / "cases_v2.json"
@@ -47,6 +47,7 @@ CASE_IDS = [c["id"] for c in ALL_CASES]
 # ============================================================
 # ORACLE INTERFACE COMPATIBILITY
 # ============================================================
+
 
 class TestOracleInterface:
     """Every test function must accept a single module (not a mods dict)."""
@@ -74,6 +75,7 @@ class TestOracleInterface:
 # ============================================================
 # ORACLE FAILURE SENSITIVITY (buggy code must fail)
 # ============================================================
+
 
 class TestOracleFailsBuggy:
     """Buggy code must fail every test oracle. If it passes, the oracle is too weak."""
@@ -126,10 +128,10 @@ class TestOraclePassesRef:
 # Each reverts the key fix line to reintroduce the bug
 PERTURBATIONS = {
     "alias_config_a": ("DEFAULTS.copy()", "DEFAULTS"),
-    "stale_cache_a": ('_cache.pop(product_id, None)', '# _cache.pop(product_id, None)'),
+    "stale_cache_a": ("_cache.pop(product_id, None)", "# _cache.pop(product_id, None)"),
     "mutable_default_a": ("if queue is None:", "if False:"),
     "partial_update_a": ('user["display_name"] = value', '# user["display_name"] = value'),
-    "check_then_act": ('if check_balance(name, amount):', 'if True:'),
+    "check_then_act": ("if check_balance(name, amount):", "if True:"),
 }
 
 
@@ -143,9 +145,9 @@ class TestOracleAdversarial:
         assert ref_code is not None
 
         pattern, replacement = PERTURBATIONS[case_id]
-        assert pattern in ref_code, (
-            f"Perturbation pattern '{pattern}' not found in reference fix for {case_id}"
-        )
+        assert (
+            pattern in ref_code
+        ), f"Perturbation pattern '{pattern}' not found in reference fix for {case_id}"
 
         perturbed = ref_code.replace(pattern, replacement, 1)
         assert perturbed != ref_code, "Perturbation had no effect"
@@ -160,6 +162,7 @@ class TestOracleAdversarial:
 # ============================================================
 # ZERO-SENSITIVITY GUARD
 # ============================================================
+
 
 class TestNoZeroSensitivity:
     """No case should have both buggy and reference producing the same result."""

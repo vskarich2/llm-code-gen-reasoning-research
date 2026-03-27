@@ -12,13 +12,15 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from evaluator import (
-    llm_classify, classify_parse_category,
+    llm_classify,
+    classify_parse_category,
     _CLASSIFICATION_DISALLOWED,
 )
 
 
 class _MockEvalConfig:
     """Mock evaluator config for tests."""
+
     name = "test-default-model"
     max_task_chars = 800
     max_code_chars = 2000
@@ -36,16 +38,21 @@ class _MockConfig:
 @pytest.fixture(autouse=True)
 def _mock_eval_model_config():
     """Mock config so tests don't require loaded experiment config."""
-    with patch("evaluator._get_eval_model", return_value="test-default-model"), \
-         patch("evaluator.get_config", return_value=_MockConfig(), create=True):
+    with (
+        patch("evaluator._get_eval_model", return_value="test-default-model"),
+        patch("evaluator.get_config", return_value=_MockConfig(), create=True),
+    ):
         # Also patch the import inside llm_classify
-        with patch.dict("sys.modules", {"experiment_config": MagicMock(get_config=lambda: _MockConfig())}):
+        with patch.dict(
+            "sys.modules", {"experiment_config": MagicMock(get_config=lambda: _MockConfig())}
+        ):
             yield
 
 
 # ============================================================
 # Fix E: eval_model parameter honored
 # ============================================================
+
 
 class TestEvalModelFix:
     """Verify evaluator.py no longer ignores the eval_model parameter."""
@@ -63,9 +70,9 @@ class TestEvalModelFix:
             # The call_model must have been called with model="test-model-override"
             mock_call.assert_called_once()
             call_kwargs = mock_call.call_args
-            assert call_kwargs[1]["model"] == "test-model-override", (
-                f"eval_model was ignored. Actual model used: {call_kwargs[1]['model']}"
-            )
+            assert (
+                call_kwargs[1]["model"] == "test-model-override"
+            ), f"eval_model was ignored. Actual model used: {call_kwargs[1]['model']}"
 
     def test_eval_model_default_when_none(self):
         """If eval_model is None, the config default model is used."""
@@ -112,6 +119,7 @@ class TestEvalModelFix:
         """The hard-coded model string must not appear as a direct assignment
         inside llm_classify (except as the default constant)."""
         import inspect
+
         source = inspect.getsource(llm_classify)
         # The old bug: `model = "gpt-5.4-mini"` directly in function body
         # The fix: `model = eval_model or _get_eval_model()`
@@ -131,6 +139,7 @@ class TestEvalModelFix:
 # Fix D: Parse gate
 # ============================================================
 
+
 class TestParseGate:
     """Verify the parse gate prevents classification on corrupt reasoning."""
 
@@ -142,9 +151,9 @@ class TestParseGate:
             reasoning="",
             parse_error="extraction_error: NO_JSON_OBJECT_FOUND",
         )
-        assert result["reasoning_correct"] is None, (
-            f"Expected None for REASONING_LOST, got {result['reasoning_correct']}"
-        )
+        assert (
+            result["reasoning_correct"] is None
+        ), f"Expected None for REASONING_LOST, got {result['reasoning_correct']}"
         assert "GATED" in result["classify_parse_error"]
         assert result["parse_category"] == "REASONING_LOST"
 
@@ -228,6 +237,7 @@ class TestParseGate:
 # Parse category classification
 # ============================================================
 
+
 class TestParseCategoryClassification:
     """Test the parse category classification logic."""
 
@@ -269,6 +279,7 @@ class TestParseCategoryClassification:
 # Result field completeness
 # ============================================================
 
+
 class TestResultFields:
     """Verify all required fields are present in results."""
 
@@ -301,6 +312,7 @@ class TestResultFields:
 # ============================================================
 # Holdout integrity
 # ============================================================
+
 
 class TestHoldoutIntegrity:
     """Verify holdout, locked, and phase0 case sets don't overlap."""

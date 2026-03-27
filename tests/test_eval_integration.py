@@ -9,6 +9,7 @@ Tests that EVERY case:
 
 Run: .venv/bin/python -m pytest tests/test_eval_integration.py -v
 """
+
 import json
 import os
 import sys
@@ -29,9 +30,27 @@ from exec_eval import (
 BASE = Path(__file__).resolve().parents[1]
 
 _STDLIB = {
-    "os", "sys", "json", "re", "math", "copy", "collections", "functools",
-    "itertools", "typing", "pathlib", "datetime", "abc", "dataclasses",
-    "enum", "logging", "hashlib", "random", "io", "string", "textwrap",
+    "os",
+    "sys",
+    "json",
+    "re",
+    "math",
+    "copy",
+    "collections",
+    "functools",
+    "itertools",
+    "typing",
+    "pathlib",
+    "datetime",
+    "abc",
+    "dataclasses",
+    "enum",
+    "logging",
+    "hashlib",
+    "random",
+    "io",
+    "string",
+    "textwrap",
 }
 
 
@@ -78,6 +97,7 @@ _CASE_IDS = [c["id"] for c in _ALL_CASES]
 # TEST 1: Every case has a resolvable test function
 # ============================================================
 
+
 class TestEveryTestResolves:
     """No case should silently lack a test in the production eval path."""
 
@@ -95,6 +115,7 @@ class TestEveryTestResolves:
 # ============================================================
 # TEST 2: Every test correctly FAILS on buggy code
 # ============================================================
+
 
 class TestBuggyCodeFails:
     """The buggy code shipped with each case must fail its test."""
@@ -119,8 +140,7 @@ class TestBuggyCodeFails:
 # ============================================================
 
 _CASES_WITH_REFFIX = [
-    c["id"] for c in _ALL_CASES
-    if (BASE / "reference_fixes" / f"{c['id']}.py").exists()
+    c["id"] for c in _ALL_CASES if (BASE / "reference_fixes" / f"{c['id']}.py").exists()
 ]
 
 
@@ -146,6 +166,7 @@ class TestReferenceFixPasses:
 # TEST 4: Score=0.5 sentinel never appears on valid cases
 # ============================================================
 
+
 class TestNoSilentHalfScore:
     """The production eval path must never return score=0.5
     (the old 'no test found' sentinel) for any case in the benchmark."""
@@ -163,7 +184,10 @@ class TestNoSilentHalfScore:
 
         # exec_evaluate now expects bare code, not a JSON-wrapped response
         result = exec_evaluate(case_with_contents, code)
-        assert result["score"] != 0.5 or result.get("execution", {}).get("runtime_error") != "no_test_found", (
+        assert (
+            result["score"] != 0.5
+            or result.get("execution", {}).get("runtime_error") != "no_test_found"
+        ), (
             f"Case {case_id} returned score=0.5 with no_test_found — "
             f"test function did not resolve in production eval path"
         )
@@ -172,6 +196,7 @@ class TestNoSilentHalfScore:
 # ============================================================
 # TEST 5: Tests are idempotent (same result 3 times)
 # ============================================================
+
 
 class TestIdempotency:
     """Running a test 3 times on the same module must produce identical results."""
@@ -205,90 +230,96 @@ class TestIdempotency:
 
 _SIMULATED_OUTPUTS = [
     # alias_config_a: correct fix (.copy)
-    ("alias_config_a", "correct: add .copy()",
-     lambda code: code.replace("config = DEFAULTS", "config = DEFAULTS.copy()"),
-     True),
-
+    (
+        "alias_config_a",
+        "correct: add .copy()",
+        lambda code: code.replace("config = DEFAULTS", "config = DEFAULTS.copy()"),
+        True,
+    ),
     # alias_config_a: wrong fix (does nothing)
-    ("alias_config_a", "wrong: no change",
-     lambda code: code,
-     False),
-
+    ("alias_config_a", "wrong: no change", lambda code: code, False),
     # alias_config_a: wrong fix (copies overrides instead of DEFAULTS)
-    ("alias_config_a", "wrong: copy overrides not defaults",
-     lambda code: code.replace("config.update(overrides)", "config.update(dict(overrides))"),
-     False),
-
+    (
+        "alias_config_a",
+        "wrong: copy overrides not defaults",
+        lambda code: code.replace("config.update(overrides)", "config.update(dict(overrides))"),
+        False,
+    ),
     # partial_rollback_a: correct fix (add release in except)
-    ("partial_rollback_a", "correct: add release on failure",
-     lambda code: code.replace(
-         "except ValueError:\n        raise",
-         "except ValueError:\n        inventory.release(qty)\n        raise"
-     ),
-     True),
-
+    (
+        "partial_rollback_a",
+        "correct: add release on failure",
+        lambda code: code.replace(
+            "except ValueError:\n        raise",
+            "except ValueError:\n        inventory.release(qty)\n        raise",
+        ),
+        True,
+    ),
     # partial_rollback_a: wrong fix (no change)
-    ("partial_rollback_a", "wrong: no change",
-     lambda code: code,
-     False),
-
+    ("partial_rollback_a", "wrong: no change", lambda code: code, False),
     # stale_cache_a: correct fix (invalidate after write)
-    ("stale_cache_a", "correct: add cache invalidation",
-     lambda code: code.replace(
-         "    _db[product_id].update(fields)",
-         "    _db[product_id].update(fields)\n    _cache.pop(product_id, None)"
-     ).replace("    # BUG: cache not invalidated \u2014 get_product returns stale data", ""),
-     True),
-
+    (
+        "stale_cache_a",
+        "correct: add cache invalidation",
+        lambda code: code.replace(
+            "    _db[product_id].update(fields)",
+            "    _db[product_id].update(fields)\n    _cache.pop(product_id, None)",
+        ).replace("    # BUG: cache not invalidated \u2014 get_product returns stale data", ""),
+        True,
+    ),
     # mutable_default_a: correct fix (None default)
-    ("mutable_default_a", "correct: None default pattern",
-     lambda code: code.replace(
-         "def enqueue(task, queue=[]):",
-         "def enqueue(task, queue=None):"
-     ).replace(
-         "    queue.append(task)",
-         "    if queue is None:\n        queue = []\n    queue.append(task)"
-     ),
-     True),
-
+    (
+        "mutable_default_a",
+        "correct: None default pattern",
+        lambda code: code.replace(
+            "def enqueue(task, queue=[]):", "def enqueue(task, queue=None):"
+        ).replace(
+            "    queue.append(task)",
+            "    if queue is None:\n        queue = []\n    queue.append(task)",
+        ),
+        True,
+    ),
     # mutable_default_a: wrong fix (return copy - actually fixes the symptom)
-    ("mutable_default_a", "wrong: return copy but default still shared",
-     lambda code: code.replace(
-         "    return queue",
-         "    result = list(queue)\n    return result"
-     ),
-     False),
-
+    (
+        "mutable_default_a",
+        "wrong: return copy but default still shared",
+        lambda code: code.replace(
+            "    return queue", "    result = list(queue)\n    return result"
+        ),
+        False,
+    ),
     # missing_branch_a: correct fix (add moderator with read+write+delete)
-    ("missing_branch_a", "correct: add moderator branch",
-     lambda code: code.replace(
-         '"user": {"read", "write"},',
-         '"user": {"read", "write"},\n    "moderator": {"read", "write", "delete"},'
-     ),
-     True),
-
+    (
+        "missing_branch_a",
+        "correct: add moderator branch",
+        lambda code: code.replace(
+            '"user": {"read", "write"},',
+            '"user": {"read", "write"},\n    "moderator": {"read", "write", "delete"},',
+        ),
+        True,
+    ),
     # missing_branch_a: wrong fix (no change)
-    ("missing_branch_a", "wrong: no change",
-     lambda code: code,
-     False),
-
+    ("missing_branch_a", "wrong: no change", lambda code: code, False),
     # wrong_condition_a: correct fix (>= instead of >)
-    ("wrong_condition_a", "correct: fix comparison operator",
-     lambda code: code.replace("> max_requests", ">= max_requests")
-     if "> max_requests" in code else code.replace(
-         "count > limit", "count >= limit"
-     ),
-     True),
-
+    (
+        "wrong_condition_a",
+        "correct: fix comparison operator",
+        lambda code: (
+            code.replace("> max_requests", ">= max_requests")
+            if "> max_requests" in code
+            else code.replace("count > limit", "count >= limit")
+        ),
+        True,
+    ),
     # config_shadowing: correct fix (fix default)
-    ("config_shadowing", "correct: fix default timeout",
-     lambda code: code.replace('"timeout": 5', '"timeout": 30'),
-     True),
-
+    (
+        "config_shadowing",
+        "correct: fix default timeout",
+        lambda code: code.replace('"timeout": 5', '"timeout": 30'),
+        True,
+    ),
     # config_shadowing: wrong fix (no change)
-    ("config_shadowing", "wrong: no change",
-     lambda code: code,
-     False),
+    ("config_shadowing", "wrong: no change", lambda code: code, False),
 ]
 
 
@@ -298,7 +329,7 @@ class TestSimulatedAgentOutputs:
     @pytest.mark.parametrize(
         "case_id,description,transform,should_pass",
         _SIMULATED_OUTPUTS,
-        ids=[f"{cid}:{desc}" for cid, desc, _, _ in _SIMULATED_OUTPUTS]
+        ids=[f"{cid}:{desc}" for cid, desc, _, _ in _SIMULATED_OUTPUTS],
     )
     def test_simulated(self, case_id, description, transform, should_pass):
         case = next(c for c in _ALL_CASES if c["id"] == case_id)
@@ -312,19 +343,18 @@ class TestSimulatedAgentOutputs:
 
         if should_pass:
             assert passed, (
-                f"[{case_id}] '{description}' should PASS but FAILED. "
-                f"Reasons: {reasons}"
+                f"[{case_id}] '{description}' should PASS but FAILED. " f"Reasons: {reasons}"
             )
         else:
             assert not passed, (
-                f"[{case_id}] '{description}' should FAIL but PASSED. "
-                f"Reasons: {reasons}"
+                f"[{case_id}] '{description}' should FAIL but PASSED. " f"Reasons: {reasons}"
             )
 
 
 # ============================================================
 # TEST 7: No case returns score=0.0 with reason "no_test_found"
 # ============================================================
+
 
 class TestNoTestFoundCrashes:
     """Missing tests must raise RuntimeError — never silently return a score."""

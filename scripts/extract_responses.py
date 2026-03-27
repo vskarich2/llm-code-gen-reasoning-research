@@ -9,6 +9,7 @@ Examples:
     python scripts/extract_responses.py logs/gpt-4o-mini_20260323_151334_responses.jsonl --case alias_trivial
     python scripts/extract_responses.py logs/gpt-4o-mini_20260323_151334_responses.jsonl --case alias_trivial --code-only
 """
+
 import argparse
 import json
 import sys

@@ -35,7 +35,7 @@ def _normalize_file_content(content: str) -> str:
         # Remove opening fence line
         first_newline = stripped.find("\n")
         if first_newline != -1:
-            after_open = stripped[first_newline + 1:]
+            after_open = stripped[first_newline + 1 :]
         else:
             after_open = ""
         # Remove closing fence
@@ -50,22 +50,28 @@ def _normalize_file_content(content: str) -> str:
     #   "def f():\n    pass" (normal, has real newlines → leave alone)
     if "\n" not in normalized and "\\n" in normalized:
         normalized = normalized.replace("\\n", "\n").replace("\\t", "\t")
-        _log.info("CONTENT_NORMALIZED: unescaped \\\\n/\\\\t in file content (len=%d→%d)",
-                  len(content), len(normalized))
+        _log.info(
+            "CONTENT_NORMALIZED: unescaped \\\\n/\\\\t in file content (len=%d→%d)",
+            len(content),
+            len(normalized),
+        )
 
     if normalized != content:
-        _log.info("CONTENT_NORMALIZED: file content changed (len=%d→%d, fences=%s, unescape=%s)",
-                  len(content), len(normalized),
-                  content.strip().startswith("```"),
-                  "\n" not in content and "\\n" in content)
+        _log.info(
+            "CONTENT_NORMALIZED: file content changed (len=%d→%d, fences=%s, unescape=%s)",
+            len(content),
+            len(normalized),
+            content.strip().startswith("```"),
+            "\n" not in content and "\\n" in content,
+        )
 
     return normalized
 
 
 @dataclass
 class ReconstructionResult:
-    status: str                          # SUCCESS, FAILED_MISSING_FILES, FAILED_EMPTY_FILES, FAILED_SYNTAX_ERRORS
-    files: dict[str, str]                # rel_path -> content (populated on SUCCESS or FAILED_SYNTAX_ERRORS)
+    status: str  # SUCCESS, FAILED_MISSING_FILES, FAILED_EMPTY_FILES, FAILED_SYNTAX_ERRORS
+    files: dict[str, str]  # rel_path -> content (populated on SUCCESS or FAILED_SYNTAX_ERRORS)
     changed_files: set[str] = field(default_factory=set)
     missing_files: set[str] = field(default_factory=set)
     extra_files: set[str] = field(default_factory=set)
@@ -79,9 +85,9 @@ class ReconstructionResult:
     recovery_types: list[str] = field(default_factory=list)
 
 
-def reconstruct_strict(manifest_file_paths: list[str],
-                       manifest_files: dict[str, str],
-                       model_files: dict[str, str]) -> ReconstructionResult:
+def reconstruct_strict(
+    manifest_file_paths: list[str], manifest_files: dict[str, str], model_files: dict[str, str]
+) -> ReconstructionResult:
     """Primary reconstruction. FAILS if any expected file is missing.
 
     Args:
@@ -100,7 +106,8 @@ def reconstruct_strict(manifest_file_paths: list[str],
     if missing:
         _log.warning(
             "RECONSTRUCTION FAILED: %d missing files: %s",
-            len(missing), sorted(missing),
+            len(missing),
+            sorted(missing),
         )
         return ReconstructionResult(
             status="FAILED_MISSING_FILES",
@@ -121,9 +128,7 @@ def reconstruct_strict(manifest_file_paths: list[str],
 
         if value.strip() == "UNCHANGED":
             if rel_path not in manifest_files:
-                _log.warning(
-                    "UNCHANGED for unknown file %s -- treating as missing", rel_path
-                )
+                _log.warning("UNCHANGED for unknown file %s -- treating as missing", rel_path)
                 return ReconstructionResult(
                     status="FAILED_MISSING_FILES",
                     files={},
@@ -169,7 +174,8 @@ def reconstruct_strict(manifest_file_paths: list[str],
     if syntax_errors:
         _log.warning(
             "RECONSTRUCTION FAILED: syntax errors in %d files: %s",
-            len(syntax_errors), list(syntax_errors.keys()),
+            len(syntax_errors),
+            list(syntax_errors.keys()),
         )
         return ReconstructionResult(
             status="FAILED_SYNTAX_ERRORS",
@@ -196,9 +202,9 @@ def reconstruct_strict(manifest_file_paths: list[str],
     )
 
 
-def reconstruct_salvage(manifest_file_paths: list[str],
-                        manifest_files: dict[str, str],
-                        model_files: dict[str, str]) -> ReconstructionResult:
+def reconstruct_salvage(
+    manifest_file_paths: list[str], manifest_files: dict[str, str], model_files: dict[str, str]
+) -> ReconstructionResult:
     """Salvage reconstruction for secondary analysis. Fills missing with originals.
 
     MUST NOT flow into primary metrics. Result tagged reconstruction_mode="salvaged".

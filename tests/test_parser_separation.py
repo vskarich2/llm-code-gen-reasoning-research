@@ -15,29 +15,37 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from leg_reduction import parse_leg_reduction_output, _extraction_fail
 from retry_harness import _select_best_code
 
-
 # ============================================================
 # Helpers: build LEG responses
 # ============================================================
 
-def _leg_response(code="def f(): return 1", diagnosis="bug found",
-                  plan_steps=None, revision_history=None,
-                  verification=None, internal_revisions=0,
-                  extra_fields=None, changes_made_override=None):
+
+def _leg_response(
+    code="def f(): return 1",
+    diagnosis="bug found",
+    plan_steps=None,
+    revision_history=None,
+    verification=None,
+    internal_revisions=0,
+    extra_fields=None,
+    changes_made_override=None,
+):
     """Build a LEG-reduction JSON response string."""
     if plan_steps is None:
         plan_steps = [{"step": "fix it", "intended_effect": "correct behavior"}]
     if revision_history is None:
-        revision_history = [{
-            "revision": 0,
-            "verification": [{"step": "fix it", "status": "PASS", "evidence": "works"}],
-            "invariants_checked": [],
-            "issues_found": [],
-            "changes_made": changes_made_override,
-            "changed_functions": [],
-            "code_before": "old code",
-            "code_after": code,
-        }]
+        revision_history = [
+            {
+                "revision": 0,
+                "verification": [{"step": "fix it", "status": "PASS", "evidence": "works"}],
+                "invariants_checked": [],
+                "issues_found": [],
+                "changes_made": changes_made_override,
+                "changed_functions": [],
+                "code_before": "old code",
+                "code_after": code,
+            }
+        ]
     if verification is None:
         verification = [{"step": "fix it", "status": "PASS", "evidence": "works"}]
 
@@ -57,6 +65,7 @@ def _leg_response(code="def f(): return 1", diagnosis="bug found",
 # ============================================================
 # Test 1: Valid JSON + wrong metadata → code MUST still execute
 # ============================================================
+
 
 class TestMetadataTolerance:
 
@@ -85,10 +94,9 @@ class TestMetadataTolerance:
         assert result["schema_compliant"] is False
         assert any("internal_revisions" in v for v in result["schema_violations"])
 
-
-# ============================================================
-# Test 2: Valid JSON + correct code → must pass
-# ============================================================
+    # ============================================================
+    # Test 2: Valid JSON + correct code → must pass
+    # ============================================================
 
     def test_perfect_response(self):
         """All fields correct → schema_compliant=True, code_extracted=True."""
@@ -103,11 +111,12 @@ class TestMetadataTolerance:
 # Test 3: Invalid JSON → must fail cleanly
 # ============================================================
 
+
 class TestJsonFailure:
 
     def test_broken_json_no_code_anywhere(self):
         """Completely empty malformed text → code_extracted=False."""
-        result = parse_leg_reduction_output('   ')
+        result = parse_leg_reduction_output("   ")
         assert result["code_extracted"] is False
         assert result["parse_error"] is not None
 
@@ -129,6 +138,7 @@ class TestJsonFailure:
 # Test 4: Extra fields → must NOT cause failure
 # ============================================================
 
+
 class TestExtraFields:
 
     def test_extra_fields_ignored(self):
@@ -146,6 +156,7 @@ class TestExtraFields:
 # ============================================================
 # Test 7: Cross-model consistency
 # ============================================================
+
 
 class TestCrossModelConsistency:
 
@@ -176,6 +187,7 @@ class TestCrossModelConsistency:
 # Test 8: Execution equivalence (LEG path)
 # ============================================================
 
+
 class TestLegExecutionEquivalence:
 
     def test_code_unchanged_by_metadata_fix(self):
@@ -195,6 +207,7 @@ class TestLegExecutionEquivalence:
 # ============================================================
 # Test 13-15: Extraction selection (retry harness)
 # ============================================================
+
 
 class TestExtractionSelection:
 
@@ -255,6 +268,7 @@ class TestExtractionSelection:
 # Test 16: LEG restricted fallback — code recovered from broken JSON
 # ============================================================
 
+
 class TestLegRestrictedFallback:
 
     def test_broken_json_with_code_block(self):
@@ -269,15 +283,14 @@ class TestLegRestrictedFallback:
 
     def test_no_json_at_all(self):
         """No JSON, but code block present."""
-        raw = 'Here is the fix:\n```python\ndef f():\n    return 42\n```'
+        raw = "Here is the fix:\n```python\ndef f():\n    return 42\n```"
         result = parse_leg_reduction_output(raw)
         assert result["code_extracted"] is True
         assert result["extraction_source"] == "fallback"
 
-
-# ============================================================
-# Test 17: LEG fallback does NOT override valid JSON
-# ============================================================
+    # ============================================================
+    # Test 17: LEG fallback does NOT override valid JSON
+    # ============================================================
 
     def test_valid_json_no_fallback(self):
         """When JSON extraction succeeds, fallback must NOT run."""
@@ -290,6 +303,7 @@ class TestLegRestrictedFallback:
 # ============================================================
 # Test 18: Extraction conflict logging
 # ============================================================
+
 
 class TestExtractionConflict:
 
@@ -308,6 +322,7 @@ class TestExtractionConflict:
 # Test: _extraction_fail has all required fields
 # ============================================================
 
+
 class TestExtractionFailFields:
 
     def test_extraction_fail_has_new_fields(self):
@@ -323,12 +338,14 @@ class TestExtractionFailFields:
 # Test 10: No salvage in primary path (structural check)
 # ============================================================
 
+
 class TestNoSalvage:
 
     def test_reconstruct_salvage_not_imported_in_execution(self):
         """reconstructor.reconstruct_salvage must not be called in execution.py primary path."""
         import execution
         import inspect
+
         source = inspect.getsource(execution._do_reconstruction)
         assert "reconstruct_salvage" not in source, (
             "reconstruct_salvage found in _do_reconstruction — "

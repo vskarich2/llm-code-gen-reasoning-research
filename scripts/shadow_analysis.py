@@ -7,6 +7,7 @@ Usage:
 Reads a SINGLE metadata log file that contains multiple conditions
 (baseline + retry variants) for the same cases. Produces comparison tables.
 """
+
 import argparse
 import json
 import sys
@@ -45,7 +46,7 @@ def analyze(log_path):
     # Group by case
     cases = set()
     conditions = set()
-    for (cid, cond) in summaries:
+    for cid, cond in summaries:
         cases.add(cid)
         conditions.add(cond)
     for cid in baselines:
@@ -113,7 +114,9 @@ def analyze(log_path):
     for cond in conditions:
         rc = recovery_counts[cond]
         rate = rc["recovered"] / rc["total_fail"] if rc["total_fail"] else 0
-        print(f"{cond}: recovered {rc['recovered']}/{rc['total_fail']} baseline failures ({rate:.0%})")
+        print(
+            f"{cond}: recovered {rc['recovered']}/{rc['total_fail']} baseline failures ({rate:.0%})"
+        )
 
     # Recovery by failure type
     all_types = sorted(failure_type_recovery.keys())
@@ -145,7 +148,9 @@ def analyze(log_path):
             p_nocon = nocon["pass"] / nocon["total"] if nocon["total"] else 0
             delta = p_adapt - p_nocon
             if adapt["total"] > 0 or nocon["total"] > 0:
-                print(f"  {ft:<25} P(adapt)={p_adapt:.2f}  P(no_con)={p_nocon:.2f}  delta={delta:+.2f}")
+                print(
+                    f"  {ft:<25} P(adapt)={p_adapt:.2f}  P(no_con)={p_nocon:.2f}  delta={delta:+.2f}"
+                )
 
 
 def main():

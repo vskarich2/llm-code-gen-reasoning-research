@@ -50,12 +50,14 @@ def main():
     print(f"Total events read: {len(all_events)}")
 
     # Sort deterministically by (model, trial, case_id, condition)
-    all_events.sort(key=lambda e: (
-        e.get("model", ""),
-        e.get("trial", 0),
-        e.get("case_id", ""),
-        e.get("condition", ""),
-    ))
+    all_events.sort(
+        key=lambda e: (
+            e.get("model", ""),
+            e.get("trial", 0),
+            e.get("case_id", ""),
+            e.get("condition", ""),
+        )
+    )
 
     # Write merged file
     output_path = Path(args.output)
@@ -91,8 +93,10 @@ def main():
 
     # Check total unique tuples
     if len(unique_tuples) != expected_total:
-        print(f"\nVALIDATION FAILED: expected {expected_total} unique tuples, "
-              f"found {len(unique_tuples)}")
+        print(
+            f"\nVALIDATION FAILED: expected {expected_total} unique tuples, "
+            f"found {len(unique_tuples)}"
+        )
         errors.append("Total unique tuple count mismatch")
 
     # Check duplicates
@@ -130,6 +134,7 @@ def main():
 
     # Check per (model, case_id, condition) trial count
     from collections import defaultdict
+
     mcc_trials = defaultdict(set)
     for e in all_events:
         key = (e["model"], e["case_id"], e["condition"])
@@ -142,8 +147,10 @@ def main():
 
     trial_violations = [k for k, v in mcc_trials.items() if len(v) != args.n_trials]
     if trial_violations:
-        print(f"\nVALIDATION FAILED: {len(trial_violations)} (model, case, condition) groups "
-              f"with wrong trial count")
+        print(
+            f"\nVALIDATION FAILED: {len(trial_violations)} (model, case, condition) groups "
+            f"with wrong trial count"
+        )
         for v in trial_violations[:20]:
             print(f"  {v}: {sorted(mcc_trials[v])}")
 
@@ -172,9 +179,11 @@ def main():
         print(f"\nVALIDATION FAILED: {len(errors)} error(s)")
         sys.exit(1)
 
-    print(f"\nVALIDATION PASSED: {len(all_events)} events, "
-          f"{len(models)} models, {len(case_ids)} cases, "
-          f"{len(conditions)} conditions, {len(trials)} trials")
+    print(
+        f"\nVALIDATION PASSED: {len(all_events)} events, "
+        f"{len(models)} models, {len(case_ids)} cases, "
+        f"{len(conditions)} conditions, {len(trials)} trials"
+    )
     sys.exit(0)
 
 

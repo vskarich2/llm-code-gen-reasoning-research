@@ -33,9 +33,7 @@ def sample_multi_file_case():
     # Find a multi-file case
     for c in cases:
         if len(c["code_files"]) >= 3:
-            c["code_files_contents"] = {
-                f: (BASE_DIR / f).read_text() for f in c["code_files"]
-            }
+            c["code_files_contents"] = {f: (BASE_DIR / f).read_text() for f in c["code_files"]}
             return c
     pytest.skip("No multi-file case with >= 3 files found")
 
@@ -45,9 +43,7 @@ def sample_single_file_case():
     cases = json.loads((BASE_DIR / "cases_v2.json").read_text())
     for c in cases:
         if len(c["code_files"]) == 1:
-            c["code_files_contents"] = {
-                f: (BASE_DIR / f).read_text() for f in c["code_files"]
-            }
+            c["code_files_contents"] = {f: (BASE_DIR / f).read_text() for f in c["code_files"]}
             return c
     pytest.skip("No single-file case found")
 
@@ -63,15 +59,14 @@ def test_repo_root_imports():
         pkg = Path(tmpdir) / "test_case"
         pkg.mkdir()
         (pkg / "models.py").write_text("class Foo:\n    x = 1")
-        (pkg / "service.py").write_text(
-            "from models import Foo\ndef get(): return Foo.x"
-        )
+        (pkg / "service.py").write_text("from models import Foo\ndef get(): return Foo.x")
         result = subprocess.run(
-            [sys.executable, "-c",
-             "from service import get; assert get() == 1; print('OK')"],
+            [sys.executable, "-c", "from service import get; assert get() == 1; print('OK')"],
             cwd=str(pkg),
             env={"PYTHONPATH": str(pkg), "PATH": ""},
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert result.returncode == 0, f"Import failed: {result.stderr}"
         assert "OK" in result.stdout
@@ -87,6 +82,7 @@ def test_canonical_mods_keys():
     sys.path.insert(0, str(BASE_DIR))
     try:
         from subprocess_eval import _generate_harness
+
         modules = ["cache_writer", "cache_reader", "user_service"]
         harness = _generate_harness(modules, "def test(mods): pass", "test")
         for m in modules:
@@ -107,6 +103,7 @@ def test_reduction_does_not_mutate_inputs():
     try:
         # Config must be loaded for token budget lookup
         from experiment_config import load_config, is_config_loaded
+
         if not is_config_loaded():
             load_config(str(BASE_DIR / "configs" / "default.yaml"))
 
@@ -184,10 +181,12 @@ def test_reduction_disclosure_in_prompt():
 
 def test_leg_classification_rules():
     """Verify key rows of the LEG rule table produce correct classification."""
+
     # Import the classifier (we define it inline since it may not be extracted yet)
     def classify(error_type, reasoning, response_format, reasoning_correct):
         reasoning_eval = (
-            isinstance(reasoning, str) and len(reasoning.strip()) > 0
+            isinstance(reasoning, str)
+            and len(reasoning.strip()) > 0
             and response_format in ("file_dict", "code_dict")
         )
         code_correct = error_type == "logic_pass"
@@ -381,21 +380,15 @@ def test_parser_tiers():
         from parse import parse_model_response
 
         # Tier 0: file_dict
-        r1 = parse_model_response(json.dumps({
-            "reasoning": "test", "files": {"a.py": "pass"}
-        }))
+        r1 = parse_model_response(json.dumps({"reasoning": "test", "files": {"a.py": "pass"}}))
         assert r1["response_format"] == "file_dict"
 
         # Tier 1a: code_dict
-        r2 = parse_model_response(json.dumps({
-            "reasoning": "test", "code": {"a.py": "pass"}
-        }))
+        r2 = parse_model_response(json.dumps({"reasoning": "test", "code": {"a.py": "pass"}}))
         assert r2["response_format"] == "code_dict"
 
         # Tier 1b: json_direct (code as string)
-        r3 = parse_model_response(json.dumps({
-            "reasoning": "test", "code": "def f(): pass"
-        }))
+        r3 = parse_model_response(json.dumps({"reasoning": "test", "code": "def f(): pass"}))
         assert r3["response_format"] == "json_direct"
 
         # Tier 4: raw fallback

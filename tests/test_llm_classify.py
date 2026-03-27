@@ -7,6 +7,7 @@ Validates:
   4. Parsing robustness — malformed output fails explicitly
   5. Backward compatibility — pipeline runs end-to-end
 """
+
 import sys
 import os
 import json
@@ -23,24 +24,27 @@ from evaluator import (
     llm_classify,
 )
 
-
 # ============================================================
 # 1. EVALUATOR COVERAGE — runs on both pass and fail
 # ============================================================
 
+
 def test_evaluator_runs_on_passing_attempt():
     """evaluate_output on passing code must still produce code_correct field."""
     from runner import load_cases
+
     case = load_cases(case_id="easy_conservation")[0]
     # Code that passes the conservation invariant
-    raw = json.dumps({
-        "reasoning": "Transfer must conserve total balance.",
-        "code": (
-            "def transfer(a, b, amount):\n"
-            "    a['balance'] -= amount\n"
-            "    b['balance'] += amount\n"
-        ),
-    })
+    raw = json.dumps(
+        {
+            "reasoning": "Transfer must conserve total balance.",
+            "code": (
+                "def transfer(a, b, amount):\n"
+                "    a['balance'] -= amount\n"
+                "    b['balance'] += amount\n"
+            ),
+        }
+    )
     parsed = {
         "code": (
             "def transfer(a, b, amount):\n"
@@ -62,12 +66,15 @@ def test_evaluator_runs_on_passing_attempt():
 def test_evaluator_runs_on_failing_attempt():
     """evaluate_output on failing code must still produce code_correct field."""
     from runner import load_cases
+
     case = load_cases(case_id="easy_conservation")[0]
     # Code that does NOT conserve balance (only debits)
-    raw = json.dumps({
-        "reasoning": "Just debit the sender.",
-        "code": "def transfer(a, b, amount):\n    a['balance'] -= amount\n",
-    })
+    raw = json.dumps(
+        {
+            "reasoning": "Just debit the sender.",
+            "code": "def transfer(a, b, amount):\n    a['balance'] -= amount\n",
+        }
+    )
     parsed = {
         "code": "def transfer(a, b, amount):\n    a['balance'] -= amount\n",
         "reasoning": "Just debit the sender.",
@@ -84,6 +91,7 @@ def test_evaluator_runs_on_failing_attempt():
 # ============================================================
 # 2. CATEGORY CORRECTNESS — all 4 quadrants
 # ============================================================
+
 
 def test_category_true_success():
     """reasoning_correct=True AND code_correct=True → true_success."""
@@ -134,14 +142,18 @@ def test_category_unclassified_on_none():
 # 3. NO HEURISTIC LEAKAGE — LLM is sole source
 # ============================================================
 
+
 def test_evaluate_output_has_required_fields():
     """evaluate_output must populate code_correct (from exec) and reasoning_correct (from classifier)."""
     from runner import load_cases
+
     case = load_cases(case_id="easy_conservation")[0]
-    raw = json.dumps({
-        "reasoning": "balance conservation.",
-        "code": "def transfer(a, b, n): a['balance'] -= n; b['balance'] += n",
-    })
+    raw = json.dumps(
+        {
+            "reasoning": "balance conservation.",
+            "code": "def transfer(a, b, n): a['balance'] -= n; b['balance'] += n",
+        }
+    )
     parsed = {
         "code": "def transfer(a, b, n): a['balance'] -= n; b['balance'] += n",
         "reasoning": "balance conservation.",
@@ -162,17 +174,32 @@ def test_evaluate_output_has_required_fields():
 def test_code_correct_comes_from_exec_not_classifier():
     """code_correct MUST equal exec pass, regardless of classifier opinion."""
     from runner import load_cases
+
     case = load_cases(case_id="easy_conservation")[0]
     # Code that PASSES execution test
-    passing_code = "def transfer(a, b, amount):\n    a['balance'] -= amount\n    b['balance'] += amount"
-    parsed_pass = {"code": passing_code, "reasoning": "", "raw_output": passing_code, "parse_error": None, "_raw_fallback": False}
+    passing_code = (
+        "def transfer(a, b, amount):\n    a['balance'] -= amount\n    b['balance'] += amount"
+    )
+    parsed_pass = {
+        "code": passing_code,
+        "reasoning": "",
+        "raw_output": passing_code,
+        "parse_error": None,
+        "_raw_fallback": False,
+    }
     result_pass = evaluate_output(case, parsed_pass)
     assert result_pass["pass"] is True, "exec should pass"
     assert result_pass["code_correct"] is True, "code_correct must be True when exec passes"
 
     # Code that FAILS execution test
     failing_code = "def transfer(a, b, amount):\n    a['balance'] -= amount"
-    parsed_fail = {"code": failing_code, "reasoning": "balance conservation.", "raw_output": failing_code, "parse_error": None, "_raw_fallback": False}
+    parsed_fail = {
+        "code": failing_code,
+        "reasoning": "balance conservation.",
+        "raw_output": failing_code,
+        "parse_error": None,
+        "_raw_fallback": False,
+    }
     result_fail = evaluate_output(case, parsed_fail)
     assert result_fail["pass"] is False, "exec should fail"
     assert result_fail["code_correct"] is False, "code_correct must be False when exec fails"
@@ -181,10 +208,17 @@ def test_code_correct_comes_from_exec_not_classifier():
 def test_leg_uses_exec_not_classifier():
     """LEG must be: reasoning_correct AND NOT exec_pass."""
     from runner import load_cases
+
     case = load_cases(case_id="easy_conservation")[0]
     # Correct reasoning but broken code → LEG
     failing_code = "def transfer(a, b, amount):\n    a['balance'] -= amount"
-    parsed = {"code": failing_code, "reasoning": "Must conserve total balance across accounts.", "raw_output": failing_code, "parse_error": None, "_raw_fallback": False}
+    parsed = {
+        "code": failing_code,
+        "reasoning": "Must conserve total balance across accounts.",
+        "raw_output": failing_code,
+        "parse_error": None,
+        "_raw_fallback": False,
+    }
     result = evaluate_output(case, parsed)
     if result["reasoning_correct"] and not result["pass"]:
         assert result["alignment"]["category"] == "leg"
@@ -200,7 +234,9 @@ def test_classifier_prompt_has_no_exec_signals():
     end = text.find('"""', start + 21)
     prompt_text = text[start:end].lower()
     assert "exec_status" not in prompt_text, "Classifier prompt contains exec_status"
-    assert "execution test result" not in prompt_text, "Classifier prompt contains execution results"
+    assert (
+        "execution test result" not in prompt_text
+    ), "Classifier prompt contains execution results"
     assert "status: passed" not in prompt_text, "Classifier prompt contains pass/fail hint"
     assert "status: failed" not in prompt_text, "Classifier prompt contains pass/fail hint"
     assert "test_details" not in prompt_text, "Classifier prompt contains test details"
@@ -218,14 +254,15 @@ def test_no_keyword_matching_in_classification():
     # The main evaluate_output function must NOT call _detected_correct_reasoning
     # for its classification decisions
     import ast
+
     tree = ast.parse(text)
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "evaluate_output":
             func_source = ast.get_source_segment(text, node)
             # code_correct and reasoning_correct must come from classify, not heuristic
-            assert "classify[" in func_source or 'classify["' in func_source, (
-                "evaluate_output does not derive code_correct/reasoning_correct from classifier"
-            )
+            assert (
+                "classify[" in func_source or 'classify["' in func_source
+            ), "evaluate_output does not derive code_correct/reasoning_correct from classifier"
             # _detected_correct_reasoning must NOT be called for the primary classification
             # (it may still exist in the file for backward compat but not in this function)
             break
@@ -234,6 +271,7 @@ def test_no_keyword_matching_in_classification():
 # ============================================================
 # 4. PARSING ROBUSTNESS
 # ============================================================
+
 
 def test_parse_valid_output():
     """Well-formed classifier output parses correctly (2-part format)."""
@@ -297,10 +335,12 @@ def test_parse_no_silent_defaults():
 # 5. BACKWARD COMPATIBILITY
 # ============================================================
 
+
 def test_full_pipeline_baseline():
     """Baseline condition runs end-to-end with new evaluator."""
     from execution import run_single
     from runner import load_cases
+
     case = load_cases(case_id="easy_conservation")[0]
     cid, cond, ev = run_single(case, "gpt-4.1-nano", "baseline")
     assert "pass" in ev
@@ -315,6 +355,7 @@ def test_backward_compat_identified_correct_issue():
     """identified_correct_issue field still present for backward compat."""
     from execution import run_single
     from runner import load_cases
+
     case = load_cases(case_id="easy_conservation")[0]
     _, _, ev = run_single(case, "gpt-4.1-nano", "baseline")
     assert "identified_correct_issue" in ev
@@ -325,6 +366,7 @@ def test_backward_compat_reasoning_action_gap():
     """reasoning_action_gap field still present for backward compat."""
     from execution import run_single
     from runner import load_cases
+
     case = load_cases(case_id="easy_conservation")[0]
     _, _, ev = run_single(case, "gpt-4.1-nano", "baseline")
     assert "reasoning_action_gap" in ev
@@ -335,6 +377,7 @@ def test_logging_includes_new_fields():
     """Log records must include the new classification fields."""
     from execution import run_single
     from runner import load_cases
+
     case = load_cases(case_id="easy_conservation")[0]
     _, _, ev = run_single(case, "gpt-4.1-nano", "baseline")
     # The eval dict is what gets logged

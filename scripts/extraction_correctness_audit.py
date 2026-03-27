@@ -38,7 +38,9 @@ def audit(annotations_path: str):
     if mismatches:
         print("\n  Mismatches:")
         for d in mismatches:
-            print(f"    {d['case_id']}: annotated={d['annotated_e1']!r}, extracted={d['extracted_e1']!r}")
+            print(
+                f"    {d['case_id']}: annotated={d['annotated_e1']!r}, extracted={d['extracted_e1']!r}"
+            )
 
     threshold = 8
     passed = matches >= threshold

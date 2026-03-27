@@ -30,6 +30,7 @@ def make_increment_steps():
     Under interleaving, each increment reads the CURRENT value
     and writes value+1 in one step — no stale read possible.
     """
+
     def step_atomic_increment():
         current = get()
         _set(current + 1)

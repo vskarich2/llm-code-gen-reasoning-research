@@ -75,14 +75,10 @@ def test_c(mod):
         ]
 
     if not result.get("can_write"):
-        return False, [
-            f"service_account got can_write=False, expected True. Got: {result}"
-        ]
+        return False, [f"service_account got can_write=False, expected True. Got: {result}"]
 
     # service_account should NOT have admin privileges
     if result.get("can_admin"):
-        return False, [
-            f"service_account got can_admin=True, expected False. Got: {result}"
-        ]
+        return False, [f"service_account got can_admin=True, expected False. Got: {result}"]
 
     return True, ["service_account gets correct read+write access"]

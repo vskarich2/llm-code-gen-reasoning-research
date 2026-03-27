@@ -23,6 +23,7 @@ from datetime import datetime
 # Stream reader
 # ---------------------------------------------------------------------------
 
+
 def read_stream(client, stream_key: str, max_events: int = 0) -> list[dict]:
     """Read all events from a Redis Stream. Returns list of flat dicts."""
     events = []
@@ -57,6 +58,7 @@ def _increment_id(stream_id: str) -> str:
 # ---------------------------------------------------------------------------
 # Metric computation (pure functions — all derivation at read time)
 # ---------------------------------------------------------------------------
+
 
 def _bool(s: str) -> bool:
     return s.lower() == "true"
@@ -120,14 +122,16 @@ def compute_by_field(events: list[dict], field: str) -> list[dict]:
     for key in sorted(groups.keys()):
         g = groups[key]
         t = g["total"]
-        result.append({
-            "name": key,
-            "total": t,
-            "passed": g["passed"],
-            "pass_rate": g["passed"] / t if t else 0,
-            "leg": g["leg"],
-            "leg_rate": g["leg"] / t if t else 0,
-        })
+        result.append(
+            {
+                "name": key,
+                "total": t,
+                "passed": g["passed"],
+                "pass_rate": g["passed"] / t if t else 0,
+                "leg": g["leg"],
+                "leg_rate": g["leg"] / t if t else 0,
+            }
+        )
     return result
 
 
@@ -142,20 +146,21 @@ def compute_failure_modes(events: list[dict], min_count: int = 2) -> tuple[list[
 
     ft_counts = Counter(e.get("failure_type", "unknown") for e in failed)
     ft_leg = Counter(
-        e.get("failure_type", "unknown") for e in failed
-        if _bool(e.get("leg_true", "False"))
+        e.get("failure_type", "unknown") for e in failed if _bool(e.get("leg_true", "False"))
     )
 
     top_failures = []
     for ft, count in ft_counts.most_common(10):
         if not ft:
             continue
-        top_failures.append({
-            "failure_type": ft,
-            "count": count,
-            "leg_count": ft_leg.get(ft, 0),
-            "leg_rate": ft_leg.get(ft, 0) / count if count else 0,
-        })
+        top_failures.append(
+            {
+                "failure_type": ft,
+                "count": count,
+                "leg_count": ft_leg.get(ft, 0),
+                "leg_rate": ft_leg.get(ft, 0) / count if count else 0,
+            }
+        )
 
     top_leg = sorted(
         [f for f in top_failures if f["count"] >= min_count and f["leg_count"] > 0],
@@ -168,26 +173,28 @@ def compute_failure_modes(events: list[dict], min_count: int = 2) -> tuple[list[
 def compute_case_hotspots(events: list[dict], top_k: int = 10) -> list[dict]:
     """Top cases by LEG count."""
     leg_by_case = Counter(
-        e.get("case_id", "unknown") for e in events
-        if _bool(e.get("leg_true", "False"))
+        e.get("case_id", "unknown") for e in events if _bool(e.get("leg_true", "False"))
     )
     total_by_case = Counter(e.get("case_id", "unknown") for e in events)
 
     hotspots = []
     for case_id, leg_count in leg_by_case.most_common(top_k):
         total = total_by_case[case_id]
-        hotspots.append({
-            "case_id": case_id,
-            "leg_count": leg_count,
-            "total": total,
-            "leg_rate": leg_count / total if total else 0,
-        })
+        hotspots.append(
+            {
+                "case_id": case_id,
+                "leg_count": leg_count,
+                "total": total,
+                "leg_rate": leg_count / total if total else 0,
+            }
+        )
     return hotspots
 
 
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
+
 
 def render_dashboard(run_id: str, events: list[dict]) -> str:
     """Render the full dashboard as a string."""
@@ -229,25 +236,35 @@ def render_dashboard(run_id: str, events: list[dict]) -> str:
         lines.append(f"  {'Model':<22} {'Tot':>5} {'Pass':>5} {'Rate':>6} {'LEG':>5} {'LRate':>6}")
         lines.append(f"  {'-'*52}")
         for r in by_model:
-            lines.append(f"  {r['name']:<22} {r['total']:>5} {r['passed']:>5} {r['pass_rate']:>5.1%} {r['leg']:>5} {r['leg_rate']:>5.1%}")
+            lines.append(
+                f"  {r['name']:<22} {r['total']:>5} {r['passed']:>5} {r['pass_rate']:>5.1%} {r['leg']:>5} {r['leg_rate']:>5.1%}"
+            )
         lines.append("")
 
     # Section 4: By condition
     by_cond = compute_by_field(events, "condition")
     if by_cond:
-        lines.append(f"  {'Condition':<28} {'Tot':>5} {'Pass':>5} {'Rate':>6} {'LEG':>5} {'LRate':>6}")
+        lines.append(
+            f"  {'Condition':<28} {'Tot':>5} {'Pass':>5} {'Rate':>6} {'LEG':>5} {'LRate':>6}"
+        )
         lines.append(f"  {'-'*58}")
         for r in by_cond:
-            lines.append(f"  {r['name']:<28} {r['total']:>5} {r['passed']:>5} {r['pass_rate']:>5.1%} {r['leg']:>5} {r['leg_rate']:>5.1%}")
+            lines.append(
+                f"  {r['name']:<28} {r['total']:>5} {r['passed']:>5} {r['pass_rate']:>5.1%} {r['leg']:>5} {r['leg_rate']:>5.1%}"
+            )
         lines.append("")
 
     # Section 5: By attempt index
     by_attempt = compute_attempt_table(events)
     if by_attempt and len(by_attempt) > 1:
-        lines.append(f"  {'Attempts':<12} {'Tot':>5} {'Pass':>5} {'Rate':>6} {'LEG':>5} {'LRate':>6}")
+        lines.append(
+            f"  {'Attempts':<12} {'Tot':>5} {'Pass':>5} {'Rate':>6} {'LEG':>5} {'LRate':>6}"
+        )
         lines.append(f"  {'-'*42}")
         for r in by_attempt:
-            lines.append(f"  {r['name']:<12} {r['total']:>5} {r['passed']:>5} {r['pass_rate']:>5.1%} {r['leg']:>5} {r['leg_rate']:>5.1%}")
+            lines.append(
+                f"  {r['name']:<12} {r['total']:>5} {r['passed']:>5} {r['pass_rate']:>5.1%} {r['leg']:>5} {r['leg_rate']:>5.1%}"
+            )
         lines.append("")
 
     # Section 6: Failure modes
@@ -256,16 +273,22 @@ def render_dashboard(run_id: str, events: list[dict]) -> str:
         lines.append(f"  {'Failure Mode':<30} {'Count':>6} {'LEG':>5} {'LRate':>6}")
         lines.append(f"  {'-'*50}")
         for f in top_failures[:8]:
-            lines.append(f"  {f['failure_type']:<30} {f['count']:>6} {f['leg_count']:>5} {f['leg_rate']:>5.1%}")
+            lines.append(
+                f"  {f['failure_type']:<30} {f['count']:>6} {f['leg_count']:>5} {f['leg_rate']:>5.1%}"
+            )
         lines.append("")
 
     # Section 7: By difficulty
     by_diff = compute_by_field(events, "difficulty")
     if by_diff:
-        lines.append(f"  {'Difficulty':<12} {'Tot':>5} {'Pass':>5} {'Rate':>6} {'LEG':>5} {'LRate':>6}")
+        lines.append(
+            f"  {'Difficulty':<12} {'Tot':>5} {'Pass':>5} {'Rate':>6} {'LEG':>5} {'LRate':>6}"
+        )
         lines.append(f"  {'-'*42}")
         for r in by_diff:
-            lines.append(f"  {r['name']:<12} {r['total']:>5} {r['passed']:>5} {r['pass_rate']:>5.1%} {r['leg']:>5} {r['leg_rate']:>5.1%}")
+            lines.append(
+                f"  {r['name']:<12} {r['total']:>5} {r['passed']:>5} {r['pass_rate']:>5.1%} {r['leg']:>5} {r['leg_rate']:>5.1%}"
+            )
         lines.append("")
 
     # Section 8: Case hotspots
@@ -274,7 +297,9 @@ def render_dashboard(run_id: str, events: list[dict]) -> str:
         lines.append(f"  {'Case (top LEG)':<30} {'LEG':>5} {'Tot':>5} {'LRate':>6}")
         lines.append(f"  {'-'*48}")
         for h in hotspots[:8]:
-            lines.append(f"  {h['case_id']:<30} {h['leg_count']:>5} {h['total']:>5} {h['leg_rate']:>5.1%}")
+            lines.append(
+                f"  {h['case_id']:<30} {h['leg_count']:>5} {h['total']:>5} {h['leg_rate']:>5.1%}"
+            )
         lines.append("")
 
     lines.append(f"  [refreshing every {{refresh}}s — Ctrl-C to exit]")
@@ -285,12 +310,15 @@ def render_dashboard(run_id: str, events: list[dict]) -> str:
 # Main loop
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(description="T3 live dashboard (Redis stream reader)")
     parser.add_argument("--run-id", required=True, help="Run ID to monitor")
     parser.add_argument("--refresh", type=int, default=2, help="Refresh interval in seconds")
     parser.add_argument("--tail", type=int, default=0, help="Max events to read (0 = all)")
-    parser.add_argument("--redis-url", default=None, help="Redis URL (default: T3_REDIS_URL or localhost:6379)")
+    parser.add_argument(
+        "--redis-url", default=None, help="Redis URL (default: T3_REDIS_URL or localhost:6379)"
+    )
     args = parser.parse_args()
 
     redis_url = args.redis_url or os.environ.get("T3_REDIS_URL", "redis://localhost:6379/0")

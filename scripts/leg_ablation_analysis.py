@@ -20,6 +20,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -35,6 +36,7 @@ LOGS_DIR = BASE / "logs"
 # ============================================================
 # LOAD DATA
 # ============================================================
+
 
 def load_summary():
     """Load condition-level summary CSV."""
@@ -72,25 +74,27 @@ def load_attempt_level_data():
                 regime = (r.get("trajectory_dynamics") or {}).get("pattern", "UNKNOWN")
 
                 for e in r.get("trajectory", []):
-                    rows.append({
-                        "run_id": run_id,
-                        "case_id": case_id,
-                        "condition": condition,
-                        "trial": trial,
-                        "attempt_index": e.get("attempt", 0),
-                        "success": e.get("pass", False),
-                        "score": e.get("score", 0),
-                        "leg_true": e.get("leg_true"),
-                        "leg_coupling": e.get("leg_coupling"),
-                        "leg_execution": e.get("leg_execution"),
-                        "leg_keyword_only": e.get("leg_keyword_only", False),
-                        "classifier_type": e.get("classifier_failure_type") or
-                                           (e.get("classification") or {}).get("failure_type_final"),
-                        "alignment_success": e.get("alignment_success"),
-                        "alignment_score": e.get("alignment_step_coverage"),
-                        "regime": regime,
-                        "converged": converged,
-                    })
+                    rows.append(
+                        {
+                            "run_id": run_id,
+                            "case_id": case_id,
+                            "condition": condition,
+                            "trial": trial,
+                            "attempt_index": e.get("attempt", 0),
+                            "success": e.get("pass", False),
+                            "score": e.get("score", 0),
+                            "leg_true": e.get("leg_true"),
+                            "leg_coupling": e.get("leg_coupling"),
+                            "leg_execution": e.get("leg_execution"),
+                            "leg_keyword_only": e.get("leg_keyword_only", False),
+                            "classifier_type": e.get("classifier_failure_type")
+                            or (e.get("classification") or {}).get("failure_type_final"),
+                            "alignment_success": e.get("alignment_success"),
+                            "alignment_score": e.get("alignment_step_coverage"),
+                            "regime": regime,
+                            "converged": converged,
+                        }
+                    )
 
     df = pd.DataFrame(rows)
     # Derive leg_subtype
@@ -103,6 +107,7 @@ def load_attempt_level_data():
 # ============================================================
 # STEP 1 — GLOBAL METRICS
 # ============================================================
+
 
 def compute_global_metrics(df):
     """Compute global and per-condition metrics from attempt-level data."""
@@ -121,11 +126,15 @@ def compute_global_metrics(df):
     print(f"LEG_true rate (over evaluated): {leg_rate:.3f}")
 
     # Per condition
-    per_cond = evaluated.groupby("condition").agg(
-        attempts=("leg_true", "count"),
-        success_rate=("success", "mean"),
-        leg_rate=("leg_true", "mean"),
-    ).round(3)
+    per_cond = (
+        evaluated.groupby("condition")
+        .agg(
+            attempts=("leg_true", "count"),
+            success_rate=("success", "mean"),
+            leg_rate=("leg_true", "mean"),
+        )
+        .round(3)
+    )
     print("\nPer-condition:")
     print(per_cond.to_string())
 
@@ -136,6 +145,7 @@ def compute_global_metrics(df):
 # ============================================================
 # STEP 2 — FAILURE DECOMPOSITION
 # ============================================================
+
 
 def compute_failure_breakdown(df):
     """Decompose failures into LEG subtypes."""
@@ -148,8 +158,7 @@ def compute_failure_breakdown(df):
 
     leg_coupling = (failures["leg_subtype"] == "coupling").sum()
     leg_execution = (failures["leg_subtype"] == "execution").sum()
-    leg_untyped = ((failures["leg_true"] == True) &
-                   (failures["leg_subtype"].isna())).sum()
+    leg_untyped = ((failures["leg_true"] == True) & (failures["leg_subtype"].isna())).sum()
     non_leg = (failures["leg_true"] == False).sum()
 
     print("\n" + "=" * 60)
@@ -161,15 +170,30 @@ def compute_failure_breakdown(df):
     print(f"  LEG_untyped:     {leg_untyped:>4} ({leg_untyped/n_fail:.1%})")
     print(f"  Non-LEG failure: {non_leg:>4} ({non_leg/n_fail:.1%})")
 
-    breakdown = pd.DataFrame([{
-        "category": "LEG_coupling", "count": leg_coupling, "pct": round(leg_coupling / n_fail, 3),
-    }, {
-        "category": "LEG_execution", "count": leg_execution, "pct": round(leg_execution / n_fail, 3),
-    }, {
-        "category": "LEG_untyped", "count": leg_untyped, "pct": round(leg_untyped / n_fail, 3),
-    }, {
-        "category": "Non_LEG_failure", "count": non_leg, "pct": round(non_leg / n_fail, 3),
-    }])
+    breakdown = pd.DataFrame(
+        [
+            {
+                "category": "LEG_coupling",
+                "count": leg_coupling,
+                "pct": round(leg_coupling / n_fail, 3),
+            },
+            {
+                "category": "LEG_execution",
+                "count": leg_execution,
+                "pct": round(leg_execution / n_fail, 3),
+            },
+            {
+                "category": "LEG_untyped",
+                "count": leg_untyped,
+                "pct": round(leg_untyped / n_fail, 3),
+            },
+            {
+                "category": "Non_LEG_failure",
+                "count": non_leg,
+                "pct": round(non_leg / n_fail, 3),
+            },
+        ]
+    )
     breakdown.to_csv(OUTPUT_DIR / "failure_breakdown.csv", index=False)
 
     # Per condition
@@ -184,6 +208,7 @@ def compute_failure_breakdown(df):
 # STEP 3 — LEG × REGIME
 # ============================================================
 
+
 def compute_regime_analysis(df):
     """LEG rates by trajectory regime."""
     evaluated = df[df["leg_true"].notna()].copy()
@@ -192,11 +217,15 @@ def compute_regime_analysis(df):
         print("\nSTEP 3: No evaluated data for regime analysis.")
         return
 
-    regime_stats = evaluated.groupby("regime").agg(
-        total_attempts=("leg_true", "count"),
-        leg_rate=("leg_true", "mean"),
-        success_rate=("success", "mean"),
-    ).round(3)
+    regime_stats = (
+        evaluated.groupby("regime")
+        .agg(
+            total_attempts=("leg_true", "count"),
+            leg_rate=("leg_true", "mean"),
+            success_rate=("success", "mean"),
+        )
+        .round(3)
+    )
 
     # Add subtype rates
     for regime in regime_stats.index:
@@ -233,8 +262,16 @@ def plot_regime_heatmap(regime_stats):
     data = regime_stats[available].astype(float)
 
     fig, ax = plt.subplots(figsize=(8, max(4, len(data) * 0.5 + 1)))
-    sns.heatmap(data, annot=True, fmt=".3f", cmap="YlOrRd", ax=ax,
-                linewidths=0.5, vmin=0, vmax=max(0.2, data.max().max()))
+    sns.heatmap(
+        data,
+        annot=True,
+        fmt=".3f",
+        cmap="YlOrRd",
+        ax=ax,
+        linewidths=0.5,
+        vmin=0,
+        vmax=max(0.2, data.max().max()),
+    )
     ax.set_title("LEG Rates by Trajectory Regime")
     ax.set_ylabel("Regime")
     plt.tight_layout()
@@ -247,6 +284,7 @@ def plot_regime_heatmap(regime_stats):
 # STEP 4 — CONDITION COMPARISON
 # ============================================================
 
+
 def compute_condition_comparison(df):
     """Compare conditions on LEG metrics."""
     evaluated = df[df["leg_true"].notna()].copy()
@@ -255,11 +293,15 @@ def compute_condition_comparison(df):
         print("\nSTEP 4: No evaluated data for condition comparison.")
         return
 
-    cond_stats = evaluated.groupby("condition").agg(
-        attempts=("leg_true", "count"),
-        success_rate=("success", "mean"),
-        leg_rate=("leg_true", "mean"),
-    ).round(3)
+    cond_stats = (
+        evaluated.groupby("condition")
+        .agg(
+            attempts=("leg_true", "count"),
+            success_rate=("success", "mean"),
+            leg_rate=("leg_true", "mean"),
+        )
+        .round(3)
+    )
 
     for cond in cond_stats.index:
         mask = evaluated["condition"] == cond
@@ -314,6 +356,7 @@ def plot_condition_comparison(cond_stats):
 # STEP 5 — TRANSITION ANALYSIS
 # ============================================================
 
+
 def compute_transitions(trans_df):
     """Analyze state transitions."""
     if trans_df is None or trans_df.empty:
@@ -326,9 +369,9 @@ def compute_transitions(trans_df):
     print("=" * 60)
 
     # Aggregate across conditions
-    agg = trans_df.groupby(["from_state", "to_state"]).agg(
-        total_count=("count", "sum")
-    ).reset_index()
+    agg = (
+        trans_df.groupby(["from_state", "to_state"]).agg(total_count=("count", "sum")).reset_index()
+    )
 
     # Compute probabilities
     row_totals = agg.groupby("from_state")["total_count"].transform("sum")
@@ -364,8 +407,10 @@ def compute_transitions(trans_df):
         ct = trans_df[trans_df["condition"] == cond]
         print(f"\n  {cond}:")
         for _, row in ct.iterrows():
-            print(f"    {row['from_state']:>20} → {row['to_state']:<20}: "
-                  f"n={row['count']:>3}  P={row['probability']:.3f}")
+            print(
+                f"    {row['from_state']:>20} → {row['to_state']:<20}: "
+                f"n={row['count']:>3}  P={row['probability']:.3f}"
+            )
 
     agg.to_csv(OUTPUT_DIR / "transition_probabilities.csv", index=False)
     return agg, pivot
@@ -377,8 +422,7 @@ def plot_transition_heatmap(pivot):
         return
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    sns.heatmap(pivot, annot=True, fmt=".3f", cmap="Blues", ax=ax,
-                linewidths=0.5, vmin=0, vmax=1.0)
+    sns.heatmap(pivot, annot=True, fmt=".3f", cmap="Blues", ax=ax, linewidths=0.5, vmin=0, vmax=1.0)
     ax.set_title("State Transition Probabilities")
     ax.set_ylabel("From State")
     ax.set_xlabel("To State")
@@ -391,6 +435,7 @@ def plot_transition_heatmap(pivot):
 # ============================================================
 # STEP 6 — PERSISTENCE
 # ============================================================
+
 
 def compute_persistence(df):
     """Compute LEG persistence per run."""
@@ -413,14 +458,16 @@ def compute_persistence(df):
             else:
                 current = 0
         leg_count = ((~group["success"]) & (group["leg_true"] == True)).sum()
-        persistence_rows.append({
-            "run_id": run_id,
-            "condition": group.iloc[0]["condition"],
-            "regime": group.iloc[0]["regime"],
-            "leg_true_count": leg_count,
-            "max_leg_streak": max_streak,
-            "attempts": len(group),
-        })
+        persistence_rows.append(
+            {
+                "run_id": run_id,
+                "condition": group.iloc[0]["condition"],
+                "regime": group.iloc[0]["regime"],
+                "leg_true_count": leg_count,
+                "max_leg_streak": max_streak,
+                "attempts": len(group),
+            }
+        )
 
     pers_df = pd.DataFrame(persistence_rows)
 
@@ -436,12 +483,16 @@ def compute_persistence(df):
         print(f"Mean max streak: {leg_runs['max_leg_streak'].mean():.2f}")
         print(f"Max streak overall: {leg_runs['max_leg_streak'].max()}")
 
-        per_cond = leg_runs.groupby("condition").agg(
-            runs=("run_id", "count"),
-            mean_leg_count=("leg_true_count", "mean"),
-            mean_max_streak=("max_leg_streak", "mean"),
-            max_streak=("max_leg_streak", "max"),
-        ).round(2)
+        per_cond = (
+            leg_runs.groupby("condition")
+            .agg(
+                runs=("run_id", "count"),
+                mean_leg_count=("leg_true_count", "mean"),
+                mean_max_streak=("max_leg_streak", "mean"),
+                max_streak=("max_leg_streak", "max"),
+            )
+            .round(2)
+        )
         print("\nPer condition:")
         print(per_cond.to_string())
 
@@ -451,6 +502,7 @@ def compute_persistence(df):
 # ============================================================
 # STEP 7 — KEY RESULTS SUMMARY
 # ============================================================
+
 
 def print_key_results(df, regime_stats, cond_stats, trans_agg):
     """Print final summary."""
@@ -498,8 +550,7 @@ def print_key_results(df, regime_stats, cond_stats, trans_agg):
     # Key transition
     if trans_agg is not None and not trans_agg.empty:
         leg_to_success = trans_agg[
-            (trans_agg["from_state"].str.startswith("LEG")) &
-            (trans_agg["to_state"] == "SUCCESS")
+            (trans_agg["from_state"].str.startswith("LEG")) & (trans_agg["to_state"] == "SUCCESS")
         ]
         if not leg_to_success.empty:
             total_count = leg_to_success["total_count"].sum()
@@ -513,6 +564,7 @@ def print_key_results(df, regime_stats, cond_stats, trans_agg):
 # ============================================================
 # MAIN
 # ============================================================
+
 
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)

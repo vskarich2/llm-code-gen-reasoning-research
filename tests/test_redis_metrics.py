@@ -29,10 +29,10 @@ from redis_live_dashboard import (
     compute_case_hotspots,
 )
 
-
 # ---------------------------------------------------------------------------
 # Unit: difficulty extraction
 # ---------------------------------------------------------------------------
+
 
 def test_extract_difficulty():
     assert extract_difficulty("alias_config_a") == "A"
@@ -51,9 +51,23 @@ def test_stream_key_format():
 # Unit: dashboard derivation — pass rate, LEG rate
 # ---------------------------------------------------------------------------
 
-def _make_event(passed=True, leg=False, lucky=False, model="m1", condition="baseline",
-                failure_type="", case_id="case_a", num_attempts="1", difficulty="A"):
-    cat = "true_success" if passed and not lucky else ("lucky_fix" if lucky else ("leg" if leg else "true_failure"))
+
+def _make_event(
+    passed=True,
+    leg=False,
+    lucky=False,
+    model="m1",
+    condition="baseline",
+    failure_type="",
+    case_id="case_a",
+    num_attempts="1",
+    difficulty="A",
+):
+    cat = (
+        "true_success"
+        if passed and not lucky
+        else ("lucky_fix" if lucky else ("leg" if leg else "true_failure"))
+    )
     return {
         "timestamp": "2026-03-25T10:00:00",
         "ts_ms": "1000",
@@ -204,6 +218,7 @@ def test_missing_optional_fields():
 # Unit: emitter graceful failure
 # ---------------------------------------------------------------------------
 
+
 def test_emit_without_redis():
     """emit_event returns False without crashing when Redis is unavailable."""
     result = emit_event(
@@ -221,12 +236,15 @@ def test_emit_without_redis():
 # Integration: Redis roundtrip (requires local Redis)
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def redis_client():
     try:
         import redis
-        r = redis.Redis.from_url("redis://localhost:6379/0",
-                                 socket_connect_timeout=1, decode_responses=True)
+
+        r = redis.Redis.from_url(
+            "redis://localhost:6379/0", socket_connect_timeout=1, decode_responses=True
+        )
         r.ping()
         return r
     except Exception:
@@ -236,6 +254,7 @@ def redis_client():
 def test_stream_roundtrip(redis_client):
     """Write events to stream, read them back, verify fields."""
     import redis_metrics
+
     # Force reconnect
     redis_metrics._client = None
     redis_metrics._warned = False
@@ -247,12 +266,27 @@ def test_stream_roundtrip(redis_client):
     redis_client.delete(skey)
 
     # Emit 3 events
-    ev_pass = {"pass": True, "score": 1.0, "alignment": {"category": "true_success"},
-               "failure_type": "", "num_attempts": 1}
-    ev_leg = {"pass": False, "score": 0.0, "alignment": {"category": "leg"},
-              "failure_type": "HIDDEN_DEPENDENCY", "num_attempts": 2}
-    ev_fail = {"pass": False, "score": 0.0, "alignment": {"category": "true_failure"},
-               "failure_type": "TEMPORAL_ORDERING", "num_attempts": 1}
+    ev_pass = {
+        "pass": True,
+        "score": 1.0,
+        "alignment": {"category": "true_success"},
+        "failure_type": "",
+        "num_attempts": 1,
+    }
+    ev_leg = {
+        "pass": False,
+        "score": 0.0,
+        "alignment": {"category": "leg"},
+        "failure_type": "HIDDEN_DEPENDENCY",
+        "num_attempts": 2,
+    }
+    ev_fail = {
+        "pass": False,
+        "score": 0.0,
+        "alignment": {"category": "true_failure"},
+        "failure_type": "TEMPORAL_ORDERING",
+        "num_attempts": 1,
+    }
 
     assert emit_event(run_id, "gpt-test", 1, "case_a", "baseline", ev_pass)
     assert emit_event(run_id, "gpt-test", 1, "case_b", "baseline", ev_leg)
@@ -260,6 +294,7 @@ def test_stream_roundtrip(redis_client):
 
     # Read back
     from redis_live_dashboard import read_stream
+
     events = read_stream(redis_client, skey)
     assert len(events) == 3
 
@@ -282,7 +317,7 @@ def test_stream_roundtrip(redis_client):
     m = compute_metrics(events)
     assert m["total"] == 3
     assert m["passed"] == 1
-    assert abs(m["pass_rate"] - 1/3) < 0.01
+    assert abs(m["pass_rate"] - 1 / 3) < 0.01
     assert m["leg_count"] == 1
 
     # Clean up
@@ -292,6 +327,7 @@ def test_stream_roundtrip(redis_client):
 def test_stream_empty(redis_client):
     """Dashboard handles empty stream without crashing."""
     from redis_live_dashboard import read_stream, render_dashboard
+
     events = read_stream(redis_client, "t3:events:nonexistent_run")
     assert events == []
     output = render_dashboard("nonexistent", events)

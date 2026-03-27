@@ -15,20 +15,25 @@ log = logging.getLogger("t3.contract")
 # CLOSED VOCABULARY — only these effects are verifiable in v1
 # ============================================================
 
-ALLOWED_EFFECTS = frozenset({
-    "introduce_idempotency_guard",
-    "prevent_duplicate_effect",
-    "add_rollback_on_failure",
-    "preserve_effect_order",
-    "guard_side_effect",
-    "defer_side_effect_until_success",
-})
+ALLOWED_EFFECTS = frozenset(
+    {
+        "introduce_idempotency_guard",
+        "prevent_duplicate_effect",
+        "add_rollback_on_failure",
+        "preserve_effect_order",
+        "guard_side_effect",
+        "defer_side_effect_until_success",
+    }
+)
 
-CONTRACT_SCHEMA_TEXT = """{
+CONTRACT_SCHEMA_TEXT = (
+    """{
   "root_cause": "string — what the actual bug/issue is",
   "must_change": ["file::function_name — functions that MUST be modified"],
   "must_not_change": ["file::function_name — functions that MUST NOT be modified"],
-  "required_effects": ["from this list ONLY: """ + ", ".join(sorted(ALLOWED_EFFECTS)) + """],
+  "required_effects": ["from this list ONLY: """
+    + ", ".join(sorted(ALLOWED_EFFECTS))
+    + """],
   "side_effects": [
     {"effect": "function_name", "when": "before | after", "relative_to": "function_name"}
   ],
@@ -42,11 +47,13 @@ CONTRACT_SCHEMA_TEXT = """{
   },
   "invariants": ["precise invariant statements"]
 }"""
+)
 
 
 # ============================================================
 # PARSING
 # ============================================================
+
 
 def parse_contract(raw: str) -> dict | None:
     """Parse a contract JSON from model output.
@@ -151,9 +158,11 @@ def _extract_json(raw: str) -> dict | None:
 # PROMPT BUILDERS
 # ============================================================
 
+
 def build_contract_prompt(task: str, code_files: dict[str, str]) -> str:
     """Prompt to elicit the contract (Step 1)."""
     from prompts import _format_code_files
+
     file_block = _format_code_files(code_files)
     return f"""{task}
 
@@ -168,10 +177,10 @@ Produce an Execution Contract as JSON with this exact schema:
 Return ONLY the JSON contract. Do not write code yet."""
 
 
-def build_code_from_contract_prompt(task: str, code_files: dict[str, str],
-                                     contract: dict) -> str:
+def build_code_from_contract_prompt(task: str, code_files: dict[str, str], contract: dict) -> str:
     """Prompt to generate code conditioned on the contract (Step 2)."""
     from prompts import _format_code_files
+
     file_block = _format_code_files(code_files)
     contract_json = json.dumps(contract, indent=2, default=str)
     return f"""{task}
@@ -192,10 +201,12 @@ Write refactored code that satisfies ALL contract terms. Specifically:
 Return the code only."""
 
 
-def build_retry_prompt(task: str, code_files: dict[str, str],
-                       contract: dict, violations: list[str]) -> str:
+def build_retry_prompt(
+    task: str, code_files: dict[str, str], contract: dict, violations: list[str]
+) -> str:
     """Prompt for retry after gate violations (Step 4)."""
     from prompts import _format_code_files
+
     file_block = _format_code_files(code_files)
     contract_json = json.dumps(contract, indent=2, default=str)
     v_text = "\n".join(f"  - {v}" for v in violations)

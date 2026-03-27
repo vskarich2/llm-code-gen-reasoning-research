@@ -14,7 +14,7 @@ def process_refund(merchant, customer, amount, partial=False):
         fee = compute_fee(amount)
         net = compute_net(amount, fee)
         debit(merchant, net)
-        credit(customer, amount)    # BUG: should be net
+        credit(customer, amount)  # BUG: should be net
         return {"fee": fee, "refunded": net}
     else:
         debit(merchant, amount)

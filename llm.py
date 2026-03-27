@@ -57,6 +57,7 @@ def _get_output_format() -> str:
     """Get output format from config. Returns 'v1' or 'v2'."""
     try:
         from experiment_config import get_config
+
         return get_config().execution.output_format
     except (RuntimeError, ImportError):
         return "v1"  # config not loaded yet (e.g. during import)
@@ -66,6 +67,7 @@ def _get_model_spec(model_name: str):
     """Get model parameters from config. Returns (temperature, top_p) or defaults."""
     try:
         from experiment_config import get_config
+
         config = get_config()
         spec = config.get_generation_model(model_name)
         return spec.temperature, spec.top_p
@@ -74,6 +76,7 @@ def _get_model_spec(model_name: str):
         # Fall back to evaluator config
         try:
             from experiment_config import get_config
+
             config = get_config()
             if model_name == config.models.evaluator.name:
                 return config.models.evaluator.temperature, 1.0
@@ -82,8 +85,9 @@ def _get_model_spec(model_name: str):
         return 0.0, 1.0
 
 
-def call_model(prompt: str, model: str, raw: bool = False,
-               file_paths: list[str] | None = None) -> str:
+def call_model(
+    prompt: str, model: str, raw: bool = False, file_paths: list[str] | None = None
+) -> str:
     """Call an LLM. Falls back to mock if no API key is set.
 
     Every call is logged via call_logger.emit_call() — the ONLY call-level
@@ -96,6 +100,7 @@ def call_model(prompt: str, model: str, raw: bool = False,
         file_paths: If provided and output_format is v2, use V2 file-dict instruction.
     """
     import time as _time
+
     api_key = os.environ.get("OPENAI_API_KEY")
 
     output_fmt = _get_output_format()
@@ -115,14 +120,14 @@ def call_model(prompt: str, model: str, raw: bool = False,
             )
             _mock_warning_emitted = True
         from llm_mock import mock_call
+
         t0 = _time.monotonic()
         result = mock_call(full_prompt)
         elapsed = _time.monotonic() - t0
         _emit_call_log(model, full_prompt, result, elapsed, error=None)
         return result
 
-    _llm_log.debug("API_CALL_START model=%s prompt_len=%d raw=%s",
-                    model, len(full_prompt), raw)
+    _llm_log.debug("API_CALL_START model=%s prompt_len=%d raw=%s", model, len(full_prompt), raw)
     t0 = _time.monotonic()
     error = None
     try:
@@ -132,19 +137,27 @@ def call_model(prompt: str, model: str, raw: bool = False,
         _emit_call_log(model, full_prompt, "", elapsed, error=str(e))
         raise
     elapsed = _time.monotonic() - t0
-    _llm_log.debug("API_CALL_END model=%s elapsed=%.1fs response_len=%d",
-                    model, elapsed, len(result))
+    _llm_log.debug(
+        "API_CALL_END model=%s elapsed=%.1fs response_len=%d", model, elapsed, len(result)
+    )
     _emit_call_log(model, full_prompt, result, elapsed, error=None)
     return result
 
 
-def _emit_call_log(model: str, prompt: str, response: str,
-                   elapsed: float, error: str | None) -> None:
+def _emit_call_log(
+    model: str, prompt: str, response: str, elapsed: float, error: str | None
+) -> None:
     """Emit call log. Never raises — logging failure must not kill the run."""
     try:
         from call_logger import emit_call
-        emit_call(model=model, prompt_raw=prompt, response_raw=response,
-                  elapsed_seconds=elapsed, error=error)
+
+        emit_call(
+            model=model,
+            prompt_raw=prompt,
+            response_raw=response,
+            elapsed_seconds=elapsed,
+            error=error,
+        )
     except Exception as e:
         _llm_log.debug("Call log emission skipped: %s", e)
 
@@ -153,9 +166,12 @@ def get_model_config() -> dict:
     """Return the model config for logging. Reads from experiment config."""
     try:
         from experiment_config import get_config
+
         config = get_config()
         return {
-            "temperature": config.models.generation[0].temperature if config.models.generation else 0.0,
+            "temperature": (
+                config.models.generation[0].temperature if config.models.generation else 0.0
+            ),
             "top_p": config.models.generation[0].top_p if config.models.generation else 1.0,
             "output_format": config.execution.output_format,
         }
@@ -174,6 +190,7 @@ def _openai_call(prompt: str, model: str, api_key: str) -> str:
     # Some models don't support temperature
     try:
         from experiment_config import get_config
+
         no_temp = get_config().models.no_temperature_prefixes
     except (RuntimeError, ImportError):
         no_temp = ("o1", "o3", "o4", "gpt-5")

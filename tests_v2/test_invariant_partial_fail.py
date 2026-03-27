@@ -4,6 +4,7 @@ Invariant: sender.balance + receiver.balance must be conserved after a
 failed transfer. If the debit is applied but the credit fails, the debit
 must be rolled back.
 """
+
 import random as _random_mod
 
 

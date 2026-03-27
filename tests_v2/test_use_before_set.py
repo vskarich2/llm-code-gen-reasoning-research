@@ -17,8 +17,7 @@ def test_a(mod):
 
     if r2 != []:
         return False, [
-            f"transform([]) returned {r2}, expected [] "
-            f"(stale data from previous call leaked)"
+            f"transform([]) returned {r2}, expected [] " f"(stale data from previous call leaked)"
         ]
 
     return True, ["transform returns fresh empty list for empty input"]
@@ -45,8 +44,7 @@ def test_b(mod):
 
     if r2["status"] == "loaded":
         return False, [
-            f"status is 'loaded' after empty input — "
-            f"stale status from previous call leaked"
+            f"status is 'loaded' after empty input — " f"stale status from previous call leaked"
         ]
 
     if r2["count"] != 0:

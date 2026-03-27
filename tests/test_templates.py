@@ -8,10 +8,20 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from templates import (
-    TEMPLATE_REGISTRY, TemplateSpec, render, render_with_metadata,
-    init_template_hashes, get_template_hash, _reset_template_hashes, _reset_env,
-    validate_template_allowed_logic, preflight_validate_templates,
-    TemplateNotFoundError, TemplateMissingVarError, TemplateExtraVarError, TemplateError,
+    TEMPLATE_REGISTRY,
+    TemplateSpec,
+    render,
+    render_with_metadata,
+    init_template_hashes,
+    get_template_hash,
+    _reset_template_hashes,
+    _reset_env,
+    validate_template_allowed_logic,
+    preflight_validate_templates,
+    TemplateNotFoundError,
+    TemplateMissingVarError,
+    TemplateExtraVarError,
+    TemplateError,
     _get_env,
 )
 
@@ -29,12 +39,14 @@ def _ensure_hashes_initialized():
 
 # ── T1: Missing variable raises TemplateMissingVarError ──
 
+
 def test_missing_variable_raises():
     with pytest.raises(TemplateMissingVarError, match="task"):
         render("base", {"code_files_block": "x"})
 
 
 # ── T2: Extra variable raises TemplateExtraVarError ──
+
 
 def test_extra_variable_raises():
     with pytest.raises(TemplateExtraVarError, match="extra"):
@@ -43,12 +55,14 @@ def test_extra_variable_raises():
 
 # ── T3: Unknown template name raises TemplateNotFoundError ──
 
+
 def test_unknown_template_raises():
     with pytest.raises(TemplateNotFoundError, match="nonexistent"):
         render("nonexistent", {})
 
 
 # ── T4: Correct render produces expected output ──
+
 
 def test_base_renders_correctly():
     result = render("base", {"task": "Fix the bug", "code_files_block": "def f(): pass"})
@@ -58,6 +72,7 @@ def test_base_renders_correctly():
 
 # ── T5: Empty variable value renders empty ──
 
+
 def test_empty_string_variable():
     result = render("base", {"task": "", "code_files_block": ""})
     assert isinstance(result, str)
@@ -65,8 +80,10 @@ def test_empty_string_variable():
 
 # ── T6: StrictUndefined catches template-level typos ──
 
+
 def test_strict_undefined_catches_typo():
     from jinja2 import Environment, StrictUndefined, UndefinedError
+
     env = Environment(undefined=StrictUndefined)
     template = env.from_string("{{ typo }}")
     with pytest.raises(UndefinedError):
@@ -75,17 +92,25 @@ def test_strict_undefined_catches_typo():
 
 # ── T7: Retry template renders with all required vars ──
 
+
 def test_retry_template_renders():
-    result = render("retry", {
-        "task": "Fix", "code_files_block": "code",
-        "previous_code": "old", "test_output": "FAILED",
-        "failure_reason": "logic error", "step_number": "1",
-    })
+    result = render(
+        "retry",
+        {
+            "task": "Fix",
+            "code_files_block": "code",
+            "previous_code": "old",
+            "test_output": "FAILED",
+            "failure_reason": "logic error",
+            "step_number": "1",
+        },
+    )
     assert "step 1" in result
     assert "FAILED" in result
 
 
 # ── T8: All registered templates can be dry-rendered ──
+
 
 def test_all_templates_dry_render():
     for name, spec in TEMPLATE_REGISTRY.items():
@@ -97,6 +122,7 @@ def test_all_templates_dry_render():
 
 # ── T10: Forbidden logic in template detected ──
 
+
 def test_preflight_detects_forbidden_logic(tmp_path):
     bad_template = tmp_path / "bad.jinja2"
     bad_template.write_text("{% for x in items %}{{ x }}{% endfor %}")
@@ -106,6 +132,7 @@ def test_preflight_detects_forbidden_logic(tmp_path):
 
 # ── T10b: Allowed if-blocks pass validation ──
 
+
 def test_preflight_allows_if_blocks(tmp_path):
     good_template = tmp_path / "good.jinja2"
     good_template.write_text("{% if x %}{{ x }}{% else %}default{% endif %}")
@@ -113,6 +140,7 @@ def test_preflight_allows_if_blocks(tmp_path):
 
 
 # ── T11: Template hash is deterministic ──
+
 
 def test_template_hash_deterministic():
     spec = TEMPLATE_REGISTRY["base"]
@@ -128,6 +156,7 @@ def test_template_hash_deterministic():
 
 # ── T13: render_with_metadata returns correct metadata ──
 
+
 def test_render_with_metadata():
     rendered, meta = render_with_metadata("base", {"task": "x", "code_files_block": "y"})
     assert meta["template_name"] == "base"
@@ -139,6 +168,7 @@ def test_render_with_metadata():
 
 # ── T14: get_template_hash before init raises RuntimeError ──
 
+
 def test_get_hash_before_init_raises():
     _reset_template_hashes()
     with pytest.raises(RuntimeError, match="before init_template_hashes"):
@@ -146,6 +176,7 @@ def test_get_hash_before_init_raises():
 
 
 # ── T15: init_template_hashes called twice raises RuntimeError ──
+
 
 def test_double_init_raises():
     # Already initialized by fixture, so second call should raise
@@ -157,6 +188,7 @@ def test_double_init_raises():
 
 
 # ── T16: Hash uses Jinja2 loader source ──
+
 
 def test_hash_matches_jinja_source():
     env = _get_env()
@@ -170,31 +202,53 @@ def test_hash_matches_jinja_source():
 
 # ── T17: Contract templates render correctly ──
 
+
 def test_contract_elicit_renders():
-    result = render("contract_elicit", {
-        "task": "Fix", "code_files_block": "code", "contract_schema": "{...}",
-    })
+    result = render(
+        "contract_elicit",
+        {
+            "task": "Fix",
+            "code_files_block": "code",
+            "contract_schema": "{...}",
+        },
+    )
     assert "Execution Contract" in result
     assert "{...}" in result
 
 
 def test_contract_code_renders():
-    result = render("contract_code", {
-        "task": "Fix", "code_files_block": "code", "contract_json": '{"x": 1}',
-    })
+    result = render(
+        "contract_code",
+        {
+            "task": "Fix",
+            "code_files_block": "code",
+            "contract_json": '{"x": 1}',
+        },
+    )
     assert "must_change" in result
 
 
 def test_contract_retry_renders():
-    result = render("contract_retry", {
-        "task": "Fix", "code_files_block": "code",
-        "contract_json": '{"x": 1}', "violations_text": "- bad thing",
-    })
+    result = render(
+        "contract_retry",
+        {
+            "task": "Fix",
+            "code_files_block": "code",
+            "contract_json": '{"x": 1}',
+            "violations_text": "- bad thing",
+        },
+    )
     assert "VIOLATIONS" in result
 
 
 def test_classify_renders():
-    result = render("classify", {
-        "failure_types": "A, B, C", "task": "Fix", "code": "pass", "reasoning": "because",
-    })
+    result = render(
+        "classify",
+        {
+            "failure_types": "A, B, C",
+            "task": "Fix",
+            "code": "pass",
+            "reasoning": "because",
+        },
+    )
     assert "REASONING_CORRECT" in result

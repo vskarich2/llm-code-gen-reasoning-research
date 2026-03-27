@@ -12,6 +12,7 @@ Tests cover:
   9. Length-matched control has no causal content
   10. Backward compatibility — existing conditions unaffected
 """
+
 import sys
 import os
 import json
@@ -26,13 +27,12 @@ BASE = Path(__file__).resolve().parents[1]
 def _get_case(case_id):
     cases = json.loads((BASE / "cases.json").read_text())
     for c in cases:
-        c["code_files_contents"] = {
-            fp: (BASE / fp).read_text().strip() for fp in c["code_files"]
-        }
+        c["code_files_contents"] = {fp: (BASE / fp).read_text().strip() for fp in c["code_files"]}
     return [c for c in cases if c["id"] == case_id][0]
 
 
 import re as _re
+
 
 def _raw_to_parsed(raw_string):
     """Convert a raw LLM output string into the parsed_dict format
@@ -48,7 +48,7 @@ def _raw_to_parsed(raw_string):
     if m:
         code = m.group(1).rstrip("\n")
         # Reasoning is everything before the code block
-        reasoning = raw_string[:m.start()].strip()
+        reasoning = raw_string[: m.start()].strip()
     else:
         # No code block found — everything is reasoning
         reasoning = raw_string.strip()
@@ -65,13 +65,16 @@ def _raw_to_parsed(raw_string):
 # 1. SCM DATA INTEGRITY
 # ════════════════════════════════════════════════════════════
 
+
 def test_scm_registry_has_5_cases():
     from scm_data import SCM_REGISTRY
+
     assert len(SCM_REGISTRY) >= 5
 
 
 def test_scm_has_required_fields():
     from scm_data import SCM_REGISTRY
+
     for case_id, scm in SCM_REGISTRY.items():
         assert "functions" in scm, f"{case_id}: missing functions"
         assert "variables" in scm, f"{case_id}: missing variables"
@@ -85,6 +88,7 @@ def test_scm_has_required_fields():
 def test_scm_ids_are_well_formed():
     from scm_data import SCM_REGISTRY
     import re
+
     for case_id, scm in SCM_REGISTRY.items():
         for fid in scm["functions"]:
             assert re.match(r"^F\d+$", fid), f"{case_id}: bad function ID {fid}"
@@ -100,6 +104,7 @@ def test_scm_ids_are_well_formed():
 
 def test_critical_set_references_valid_ids():
     from scm_data import SCM_REGISTRY
+
     for case_id, scm in SCM_REGISTRY.items():
         ces = scm["critical_evidence_set"]
         all_f = set(scm["functions"].keys())
@@ -118,6 +123,7 @@ def test_critical_set_references_valid_ids():
 
 def test_constraint_references_valid_ids():
     from scm_data import SCM_REGISTRY
+
     for case_id, scm in SCM_REGISTRY.items():
         all_e = set(scm["edges"].keys())
         all_f = set(scm["functions"].keys())
@@ -135,8 +141,10 @@ def test_constraint_references_valid_ids():
 # 2. PROMPT GENERATION
 # ════════════════════════════════════════════════════════════
 
+
 def test_scm_descriptive_includes_edges():
     from scm_prompts import build_scm_descriptive
+
     p = build_scm_descriptive("base task", "l3_state_pipeline")
     assert "E1:" in p or "E2:" in p or "E3:" in p
     assert len(p) > len("base task")
@@ -144,6 +152,7 @@ def test_scm_descriptive_includes_edges():
 
 def test_scm_constrained_includes_steps():
     from scm_prompts import build_scm_constrained
+
     p = build_scm_constrained("base task", "l3_state_pipeline")
     assert "STEP 1" in p
     assert "STEP 2" in p
@@ -152,6 +161,7 @@ def test_scm_constrained_includes_steps():
 
 def test_scm_evidence_includes_all_id_types():
     from scm_prompts import build_scm_constrained_evidence
+
     p = build_scm_constrained_evidence("base task", "hidden_dep_multihop")
     assert "F1" in p or "F3" in p
     assert "V1" in p
@@ -162,12 +172,14 @@ def test_scm_evidence_includes_all_id_types():
 
 def test_scm_evidence_includes_critical_constraint():
     from scm_prompts import build_scm_constrained_evidence
+
     p = build_scm_constrained_evidence("base task", "hidden_dep_multihop")
     assert "CRITICAL CONSTRAINT" in p or "most fragile" in p.lower()
 
 
 def test_scm_evidence_minimal_is_shorter():
     from scm_prompts import build_scm_constrained_evidence, build_scm_constrained_evidence_minimal
+
     full = build_scm_constrained_evidence("base", "l3_state_pipeline")
     mini = build_scm_constrained_evidence_minimal("base", "l3_state_pipeline")
     assert len(mini) < len(full), "minimal should be shorter than full"
@@ -176,6 +188,7 @@ def test_scm_evidence_minimal_is_shorter():
 
 def test_evidence_only_excludes_edges():
     from scm_prompts import build_evidence_only
+
     p = build_evidence_only("base task", "l3_state_pipeline")
     # Should have F*, V*, C*, I* but NOT E* edge list
     assert "no dependency graph" in p.lower() or "determine relationships yourself" in p.lower()
@@ -183,6 +196,7 @@ def test_evidence_only_excludes_edges():
 
 def test_length_matched_has_no_causal_content():
     from scm_prompts import build_length_matched_control
+
     p = build_length_matched_control("base", "l3_state_pipeline")
     assert "F1" not in p and "E1" not in p and "I1" not in p
     assert "commit" not in p.lower()
@@ -192,6 +206,7 @@ def test_length_matched_has_no_causal_content():
 
 def test_scm_graceful_for_unmapped_case():
     from scm_prompts import build_scm_descriptive, build_scm_constrained_evidence
+
     # Case with no SCM data should return base unchanged
     p1 = build_scm_descriptive("base", "nonexistent_case_xyz")
     assert p1 == "base"
@@ -203,8 +218,10 @@ def test_scm_graceful_for_unmapped_case():
 # 3. EVIDENCE USAGE SCORING
 # ════════════════════════════════════════════════════════════
 
+
 def test_evidence_score_0_no_ids():
     from evaluator import compute_evidence_metrics
+
     case = _get_case("l3_state_pipeline")
     output = "I simplified the code by removing redundant steps."
     m = compute_evidence_metrics(case, output)
@@ -213,6 +230,7 @@ def test_evidence_score_0_no_ids():
 
 def test_evidence_score_1_ids_mentioned():
     from evaluator import compute_evidence_metrics
+
     case = _get_case("l3_state_pipeline")
     output = "Looking at F2, F3, F5, and E3, these are important."
     m = compute_evidence_metrics(case, output)
@@ -221,6 +239,7 @@ def test_evidence_score_1_ids_mentioned():
 
 def test_evidence_score_2_ids_mapped_to_code():
     from evaluator import compute_evidence_metrics
+
     case = _get_case("l3_state_pipeline")
     output = "F3 (commit) sets st['meta']['frozen']=True. F5 (get_committed_total) checks this flag via E4."
     m = compute_evidence_metrics(case, output)
@@ -229,6 +248,7 @@ def test_evidence_score_2_ids_mapped_to_code():
 
 def test_evidence_score_3_requires_chain_and_no_errors():
     from evaluator import compute_evidence_metrics
+
     case = _get_case("l3_state_pipeline")
     output = (
         "C1 requires that commit (F3) is preserved because E3 sets the frozen flag (V3) "
@@ -242,6 +262,7 @@ def test_evidence_score_3_requires_chain_and_no_errors():
 
 def test_evidence_score_3_blocked_by_incorrect_usage():
     from evaluator import compute_evidence_metrics
+
     case = _get_case("hidden_dep_multihop")
     # Correct chain but also incorrect claim: says F7 always overwrites (it doesn't)
     output = (
@@ -255,6 +276,7 @@ def test_evidence_score_3_blocked_by_incorrect_usage():
 
 def test_hallucinated_ids_detected():
     from evaluator import compute_evidence_metrics
+
     case = _get_case("l3_state_pipeline")
     # F99 and E99 don't exist in this case's SCM
     output = "F99 writes to V1. E99 connects F2 to F3."
@@ -264,6 +286,7 @@ def test_hallucinated_ids_detected():
 
 def test_uncertain_usage_detected():
     from evaluator import compute_evidence_metrics
+
     case = _get_case("l3_state_pipeline")
     # IDs listed without behavioral claims
     output = "Relevant: F2, F3, E3."
@@ -273,6 +296,7 @@ def test_uncertain_usage_detected():
 
 def test_evidence_metrics_none_for_case_without_scm():
     from evaluator import compute_evidence_metrics
+
     case = {"id": "nonexistent_xyz", "failure_mode": "UNKNOWN"}
     m = compute_evidence_metrics(case, "any output")
     assert m["has_scm"] is False
@@ -286,8 +310,10 @@ def test_evidence_metrics_none_for_case_without_scm():
 # 4. EVIDENCE-ACTION GAP AND DELTA GAP
 # ════════════════════════════════════════════════════════════
 
+
 def test_evidence_action_gap_true_when_engaged_but_failed():
     from evaluator import evaluate_output
+
     case = _get_case("l3_state_pipeline")
     # Output with good evidence usage but broken code (no commit)
     output = (
@@ -308,12 +334,15 @@ def test_evidence_action_gap_true_when_engaged_but_failed():
     )
     r = evaluate_output(case, _raw_to_parsed(output))
     assert r["pass"] is False, "missing commit should fail"
-    assert r["evidence_usage_score"] >= 2, f"should engage with evidence, got {r['evidence_usage_score']}"
+    assert (
+        r["evidence_usage_score"] >= 2
+    ), f"should engage with evidence, got {r['evidence_usage_score']}"
     assert r["evidence_action_gap"] is True
 
 
 def test_delta_gap_positive_when_reasoning_gap_but_no_evidence_gap():
     from evaluator import evaluate_output
+
     case = _get_case("l3_state_pipeline")
     # Reasoning gap but no evidence engagement → delta_gap = 1 - 0 = 1
     output = (
@@ -338,6 +367,7 @@ def test_delta_gap_positive_when_reasoning_gap_but_no_evidence_gap():
 
 def test_delta_gap_zero_when_both_gaps_present():
     from evaluator import evaluate_output
+
     case = _get_case("l3_state_pipeline")
     # Both reasoning correct + evidence engaged + code wrong
     output = (
@@ -364,12 +394,20 @@ def test_delta_gap_zero_when_both_gaps_present():
 # 5. SCM CONDITIONS EXECUTE
 # ════════════════════════════════════════════════════════════
 
+
 def test_all_scm_conditions_run():
     """Every SCM condition produces a result without crashing."""
     from execution import run_single
+
     case = _get_case("l3_state_pipeline")
-    scm_conds = ["scm_descriptive", "scm_constrained", "scm_constrained_evidence",
-                  "scm_constrained_evidence_minimal", "evidence_only", "length_matched_control"]
+    scm_conds = [
+        "scm_descriptive",
+        "scm_constrained",
+        "scm_constrained_evidence",
+        "scm_constrained_evidence_minimal",
+        "evidence_only",
+        "length_matched_control",
+    ]
     for cond in scm_conds:
         cid, cn, ev = run_single(case, "gpt-4.1-nano", cond)
         assert cid == "l3_state_pipeline", f"{cond}: wrong case_id"
@@ -381,6 +419,7 @@ def test_all_scm_conditions_run():
 def test_scm_prompts_differ_from_baseline():
     """SCM conditions produce different prompts from baseline."""
     from execution import build_prompt
+
     case = _get_case("l3_state_pipeline")
     base, _ = build_prompt(case, "baseline")
     for cond in ["scm_descriptive", "scm_constrained", "scm_constrained_evidence"]:
@@ -392,19 +431,25 @@ def test_scm_prompts_differ_from_baseline():
 def test_evidence_only_prompt_has_no_edges():
     """evidence_only must not contain E* edge references."""
     from execution import build_prompt
+
     case = _get_case("l3_state_pipeline")
     prompt, _ = build_prompt(case, "evidence_only")
     # Should have function and constraint IDs but the prompt explicitly says no graph
-    assert "determine relationships yourself" in prompt.lower() or "no dependency graph" in prompt.lower()
+    assert (
+        "determine relationships yourself" in prompt.lower()
+        or "no dependency graph" in prompt.lower()
+    )
 
 
 # ════════════════════════════════════════════════════════════
 # 6. BACKWARD COMPATIBILITY
 # ════════════════════════════════════════════════════════════
 
+
 def test_existing_conditions_still_work():
     """Original conditions are unaffected by SCM additions."""
     from execution import run_single
+
     case = _get_case("l3_state_pipeline")
     for cond in ["baseline", "diagnostic", "guardrail"]:
         cid, cn, ev = run_single(case, "gpt-4.1-nano", cond)
@@ -416,6 +461,7 @@ def test_existing_conditions_still_work():
 def test_evaluate_output_has_evidence_fields():
     """evaluate_output always returns evidence metrics even for non-SCM cases."""
     from evaluator import evaluate_output
+
     case = _get_case("l3_state_pipeline")
     r = evaluate_output(case, _raw_to_parsed("```python\ndef f(): pass\n```"))
     assert "evidence_usage_score" in r
@@ -428,10 +474,18 @@ def test_evaluate_output_has_evidence_fields():
 # 7. RUNNER CONDITIONS REGISTERED
 # ════════════════════════════════════════════════════════════
 
+
 def test_scm_conditions_in_runner():
     from runner import ALL_CONDITIONS, VALID_CONDITIONS, COND_LABELS
-    for c in ["scm_descriptive", "scm_constrained", "scm_constrained_evidence",
-              "scm_constrained_evidence_minimal", "evidence_only", "length_matched_control"]:
+
+    for c in [
+        "scm_descriptive",
+        "scm_constrained",
+        "scm_constrained_evidence",
+        "scm_constrained_evidence_minimal",
+        "evidence_only",
+        "length_matched_control",
+    ]:
         assert c in ALL_CONDITIONS, f"{c} not in ALL_CONDITIONS"
         assert c in VALID_CONDITIONS, f"{c} not in VALID_CONDITIONS"
         assert c in COND_LABELS, f"{c} not in COND_LABELS"

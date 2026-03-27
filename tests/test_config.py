@@ -9,8 +9,13 @@ import yaml
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config import (
-    load_config, _validate_and_build, ConfigError,
-    ExperimentConfig, ConditionConfig, RetryConfig, log_resolved_config,
+    load_config,
+    _validate_and_build,
+    ConfigError,
+    ExperimentConfig,
+    ConditionConfig,
+    RetryConfig,
+    log_resolved_config,
     get_template_for_condition,
 )
 
@@ -57,6 +62,7 @@ def valid_config_dict():
 
 # ── C1: Missing required field ──
 
+
 def test_missing_experiment_name():
     raw = valid_config_dict()
     del raw["experiment"]["name"]
@@ -65,6 +71,7 @@ def test_missing_experiment_name():
 
 
 # ── C2: Wrong type ──
+
 
 def test_wrong_type_max_steps():
     raw = valid_config_dict()
@@ -75,6 +82,7 @@ def test_wrong_type_max_steps():
 
 # ── C3: Unknown field ──
 
+
 def test_unknown_retry_field_rejected():
     raw = valid_config_dict()
     raw["retry"]["unknown_field"] = True
@@ -83,6 +91,7 @@ def test_unknown_retry_field_rejected():
 
 
 # ── C4: Config is immutable ──
+
 
 def test_config_immutable():
     raw = valid_config_dict()
@@ -93,6 +102,7 @@ def test_config_immutable():
 
 # ── C5: Invalid condition name ──
 
+
 def test_invalid_condition_name():
     raw = valid_config_dict()
     raw["conditions"]["nonexistent_condition"] = {"template": "base"}
@@ -101,6 +111,7 @@ def test_invalid_condition_name():
 
 
 # ── C6: Condition missing template key ──
+
 
 def test_condition_missing_template():
     raw = valid_config_dict()
@@ -111,6 +122,7 @@ def test_condition_missing_template():
 
 # ── C7: Condition unknown key ──
 
+
 def test_condition_unknown_key():
     raw = valid_config_dict()
     raw["conditions"]["baseline"]["bogus"] = "value"
@@ -119,6 +131,7 @@ def test_condition_unknown_key():
 
 
 # ── C8: Condition template not in registry ──
+
 
 def test_condition_template_not_in_registry():
     raw = valid_config_dict()
@@ -129,6 +142,7 @@ def test_condition_template_not_in_registry():
 
 # ── C9: max_steps out of range ──
 
+
 def test_max_steps_out_of_range():
     raw = valid_config_dict()
     raw["retry"]["max_steps"] = 0
@@ -137,6 +151,7 @@ def test_max_steps_out_of_range():
 
 
 # ── C10: Valid config loads ──
+
 
 def test_valid_config_loads():
     raw = valid_config_dict()
@@ -151,6 +166,7 @@ def test_valid_config_loads():
 
 # ── C11: config_resolved.yaml matches ──
 
+
 def test_config_resolved_matches(tmp_path):
     raw = valid_config_dict()
     config = _validate_and_build(raw)
@@ -162,6 +178,7 @@ def test_config_resolved_matches(tmp_path):
 
 # ── C12: Missing top-level section ──
 
+
 def test_missing_top_level_section():
     raw = valid_config_dict()
     del raw["conditions"]
@@ -170,6 +187,7 @@ def test_missing_top_level_section():
 
 
 # ── C13: Unknown top-level section ──
+
 
 def test_unknown_top_level_section():
     raw = valid_config_dict()
@@ -180,6 +198,7 @@ def test_unknown_top_level_section():
 
 # ── C14: Empty conditions ──
 
+
 def test_empty_conditions_rejected():
     raw = valid_config_dict()
     raw["conditions"] = {}
@@ -188,6 +207,7 @@ def test_empty_conditions_rejected():
 
 
 # ── C15: Wrong config version ──
+
 
 def test_wrong_config_version_rejected():
     raw = valid_config_dict()
@@ -198,6 +218,7 @@ def test_wrong_config_version_rejected():
 
 # ── C16: Missing config version ──
 
+
 def test_missing_config_version_rejected():
     raw = valid_config_dict()
     del raw["experiment"]["version"]
@@ -206,6 +227,7 @@ def test_missing_config_version_rejected():
 
 
 # ── C17: Simple condition with retry_template rejected ──
+
 
 def test_simple_condition_rejects_retry_template():
     raw = valid_config_dict()
@@ -216,6 +238,7 @@ def test_simple_condition_rejects_retry_template():
 
 # ── C18: Simple condition with next_template rejected ──
 
+
 def test_simple_condition_rejects_next_template():
     raw = valid_config_dict()
     raw["conditions"]["baseline"]["next_template"] = "contract_code"
@@ -224,6 +247,7 @@ def test_simple_condition_rejects_next_template():
 
 
 # ── C19: Retry condition missing retry_template ──
+
 
 def test_retry_condition_requires_retry_template():
     raw = valid_config_dict()
@@ -234,6 +258,7 @@ def test_retry_condition_requires_retry_template():
 
 # ── C20: Retry condition with next_template ──
 
+
 def test_retry_condition_rejects_next_template():
     raw = valid_config_dict()
     raw["conditions"]["retry_no_contract"]["next_template"] = "contract_code"
@@ -242,6 +267,7 @@ def test_retry_condition_rejects_next_template():
 
 
 # ── C21: Multistep condition missing next_template ──
+
 
 def test_multistep_condition_requires_next_template():
     raw = valid_config_dict()
@@ -252,6 +278,7 @@ def test_multistep_condition_requires_next_template():
 
 # ── C22: Multistep condition missing retry_template ──
 
+
 def test_multistep_condition_requires_retry_template():
     raw = valid_config_dict()
     del raw["conditions"]["contract_gated"]["retry_template"]
@@ -260,6 +287,7 @@ def test_multistep_condition_requires_retry_template():
 
 
 # ── C23: get_template_for_condition ──
+
 
 def test_get_template_for_condition_initial():
     raw = valid_config_dict()
@@ -305,6 +333,7 @@ def test_get_template_for_condition_unknown_condition():
 
 # ── C24: Empty models list ──
 
+
 def test_empty_models_rejected():
     raw = valid_config_dict()
     raw["experiment"]["models"] = []
@@ -313,6 +342,7 @@ def test_empty_models_rejected():
 
 
 # ── C25: parallel out of range ──
+
 
 def test_parallel_out_of_range():
     raw = valid_config_dict()

@@ -41,9 +41,7 @@ def test_a(mod):
         return False, ["get_product returned None after update"]
 
     if result2.get("price") != 25.0:
-        return False, [
-            f"stale cache: price={result2.get('price')}, expected 25.0"
-        ]
+        return False, [f"stale cache: price={result2.get('price')}, expected 25.0"]
 
     return True, ["cache invalidated on update"]
 
@@ -80,9 +78,7 @@ def test_b(mod):
         return False, ["get_product returned None after update"]
 
     if result2.get("price") != 25.0:
-        return False, [
-            f"stale cache: price={result2.get('price')}, expected 25.0"
-        ]
+        return False, [f"stale cache: price={result2.get('price')}, expected 25.0"]
 
     return True, ["cross-file cache invalidated on update"]
 
@@ -127,8 +123,6 @@ def test_c(mod):
         return False, ["get_product returned None after update"]
 
     if result2.get("price") != 50.0:
-        return False, [
-            f"stale local cache: price={result2.get('price')}, expected 50.0"
-        ]
+        return False, [f"stale local cache: price={result2.get('price')}, expected 50.0"]
 
     return True, ["both cache layers invalidated on update"]

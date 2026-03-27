@@ -9,6 +9,7 @@ Examples:
     python scripts/test_invariant.py alias_mutation_shadow scripts/fixtures/alias_correct.py
     python scripts/test_invariant.py retry_ack_duplication scripts/fixtures/retry_correct.py
 """
+
 import argparse
 import sys
 import types

@@ -2,7 +2,6 @@
 
 from roles import admin_access, user_access, moderator_access, guest_access
 
-
 # Dispatch table mapping roles to access handlers
 _ROLE_DISPATCH = {
     "admin": admin_access,

@@ -23,7 +23,6 @@ from parse import (
     STDLIB_MODULES as _STDLIB_MODULES,
 )
 
-
 # ============================================================
 # MODULE LOADING
 # ============================================================
@@ -58,10 +57,17 @@ def load_module_from_code(code: str, name: str = "candidate") -> ModuleType:
 # RESULT BUILDER
 # ============================================================
 
-def _result(case_id: str, passed: bool, score: float, reasons: list[str],
-            failure_modes: list[str], execution: dict,
-            extracted_code: str = "",
-            assembled_code: str = "") -> dict:
+
+def _result(
+    case_id: str,
+    passed: bool,
+    score: float,
+    reasons: list[str],
+    failure_modes: list[str],
+    execution: dict,
+    extracted_code: str = "",
+    assembled_code: str = "",
+) -> dict:
     return {
         "pass": passed,
         "score": round(score, 2),
@@ -129,6 +135,7 @@ def _exec_info(**kw) -> dict:
 # ============================================================
 # CASE-SPECIFIC INVARIANT TESTS
 # ============================================================
+
 
 def _test_temporal(mod) -> tuple[bool, list[str]]:
     """pipeline(data) must return raw_stats computed on original data,
@@ -252,6 +259,7 @@ def _test_retry_causality(mod) -> tuple[bool, list[str]]:
     try:
         # Patch random to never fail (deterministic)
         import random
+
         old_random = random.random
         random.random = lambda: 0.99  # never triggers failure
         try:
@@ -309,6 +317,7 @@ def _test_external_timing(mod) -> tuple[bool, list[str]]:
 
 
 # ── Easy calibration invariant tests ──────────────────────────
+
 
 def _test_easy_temporal(mod) -> tuple[bool, list[str]]:
     """Logged value must equal stored value after update."""
@@ -436,6 +445,7 @@ def _test_easy_aliasing(mod) -> tuple[bool, list[str]]:
 
 # ── Diagnostic probe invariant tests ─────────────────────────
 
+
 def _test_retry_ack_duplication(mod) -> tuple[bool, list[str]]:
     """At most one email per job_id across retries."""
     process_job = getattr(mod, "process_job", None)
@@ -445,15 +455,20 @@ def _test_retry_ack_duplication(mod) -> tuple[bool, list[str]]:
     if not process_job:
         return False, ["process_job not found"]
     try:
-        if clear: clear()
-        if clear_sent: clear_sent()
+        if clear:
+            clear()
+        if clear_sent:
+            clear_sent()
         import random
+
         # Force one retry: first attempt raises, second succeeds
         call_count = [0]
         orig = random.random
+
         def fake():
             call_count[0] += 1
             return 0.1 if call_count[0] == 1 else 0.99
+
         random.random = fake
         try:
             process_job("J1")
@@ -492,7 +507,9 @@ def _test_conservation_partial_refund(mod) -> tuple[bool, list[str]]:
         merchant_lost = 1000 - m["balance"]
         customer_gained = c["balance"] - 200
         if merchant_lost != customer_gained:
-            return False, [f"conservation violated: merchant lost {merchant_lost}, customer gained {customer_gained}"]
+            return False, [
+                f"conservation violated: merchant lost {merchant_lost}, customer gained {customer_gained}"
+            ]
         return True, ["merchant_delta == customer_delta in partial refund"]
     except Exception as e:
         return False, [f"conservation test raised: {e}"]
@@ -508,13 +525,22 @@ def _test_alias_mutation_shadow(mod) -> tuple[bool, list[str]]:
         return False, ["DEFAULTS not found"]
     try:
         import inspect
+
         sig = inspect.signature(create_config)
         has_inherit = "inherit" in sig.parameters
         original = dict(DEFAULTS)
-        cfg = create_config({"debug": True}, inherit=True) if has_inherit else create_config({"debug": True})
+        cfg = (
+            create_config({"debug": True}, inherit=True)
+            if has_inherit
+            else create_config({"debug": True})
+        )
         if DEFAULTS != original:
             return False, [f"DEFAULTS mutated: was {original}, now {dict(DEFAULTS)}"]
-        cfg2 = create_config({"timeout": 5}, inherit=True) if has_inherit else create_config({"timeout": 5})
+        cfg2 = (
+            create_config({"timeout": 5}, inherit=True)
+            if has_inherit
+            else create_config({"timeout": 5})
+        )
         if DEFAULTS != original:
             return False, [f"DEFAULTS mutated on second call: {dict(DEFAULTS)}"]
         return True, ["DEFAULTS unchanged after create_config"]
@@ -532,7 +558,8 @@ def _test_lock_then_publish_order(mod) -> tuple[bool, list[str]]:
     if not get_captures:
         return False, ["get_captures not found"]
     try:
-        if clear: clear()
+        if clear:
+            clear()
         update_and_notify("x", 42)
         caps = get_captures()
         if not caps:
@@ -575,6 +602,7 @@ def _load_v2_test(case):
     if not test_path.exists():
         return None
     import importlib.util as _ilu
+
     spec = _ilu.spec_from_file_location(f"_t3_v2_test_{family}", test_path)
     mod = _ilu.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -645,6 +673,7 @@ _CASE_TESTS = {
 # MUTATION TESTS (generic)
 # ============================================================
 
+
 def _run_mutation_tests(mod, case_id: str) -> tuple[bool, list[str]]:
     """Run simple mutation tests: repeated calls, edge cases."""
     test_fn = _CASE_TESTS.get(case_id)
@@ -666,6 +695,7 @@ def _run_mutation_tests(mod, case_id: str) -> tuple[bool, list[str]]:
 # ============================================================
 # MAIN EVALUATOR
 # ============================================================
+
 
 def _assemble_program(model_code: str, case: dict) -> dict:
     """Assemble executable program from model output + original case files.
@@ -712,8 +742,8 @@ def _assemble_program(model_code: str, case: dict) -> dict:
     model_cleaned = _strip_local_imports(model_code)
 
     # Detect duplicate definitions (defined in both original and model)
-    model_defs = set(re.findall(r'^(?:def|class)\s+(\w+)', model_cleaned, re.MULTILINE))
-    original_defs = set(re.findall(r'^(?:def|class)\s+(\w+)', original_cleaned, re.MULTILINE))
+    model_defs = set(re.findall(r"^(?:def|class)\s+(\w+)", model_cleaned, re.MULTILINE))
+    original_defs = set(re.findall(r"^(?:def|class)\s+(\w+)", original_cleaned, re.MULTILINE))
     duplicates = sorted(model_defs & original_defs)
 
     # Detect rename error: model must define the function that the fix targets.
@@ -730,7 +760,10 @@ def _assemble_program(model_code: str, case: dict) -> dict:
         _eval_log.warning(
             "RENAME DETECTED: case %s expects model to define '%s' but model defines: %s. "
             "Original buggy '%s' will run instead of model's fix.",
-            case.get("id", "?"), expected_func, sorted(model_defs), expected_func
+            case.get("id", "?"),
+            expected_func,
+            sorted(model_defs),
+            expected_func,
         )
 
     # Assemble: original base + model overlay
@@ -771,10 +804,15 @@ def exec_evaluate(case: dict, code: str) -> dict:
     extracted = code if (code and code.strip()) else "<EXTRACTION FAILED>"
 
     if not code or len(code.strip()) < 10:
-        return _result(case_id, False, 0.0,
-                       ["no extractable code in output"], [case["failure_mode"]],
-                       _exec_info(ran=False, total_tests=0),
-                       extracted_code=extracted)
+        return _result(
+            case_id,
+            False,
+            0.0,
+            ["no extractable code in output"],
+            [case["failure_mode"]],
+            _exec_info(ran=False, total_tests=0),
+            extracted_code=extracted,
+        )
 
     # Step 1.5: Multi-file assembly
     asm = _assemble_program(code, case)
@@ -784,24 +822,34 @@ def exec_evaluate(case: dict, code: str) -> dict:
     if asm["assembly_risky"]:
         _eval_log.info(
             "ASSEMBLY: %s has duplicate defs (overridden by model): %s",
-            case_id, asm["duplicate_defs"]
+            case_id,
+            asm["duplicate_defs"],
         )
 
     # Step 1.6: Rename detection — model failed to override the target function.
     # This is a MODEL failure (wrong function name), NOT an assembly/infrastructure failure.
     # Result is included in metrics (exec_pass=False, assembly_error=False).
     if asm.get("rename_error"):
-        return _result(case_id, False, 0.0,
-                       [f"rename error: model does not define '{asm['expected_func']}' — "
-                        f"original buggy function would run instead of model's fix"],
-                       [case["failure_mode"]],
-                       _exec_info(ran=False, total_tests=0,
-                                  assembly_used=assembly_used,
-                                  assembly_error=False,
-                                  rename_error=True,
-                                  assembly_risky=asm.get("assembly_risky", False),
-                                  assembly_sources=asm.get("sources")),
-                       extracted_code=extracted)
+        return _result(
+            case_id,
+            False,
+            0.0,
+            [
+                f"rename error: model does not define '{asm['expected_func']}' — "
+                f"original buggy function would run instead of model's fix"
+            ],
+            [case["failure_mode"]],
+            _exec_info(
+                ran=False,
+                total_tests=0,
+                assembly_used=assembly_used,
+                assembly_error=False,
+                rename_error=True,
+                assembly_risky=asm.get("assembly_risky", False),
+                assembly_sources=asm.get("sources"),
+            ),
+            extracted_code=extracted,
+        )
 
     # Step 2: Load module — runtime-based assembly validation
     # Any NameError/ImportError here = assembly failure, NOT logic error
@@ -809,36 +857,65 @@ def exec_evaluate(case: dict, code: str) -> dict:
     try:
         mod = load_module_from_code(assembled_code, case_id)
     except SyntaxError as e:
-        return _result(case_id, False, 0.0,
-                       [f"syntax error: {e}"], [case["failure_mode"]],
-                       _exec_info(ran=False, syntax_error=str(e), total_tests=0,
-                                  assembly_used=assembly_used, assembly_error=False,
-                                  assembly_risky=asm["assembly_risky"],
-                                  assembly_sources=asm["sources"]),
-                       extracted_code=extracted)
+        return _result(
+            case_id,
+            False,
+            0.0,
+            [f"syntax error: {e}"],
+            [case["failure_mode"]],
+            _exec_info(
+                ran=False,
+                syntax_error=str(e),
+                total_tests=0,
+                assembly_used=assembly_used,
+                assembly_error=False,
+                assembly_risky=asm["assembly_risky"],
+                assembly_sources=asm["sources"],
+            ),
+            extracted_code=extracted,
+        )
     except (NameError, ImportError) as e:
-        return _result(case_id, False, 0.0,
-                       [f"assembly error (unresolved dependency at load): {e}"],
-                       [case["failure_mode"]],
-                       _exec_info(ran=False, runtime_error=str(e), total_tests=0,
-                                  assembly_used=assembly_used, assembly_error=True,
-                                  assembly_risky=asm["assembly_risky"],
-                                  assembly_sources=asm["sources"]),
-                       extracted_code=extracted)
+        return _result(
+            case_id,
+            False,
+            0.0,
+            [f"assembly error (unresolved dependency at load): {e}"],
+            [case["failure_mode"]],
+            _exec_info(
+                ran=False,
+                runtime_error=str(e),
+                total_tests=0,
+                assembly_used=assembly_used,
+                assembly_error=True,
+                assembly_risky=asm["assembly_risky"],
+                assembly_sources=asm["sources"],
+            ),
+            extracted_code=extracted,
+        )
     except Exception as e:
         err_str = str(e)
-        is_unresolved = ("not defined" in err_str.lower() or
-                         "no module" in err_str.lower() or
-                         "cannot import" in err_str.lower())
-        return _result(case_id, False, 0.0,
-                       [f"{'assembly' if is_unresolved else 'load'} error: {e}"],
-                       [case["failure_mode"]],
-                       _exec_info(ran=False, runtime_error=str(e), total_tests=0,
-                                  assembly_used=assembly_used,
-                                  assembly_error=is_unresolved,
-                                  assembly_risky=asm["assembly_risky"],
-                                  assembly_sources=asm["sources"]),
-                       extracted_code=extracted)
+        is_unresolved = (
+            "not defined" in err_str.lower()
+            or "no module" in err_str.lower()
+            or "cannot import" in err_str.lower()
+        )
+        return _result(
+            case_id,
+            False,
+            0.0,
+            [f"{'assembly' if is_unresolved else 'load'} error: {e}"],
+            [case["failure_mode"]],
+            _exec_info(
+                ran=False,
+                runtime_error=str(e),
+                total_tests=0,
+                assembly_used=assembly_used,
+                assembly_error=is_unresolved,
+                assembly_risky=asm["assembly_risky"],
+                assembly_sources=asm["sources"],
+            ),
+            extracted_code=extracted,
+        )
 
     # Step 3: Run invariant test
     test_fn = _CASE_TESTS.get(case_id)
@@ -871,35 +948,65 @@ def exec_evaluate(case: dict, code: str) -> dict:
         # Unresolved symbol during test = assembly failure, NOT logic error
         inv_pass = False
         reasons.append(f"assembly error during test (unresolved dependency): {e}")
-        return _result(case_id, False, 0.0,
-                       reasons, [case["failure_mode"]],
-                       _exec_info(ran=True, invariant_pass=False,
-                                  runtime_error=str(e),
-                                  passed_tests=0, total_tests=total_tests,
-                                  assembly_error=True, **_asm_kw),
-                       extracted_code=extracted)
+        return _result(
+            case_id,
+            False,
+            0.0,
+            reasons,
+            [case["failure_mode"]],
+            _exec_info(
+                ran=True,
+                invariant_pass=False,
+                runtime_error=str(e),
+                passed_tests=0,
+                total_tests=total_tests,
+                assembly_error=True,
+                **_asm_kw,
+            ),
+            extracted_code=extracted,
+        )
     except AttributeError as e:
         err_str = str(e)
         is_missing = "has no attribute" in err_str
         inv_pass = False
         reasons.append(f"{'assembly' if is_missing else 'runtime'} error: {e}")
-        return _result(case_id, False, 0.0 if is_missing else 0.1,
-                       reasons, [case["failure_mode"]],
-                       _exec_info(ran=True, invariant_pass=False,
-                                  runtime_error=str(e),
-                                  passed_tests=0, total_tests=total_tests,
-                                  assembly_error=is_missing, **_asm_kw),
-                       extracted_code=extracted)
+        return _result(
+            case_id,
+            False,
+            0.0 if is_missing else 0.1,
+            reasons,
+            [case["failure_mode"]],
+            _exec_info(
+                ran=True,
+                invariant_pass=False,
+                runtime_error=str(e),
+                passed_tests=0,
+                total_tests=total_tests,
+                assembly_error=is_missing,
+                **_asm_kw,
+            ),
+            extracted_code=extracted,
+        )
     except Exception as e:
         inv_pass = False
         reasons.append(f"invariant test crashed: {e}")
-        return _result(case_id, False, 0.1,
-                       reasons, [case["failure_mode"]],
-                       _exec_info(ran=True, invariant_pass=False,
-                                  runtime_error=str(e),
-                                  passed_tests=0, total_tests=total_tests,
-                                  assembly_error=False, **_asm_kw),
-                       extracted_code=extracted)
+        return _result(
+            case_id,
+            False,
+            0.1,
+            reasons,
+            [case["failure_mode"]],
+            _exec_info(
+                ran=True,
+                invariant_pass=False,
+                runtime_error=str(e),
+                passed_tests=0,
+                total_tests=total_tests,
+                assembly_error=False,
+                **_asm_kw,
+            ),
+            extracted_code=extracted,
+        )
 
     if not inv_pass:
         failure_modes.append(case["failure_mode"])
@@ -907,22 +1014,44 @@ def exec_evaluate(case: dict, code: str) -> dict:
         # (NameError/ImportError caught by the test function itself)
         reason_text = " ".join(reasons).lower()
         is_assembly_in_test = (
-            "not defined" in reason_text or
-            "has no attribute" in reason_text or
-            "no module named" in reason_text or
-            "cannot import" in reason_text
+            "not defined" in reason_text
+            or "has no attribute" in reason_text
+            or "no module named" in reason_text
+            or "cannot import" in reason_text
         )
         if is_assembly_in_test:
-            return _result(case_id, False, 0.0, reasons, failure_modes,
-                           _exec_info(ran=True, invariant_pass=False,
-                                      passed_tests=0, total_tests=total_tests,
-                                      assembly_error=True, **_asm_kw),
-                           extracted_code=extracted)
-        return _result(case_id, False, 0.2, reasons, failure_modes,
-                       _exec_info(ran=True, invariant_pass=False,
-                                  passed_tests=0, total_tests=total_tests,
-                                  assembly_error=False, **_asm_kw),
-                       extracted_code=extracted)
+            return _result(
+                case_id,
+                False,
+                0.0,
+                reasons,
+                failure_modes,
+                _exec_info(
+                    ran=True,
+                    invariant_pass=False,
+                    passed_tests=0,
+                    total_tests=total_tests,
+                    assembly_error=True,
+                    **_asm_kw,
+                ),
+                extracted_code=extracted,
+            )
+        return _result(
+            case_id,
+            False,
+            0.2,
+            reasons,
+            failure_modes,
+            _exec_info(
+                ran=True,
+                invariant_pass=False,
+                passed_tests=0,
+                total_tests=total_tests,
+                assembly_error=False,
+                **_asm_kw,
+            ),
+            extracted_code=extracted,
+        )
 
     # Step 4: Mutation tests
     total_tests += 1  # mutation test attempted
@@ -934,24 +1063,60 @@ def exec_evaluate(case: dict, code: str) -> dict:
             passed_tests += 1
     except Exception as e:
         reasons.append(f"mutation test crashed: {e}")
-        return _result(case_id, False, 0.5, reasons, [case["failure_mode"]],
-                       _exec_info(ran=True, invariant_pass=True, mutation_pass=False,
-                                  runtime_error=str(e),
-                                  passed_tests=passed_tests, total_tests=total_tests,
-                                  assembly_error=False, **_asm_kw),
-                       extracted_code=extracted)
+        return _result(
+            case_id,
+            False,
+            0.5,
+            reasons,
+            [case["failure_mode"]],
+            _exec_info(
+                ran=True,
+                invariant_pass=True,
+                mutation_pass=False,
+                runtime_error=str(e),
+                passed_tests=passed_tests,
+                total_tests=total_tests,
+                assembly_error=False,
+                **_asm_kw,
+            ),
+            extracted_code=extracted,
+        )
 
     if not mut_pass:
-        return _result(case_id, False, 0.5, reasons, [case["failure_mode"]],
-                       _exec_info(ran=True, invariant_pass=True, mutation_pass=False,
-                                  passed_tests=passed_tests, total_tests=total_tests,
-                                  assembly_error=False, **_asm_kw),
-                       extracted_code=extracted)
+        return _result(
+            case_id,
+            False,
+            0.5,
+            reasons,
+            [case["failure_mode"]],
+            _exec_info(
+                ran=True,
+                invariant_pass=True,
+                mutation_pass=False,
+                passed_tests=passed_tests,
+                total_tests=total_tests,
+                assembly_error=False,
+                **_asm_kw,
+            ),
+            extracted_code=extracted,
+        )
 
     # All pass
-    return _result(case_id, True, 1.0, reasons, [],
-                   _exec_info(ran=True, invariant_pass=True, mutation_pass=True,
-                              passed_tests=passed_tests, total_tests=total_tests,
-                              assembly_error=False, **_asm_kw),
-                   extracted_code=extracted,
-                   assembled_code=assembled_code)
+    return _result(
+        case_id,
+        True,
+        1.0,
+        reasons,
+        [],
+        _exec_info(
+            ran=True,
+            invariant_pass=True,
+            mutation_pass=True,
+            passed_tests=passed_tests,
+            total_tests=total_tests,
+            assembly_error=False,
+            **_asm_kw,
+        ),
+        extracted_code=extracted,
+        assembled_code=assembled_code,
+    )

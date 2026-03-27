@@ -14,6 +14,7 @@ Verifies:
 
 Run: .venv/bin/python -m pytest tests/test_run_logger.py -v
 """
+
 import json
 import os
 import sys
@@ -63,6 +64,7 @@ def clean_logger():
 # RunLogger class unit tests
 # ============================================================
 
+
 class TestRunLoggerClass:
 
     def test_write_after_close_raises(self, tmp_path):
@@ -85,8 +87,9 @@ class TestRunLoggerClass:
 
     def test_writes_tracked(self, tmp_path):
         logger = _make_logger(tmp_path)
-        logger.write("case1", "baseline", "test-model", "p", "o", _DUMMY_PARSED,
-                     {"pass": True, "score": 1.0})
+        logger.write(
+            "case1", "baseline", "test-model", "p", "o", _DUMMY_PARSED, {"pass": True, "score": 1.0}
+        )
         stats = logger.get_stats()
         assert stats["attempted"] == 3
         assert stats["failed"] == 0
@@ -138,6 +141,7 @@ class TestRunLoggerClass:
 # ============================================================
 # Lifecycle tests
 # ============================================================
+
 
 class TestInitCloseLifecycle:
 
@@ -191,22 +195,37 @@ class TestInitCloseLifecycle:
 # Run isolation tests
 # ============================================================
 
+
 class TestRunIsolation:
 
     def test_sequential_models_separate_files(self):
         """Two models run sequentially — each gets its own log file."""
         path_a = init_run_log("isolation-model-a")
         logger_a = get_run_logger()
-        logger_a.write("case1", "baseline", "isolation-model-a", "p", "o",
-                       _DUMMY_PARSED, {"pass": True, "score": 1.0})
+        logger_a.write(
+            "case1",
+            "baseline",
+            "isolation-model-a",
+            "p",
+            "o",
+            _DUMMY_PARSED,
+            {"pass": True, "score": 1.0},
+        )
         close_run_log()
 
         time.sleep(1)
 
         path_b = init_run_log("isolation-model-b")
         logger_b = get_run_logger()
-        logger_b.write("case1", "baseline", "isolation-model-b", "p", "o",
-                       _DUMMY_PARSED, {"pass": False, "score": 0.0})
+        logger_b.write(
+            "case1",
+            "baseline",
+            "isolation-model-b",
+            "p",
+            "o",
+            _DUMMY_PARSED,
+            {"pass": False, "score": 0.0},
+        )
         close_run_log()
 
         assert path_a != path_b
@@ -229,16 +248,18 @@ class TestRunIsolation:
         """Two runs of the SAME model — must have different run_ids and files."""
         path_a = init_run_log("same-model-test")
         rid_a = get_run_logger().run_id
-        get_run_logger().write("case1", "baseline", "same-model-test", "p", "o",
-                               _DUMMY_PARSED, _DUMMY_EV)
+        get_run_logger().write(
+            "case1", "baseline", "same-model-test", "p", "o", _DUMMY_PARSED, _DUMMY_EV
+        )
         close_run_log()
 
         time.sleep(1)
 
         path_b = init_run_log("same-model-test")
         rid_b = get_run_logger().run_id
-        get_run_logger().write("case1", "baseline", "same-model-test", "p", "o",
-                               _DUMMY_PARSED, _DUMMY_EV)
+        get_run_logger().write(
+            "case1", "baseline", "same-model-test", "p", "o", _DUMMY_PARSED, _DUMMY_EV
+        )
         close_run_log()
 
         assert path_a != path_b, "Same model produced same log path"
@@ -264,8 +285,15 @@ class TestRunIsolation:
         assert get_current_log_path() == path
         logger = get_run_logger()
         assert logger.log_path == path
-        logger.write("case1", "baseline", "stability-test", "p", "o",
-                     _DUMMY_PARSED, {"pass": True, "score": 1.0})
+        logger.write(
+            "case1",
+            "baseline",
+            "stability-test",
+            "p",
+            "o",
+            _DUMMY_PARSED,
+            {"pass": True, "score": 1.0},
+        )
         assert get_current_log_path() == path
         close_run_log()
         for f in LOGS_DIR.glob("stability-test_*"):

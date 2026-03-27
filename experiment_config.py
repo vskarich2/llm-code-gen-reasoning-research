@@ -32,6 +32,7 @@ _log = logging.getLogger("t3.config")
 # Config dataclasses (typed, validated)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ModelSpec:
     name: str
@@ -149,6 +150,7 @@ class LoggingConfig:
 @dataclass
 class RunConfig:
     """Per-run parameters. The config is the single source of truth."""
+
     trial: int
     run_id: str
     run_dir: str
@@ -165,6 +167,7 @@ class ExperimentMetadata:
 @dataclass
 class ExperimentConfig:
     """Top-level experiment configuration. The single source of truth."""
+
     experiment: ExperimentMetadata
     models: ModelsConfig
     conditions: dict[str, ConditionConfig]
@@ -217,6 +220,7 @@ def is_config_loaded() -> bool:
 # Loader
 # ---------------------------------------------------------------------------
 
+
 def load_config(path: str, cli_overrides: dict | None = None) -> ExperimentConfig:
     """Load, validate, and activate a config file.
 
@@ -250,8 +254,11 @@ def load_config(path: str, cli_overrides: dict | None = None) -> ExperimentConfi
     _config = config
     _log.info(
         "Config loaded: %s (sha=%s, %d models, %d conditions, cases=%s)",
-        path, sha, len(config.models.generation),
-        len(config.conditions), config.cases.source,
+        path,
+        sha,
+        len(config.models.generation),
+        len(config.conditions),
+        config.cases.source,
     )
     return config
 
@@ -286,12 +293,15 @@ def _parse_config(raw: dict) -> ExperimentConfig:
     gen_list = models_raw.get("generation", [])
     if not gen_list:
         raise ValueError("CONFIG ERROR: models.generation must have at least one model")
-    generation = [ModelSpec(
-        name=m["name"],
-        temperature=m.get("temperature", 0.0),
-        max_tokens=m.get("max_tokens", 4096),
-        top_p=m.get("top_p", 1.0),
-    ) for m in gen_list]
+    generation = [
+        ModelSpec(
+            name=m["name"],
+            temperature=m.get("temperature", 0.0),
+            max_tokens=m.get("max_tokens", 4096),
+            top_p=m.get("top_p", 1.0),
+        )
+        for m in gen_list
+    ]
 
     eval_raw = models_raw.get("evaluator", {})
     if not eval_raw.get("name"):
@@ -359,7 +369,9 @@ def _parse_config(raw: dict) -> ExperimentConfig:
         execution_mode=eval_section.get("execution_mode", "subprocess"),
         subprocess_timeout=eval_section.get("subprocess_timeout", 30),
         leg_enabled=eval_section.get("leg", {}).get("enabled", True),
-        failure_classification_enabled=eval_section.get("failure_classification", {}).get("enabled", True),
+        failure_classification_enabled=eval_section.get("failure_classification", {}).get(
+            "enabled", True
+        ),
         alignment_enabled=eval_section.get("alignment", {}).get("enabled", True),
     )
 
@@ -368,7 +380,9 @@ def _parse_config(raw: dict) -> ExperimentConfig:
     tb_raw = exec_raw.get("token_budgets", {})
     tb_default = tb_raw.pop("default", 10_000) if isinstance(tb_raw, dict) else 10_000
     token_budgets = TokenBudgetConfig(
-        budgets={k: v for k, v in tb_raw.items() if k != "default"} if isinstance(tb_raw, dict) else {},
+        budgets=(
+            {k: v for k, v in tb_raw.items() if k != "default"} if isinstance(tb_raw, dict) else {}
+        ),
         default=tb_default,
     )
     v3_raw = exec_raw.get("v3_pipeline", {})
@@ -432,15 +446,21 @@ def _parse_retry(raw: dict, defaults: RetryConfig | None = None) -> RetryConfig:
     return RetryConfig(
         enabled=raw.get("enabled", d.enabled),
         max_attempts=raw.get("max_attempts", d.max_attempts),
-        include_test_output=raw.get("feedback", {}).get("include_test_output", d.include_test_output),
+        include_test_output=raw.get("feedback", {}).get(
+            "include_test_output", d.include_test_output
+        ),
         include_critique=raw.get("feedback", {}).get("include_critique", d.include_critique),
-        include_previous_code=raw.get("feedback", {}).get("include_previous_code", d.include_previous_code),
+        include_previous_code=raw.get("feedback", {}).get(
+            "include_previous_code", d.include_previous_code
+        ),
         stop_on_pass=raw.get("stopping", {}).get("stop_on_pass", d.stop_on_pass),
         stop_on_stagnation=raw.get("stopping", {}).get("stop_on_stagnation", d.stop_on_stagnation),
         stagnation_window=raw.get("stopping", {}).get("stagnation_window", d.stagnation_window),
         similarity_threshold=raw.get("similarity_threshold", d.similarity_threshold),
         score_epsilon=raw.get("score_epsilon", d.score_epsilon),
-        persistence_escalation_count=raw.get("persistence_escalation_count", d.persistence_escalation_count),
+        persistence_escalation_count=raw.get(
+            "persistence_escalation_count", d.persistence_escalation_count
+        ),
         max_iteration_seconds=raw.get("max_iteration_seconds", d.max_iteration_seconds),
         max_total_seconds=raw.get("max_total_seconds", d.max_total_seconds),
     )
@@ -449,6 +469,7 @@ def _parse_retry(raw: dict, defaults: RetryConfig | None = None) -> RetryConfig:
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
+
 
 def _validate(config: ExperimentConfig) -> None:
     """Validate config. Raises on any error. Errors are fatal."""
@@ -461,9 +482,13 @@ def _validate(config: ExperimentConfig) -> None:
         if not m.name:
             errors.append("models.generation[].name: must be non-empty")
         if not (0.0 <= m.temperature <= 2.0):
-            errors.append(f"models.generation[{m.name}].temperature: must be 0.0-2.0, got {m.temperature}")
+            errors.append(
+                f"models.generation[{m.name}].temperature: must be 0.0-2.0, got {m.temperature}"
+            )
     if not config.models.evaluator.name:
-        errors.append("models.evaluator.name: REQUIRED (was previously hardcoded — must be explicit)")
+        errors.append(
+            "models.evaluator.name: REQUIRED (was previously hardcoded — must be explicit)"
+        )
 
     # Conditions
     if not config.conditions:
@@ -491,18 +516,22 @@ def _validate(config: ExperimentConfig) -> None:
 # Utility: dump config for reproducibility logging
 # ---------------------------------------------------------------------------
 
+
 def config_to_dict(config: ExperimentConfig) -> dict:
     """Serialize config to a plain dict for JSON logging."""
     import dataclasses
+
     def _to_dict(obj):
         if dataclasses.is_dataclass(obj):
-            return {k: _to_dict(v) for k, v in dataclasses.asdict(obj).items()
-                    if not k.startswith("_")}
+            return {
+                k: _to_dict(v) for k, v in dataclasses.asdict(obj).items() if not k.startswith("_")
+            }
         elif isinstance(obj, list):
             return [_to_dict(i) for i in obj]
         elif isinstance(obj, dict):
             return {k: _to_dict(v) for k, v in obj.items()}
         return obj
+
     d = _to_dict(config)
     d["_config_path"] = config._config_path
     d["_config_sha256"] = config._config_sha256

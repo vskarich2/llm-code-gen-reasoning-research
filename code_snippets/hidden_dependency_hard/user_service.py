@@ -18,6 +18,7 @@ def delete_user(user_id):
 
 def rename_user(user_id, new_name):
     from user_repo import db
+
     db.update_name(user_id, new_name)
     updated = lookup_user(user_id)
     if updated:

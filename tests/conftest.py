@@ -2,6 +2,7 @@
 
 Ensures a RunLogger is active for any test that calls write_log.
 """
+
 import sys
 import os
 from pathlib import Path
@@ -33,6 +34,7 @@ def _ensure_run_logger():
 
     # Create a temp directory for test logs
     import tempfile
+
     test_log_dir = Path(tempfile.mkdtemp(prefix="t3_test_logs_"))
 
     test_model = "gpt-4.1-nano"
@@ -43,4 +45,5 @@ def _ensure_run_logger():
     close_run_log()
     # Clean up temp directory
     import shutil
+
     shutil.rmtree(test_log_dir, ignore_errors=True)

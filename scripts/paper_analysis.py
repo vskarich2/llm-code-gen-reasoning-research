@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -40,6 +41,7 @@ BOOTSTRAP_SAMPLES = 1000
 # ============================================================
 # DATA LOADING + GATING
 # ============================================================
+
 
 def load_and_gate(input_path: Path) -> list[dict]:
     """Single-pass load with hard gating. Returns event list.
@@ -74,8 +76,10 @@ def load_and_gate(input_path: Path) -> list[dict]:
     cases = set(e["case_id"] for e in events)
     expected = len(models) * len(conditions) * len(trials) * len(cases)
     if len(events) != expected:
-        print(f"ERROR: Expected {expected} events, found {len(events)}. "
-              "Data is incomplete or corrupt. Re-run merge_and_validate.py.")
+        print(
+            f"ERROR: Expected {expected} events, found {len(events)}. "
+            "Data is incomplete or corrupt. Re-run merge_and_validate.py."
+        )
         sys.exit(1)
 
     return events
@@ -84,6 +88,7 @@ def load_and_gate(input_path: Path) -> list[dict]:
 # ============================================================
 # CASE-LEVEL AGGREGATION
 # ============================================================
+
 
 def build_case_level_df(events: list[dict]) -> pd.DataFrame:
     """Aggregate events to case-level: mean across trials per (model, case_id, condition).
@@ -106,12 +111,16 @@ def build_case_level_df(events: list[dict]) -> pd.DataFrame:
     df = df.sort_values("case_id")
 
     # Aggregate per (model, case_id, condition) — mean across trials
-    case_df = df.groupby(["model", "case_id", "condition"]).agg(
-        pass_rate=("is_pass", "mean"),
-        leg_rate=("is_leg", "mean"),
-        lucky_fix_rate=("is_lucky", "mean"),
-        n_trials=("trial", "nunique"),
-    ).reset_index()
+    case_df = (
+        df.groupby(["model", "case_id", "condition"])
+        .agg(
+            pass_rate=("is_pass", "mean"),
+            leg_rate=("is_leg", "mean"),
+            lucky_fix_rate=("is_lucky", "mean"),
+            n_trials=("trial", "nunique"),
+        )
+        .reset_index()
+    )
 
     case_df = case_df.sort_values("case_id")
     return case_df
@@ -122,9 +131,13 @@ def compute_exec_reasoning(events: list[dict], model: str, condition: str) -> fl
 
     Denominator: ONLY rows where reasoning_correct == True.
     """
-    subset = [e for e in events
-              if e["model"] == model and e["condition"] == condition
-              and e.get("reasoning_correct") is True]
+    subset = [
+        e
+        for e in events
+        if e["model"] == model
+        and e["condition"] == condition
+        and e.get("reasoning_correct") is True
+    ]
     if not subset:
         return float("nan")
     return sum(1 for e in subset if e.get("code_correct") is True) / len(subset)
@@ -134,14 +147,19 @@ def compute_exec_reasoning(events: list[dict], model: str, condition: str) -> fl
 # PAIRED T-TEST (with alignment + zero-variance handling)
 # ============================================================
 
+
 def paired_ttest(case_df: pd.DataFrame, model: str, metric: str = "pass_rate"):
     """Paired t-test: baseline vs leg_reduction for one model.
 
     Returns dict with t_stat, p_value, mean_diff, note.
     Raises ValueError if case alignment fails.
     """
-    bl = case_df[(case_df["model"] == model) & (case_df["condition"] == "baseline")].sort_values("case_id")
-    lr = case_df[(case_df["model"] == model) & (case_df["condition"] == "leg_reduction")].sort_values("case_id")
+    bl = case_df[(case_df["model"] == model) & (case_df["condition"] == "baseline")].sort_values(
+        "case_id"
+    )
+    lr = case_df[
+        (case_df["model"] == model) & (case_df["condition"] == "leg_reduction")
+    ].sort_values("case_id")
 
     # Strict alignment check — no silent reordering
     bl_cases = list(bl["case_id"])
@@ -190,14 +208,24 @@ def paired_ttest(case_df: pd.DataFrame, model: str, metric: str = "pass_rate"):
 # BOOTSTRAP CI (pairing-preserving)
 # ============================================================
 
-def bootstrap_ci(case_df: pd.DataFrame, model: str, metric: str,
-                 rng: np.random.Generator, n_boot: int = BOOTSTRAP_SAMPLES):
+
+def bootstrap_ci(
+    case_df: pd.DataFrame,
+    model: str,
+    metric: str,
+    rng: np.random.Generator,
+    n_boot: int = BOOTSTRAP_SAMPLES,
+):
     """Bootstrap 95% CI for paired difference (leg_reduction - baseline).
 
     Preserves pairing by resampling case indices.
     """
-    bl = case_df[(case_df["model"] == model) & (case_df["condition"] == "baseline")].sort_values("case_id")
-    lr = case_df[(case_df["model"] == model) & (case_df["condition"] == "leg_reduction")].sort_values("case_id")
+    bl = case_df[(case_df["model"] == model) & (case_df["condition"] == "baseline")].sort_values(
+        "case_id"
+    )
+    lr = case_df[
+        (case_df["model"] == model) & (case_df["condition"] == "leg_reduction")
+    ].sort_values("case_id")
 
     assert list(bl["case_id"]) == list(lr["case_id"]), "Case alignment mismatch in bootstrap"
 
@@ -232,6 +260,7 @@ def bootstrap_ci(case_df: pd.DataFrame, model: str, metric: str,
 # INTERACTION ANALYSIS
 # ============================================================
 
+
 def interaction_ols(case_df: pd.DataFrame, metric: str = "pass_rate"):
     """OLS interaction model: metric ~ C(model) * C(condition)."""
     formula = f"{metric} ~ C(model) * C(condition)"
@@ -243,12 +272,23 @@ def interaction_ols(case_df: pd.DataFrame, metric: str = "pass_rate"):
     }
 
 
-def bootstrap_dod(case_df: pd.DataFrame, model_a: str, model_b: str,
-                  metric: str, rng: np.random.Generator, n_boot: int = BOOTSTRAP_SAMPLES):
+def bootstrap_dod(
+    case_df: pd.DataFrame,
+    model_a: str,
+    model_b: str,
+    metric: str,
+    rng: np.random.Generator,
+    n_boot: int = BOOTSTRAP_SAMPLES,
+):
     """Bootstrap difference-of-differences: (B_lr - B_bl) - (A_lr - A_bl)."""
+
     def _get_diffs(model):
-        bl = case_df[(case_df["model"] == model) & (case_df["condition"] == "baseline")].sort_values("case_id")
-        lr = case_df[(case_df["model"] == model) & (case_df["condition"] == "leg_reduction")].sort_values("case_id")
+        bl = case_df[
+            (case_df["model"] == model) & (case_df["condition"] == "baseline")
+        ].sort_values("case_id")
+        lr = case_df[
+            (case_df["model"] == model) & (case_df["condition"] == "leg_reduction")
+        ].sort_values("case_id")
         assert list(bl["case_id"]) == list(lr["case_id"])
         return lr[metric].values - bl[metric].values
 
@@ -276,6 +316,7 @@ def bootstrap_dod(case_df: pd.DataFrame, model_a: str, model_b: str,
 # VALIDATION CROSS-CHECKS
 # ============================================================
 
+
 def validate_stats(case_df: pd.DataFrame, events: list[dict]):
     """Cross-check computed statistics. Raises on any mismatch."""
     # numpy vs pandas mean
@@ -300,6 +341,7 @@ def validate_stats(case_df: pd.DataFrame, events: list[dict]):
 # ============================================================
 # FIGURES
 # ============================================================
+
 
 def figure_1_model_condition_panel(case_df, events, output_dir, rng):
     """Model × Condition panel: pass, LEG, lucky fix, Exec|Reasoning with 95% CI."""
@@ -349,9 +391,13 @@ def figure_2_delta_plot(case_df, rng, output_dir):
     for i, model in enumerate(models):
         ci = bootstrap_ci(case_df, model, "pass_rate", rng)
         ax.bar(i, ci["mean_diff"], color="steelblue", width=0.6)
-        ax.errorbar(i, ci["mean_diff"], yerr=[[ci["mean_diff"] - ci["ci_low"]],
-                                               [ci["ci_high"] - ci["mean_diff"]]],
-                    color="black", capsize=5)
+        ax.errorbar(
+            i,
+            ci["mean_diff"],
+            yerr=[[ci["mean_diff"] - ci["ci_low"]], [ci["ci_high"] - ci["mean_diff"]]],
+            color="black",
+            capsize=5,
+        )
 
     ax.axhline(y=0, color="red", linestyle="--", alpha=0.5)
     ax.set_xticks(x)
@@ -372,19 +418,20 @@ def figure_3_case_heatmap(case_df, output_dir):
         lr = case_df[(case_df["case_id"] == cid) & (case_df["condition"] == "leg_reduction")]
         if bl.empty or lr.empty:
             continue
-        rows.append({
-            "case_id": cid,
-            "delta_pass": lr["pass_rate"].mean() - bl["pass_rate"].mean(),
-            "delta_leg": lr["leg_rate"].mean() - bl["leg_rate"].mean(),
-            "delta_lucky": lr["lucky_fix_rate"].mean() - bl["lucky_fix_rate"].mean(),
-        })
+        rows.append(
+            {
+                "case_id": cid,
+                "delta_pass": lr["pass_rate"].mean() - bl["pass_rate"].mean(),
+                "delta_leg": lr["leg_rate"].mean() - bl["leg_rate"].mean(),
+                "delta_lucky": lr["lucky_fix_rate"].mean() - bl["lucky_fix_rate"].mean(),
+            }
+        )
 
     heatmap_df = pd.DataFrame(rows).set_index("case_id")
     heatmap_df = heatmap_df.sort_values("delta_pass")
 
     fig, ax = plt.subplots(figsize=(8, max(6, len(heatmap_df) * 0.25)))
-    sns.heatmap(heatmap_df, annot=True, fmt=".3f", cmap="RdBu_r", center=0,
-                ax=ax, linewidths=0.5)
+    sns.heatmap(heatmap_df, annot=True, fmt=".3f", cmap="RdBu_r", center=0, ax=ax, linewidths=0.5)
     ax.set_title("Case-Level Intervention Deltas")
     plt.tight_layout()
     plt.savefig(output_dir / "figure_3.png", dpi=150)
@@ -418,17 +465,33 @@ def figure_5_regime_map(case_df, events, output_dir):
             reasoning_rate = subset["pass_rate"].mean()  # proxy
             er = compute_exec_reasoning(events, model, cond)
             leg = subset["leg_rate"].mean()
-            data.append({"model": model, "condition": cond,
-                         "reasoning": reasoning_rate, "exec_reasoning": er, "leg_rate": leg})
+            data.append(
+                {
+                    "model": model,
+                    "condition": cond,
+                    "reasoning": reasoning_rate,
+                    "exec_reasoning": er,
+                    "leg_rate": leg,
+                }
+            )
 
     plot_df = pd.DataFrame(data)
     fig, ax = plt.subplots(figsize=(8, 6))
-    scatter = ax.scatter(plot_df["reasoning"], plot_df["exec_reasoning"],
-                         c=plot_df["leg_rate"], cmap="YlOrRd", s=100, edgecolors="black")
+    scatter = ax.scatter(
+        plot_df["reasoning"],
+        plot_df["exec_reasoning"],
+        c=plot_df["leg_rate"],
+        cmap="YlOrRd",
+        s=100,
+        edgecolors="black",
+    )
     for _, row in plot_df.iterrows():
-        ax.annotate(f"{row['model'][:8]}\n{row['condition'][:6]}",
-                    (row["reasoning"], row["exec_reasoning"]),
-                    fontsize=6, ha="center")
+        ax.annotate(
+            f"{row['model'][:8]}\n{row['condition'][:6]}",
+            (row["reasoning"], row["exec_reasoning"]),
+            fontsize=6,
+            ha="center",
+        )
     plt.colorbar(scatter, label="LEG Rate")
     ax.set_xlabel("Pass Rate (reasoning proxy)")
     ax.set_ylabel("Exec|Reasoning")
@@ -442,6 +505,7 @@ def figure_5_regime_map(case_df, events, output_dir):
 # TABLES
 # ============================================================
 
+
 def table_1_core_metrics(case_df, events, output_dir):
     """Core metrics per model × condition."""
     rows = []
@@ -449,15 +513,17 @@ def table_1_core_metrics(case_df, events, output_dir):
         for cond in sorted(case_df["condition"].unique()):
             subset = case_df[(case_df["model"] == model) & (case_df["condition"] == cond)]
             er = compute_exec_reasoning(events, model, cond)
-            rows.append({
-                "model": model,
-                "condition": cond,
-                "pass_rate": round(subset["pass_rate"].mean(), 4),
-                "leg_rate": round(subset["leg_rate"].mean(), 4),
-                "lucky_fix_rate": round(subset["lucky_fix_rate"].mean(), 4),
-                "exec_reasoning": round(er, 4) if not np.isnan(er) else None,
-                "n_cases": len(subset),
-            })
+            rows.append(
+                {
+                    "model": model,
+                    "condition": cond,
+                    "pass_rate": round(subset["pass_rate"].mean(), 4),
+                    "leg_rate": round(subset["leg_rate"].mean(), 4),
+                    "lucky_fix_rate": round(subset["lucky_fix_rate"].mean(), 4),
+                    "exec_reasoning": round(er, 4) if not np.isnan(er) else None,
+                    "n_cases": len(subset),
+                }
+            )
     pd.DataFrame(rows).to_csv(output_dir / "table_1.csv", index=False)
 
 
@@ -470,16 +536,18 @@ def table_2_intervention_effects(case_df, rng, output_dir):
         for metric in ["pass_rate", "leg_rate", "lucky_fix_rate"]:
             tt = paired_ttest(case_df, model, metric)
             ci = bootstrap_ci(case_df, model, metric, rng)
-            rows.append({
-                "model": model,
-                "metric": metric,
-                "mean_diff": round(tt["mean_diff"], 4),
-                "t_stat": round(tt["t_stat"], 4) if tt["t_stat"] != float("inf") else "inf",
-                "p_value": round(tt["p_value"], 6),
-                "ci_low": round(ci["ci_low"], 4),
-                "ci_high": round(ci["ci_high"], 4),
-                "note": tt.get("note"),
-            })
+            rows.append(
+                {
+                    "model": model,
+                    "metric": metric,
+                    "mean_diff": round(tt["mean_diff"], 4),
+                    "t_stat": round(tt["t_stat"], 4) if tt["t_stat"] != float("inf") else "inf",
+                    "p_value": round(tt["p_value"], 6),
+                    "ci_low": round(ci["ci_low"], 4),
+                    "ci_high": round(ci["ci_high"], 4),
+                    "note": tt.get("note"),
+                }
+            )
             if tt["p_value"] is not None and not np.isnan(tt["p_value"]):
                 p_values.append(tt["p_value"])
 
@@ -502,11 +570,15 @@ def table_3_stability(case_df, events, output_dir):
     df = pd.DataFrame(events)
     df["is_pass"] = df["pass"].astype(bool)
 
-    case_stability = df.groupby(["case_id", "condition"]).agg(
-        pass_var=("is_pass", "var"),
-        pass_mean=("is_pass", "mean"),
-        n_trials=("trial", "nunique"),
-    ).reset_index()
+    case_stability = (
+        df.groupby(["case_id", "condition"])
+        .agg(
+            pass_var=("is_pass", "var"),
+            pass_mean=("is_pass", "mean"),
+            n_trials=("trial", "nunique"),
+        )
+        .reset_index()
+    )
 
     # Disagreement: variance > 0 means not all trials agree
     case_stability["disagreement"] = case_stability["pass_var"] > 0
@@ -517,6 +589,7 @@ def table_3_stability(case_df, events, output_dir):
 # ============================================================
 # MAIN
 # ============================================================
+
 
 def main():
     parser = argparse.ArgumentParser(description="Paper analysis for LEG ablation")
@@ -573,8 +646,11 @@ def main():
                 dod_results[key] = dod
 
                 # Check OLS vs bootstrap agreement on direction
-                ols_interaction_keys = [k for k in ols_result["params"]
-                                        if ":" in k and models[j].replace("-", "") in k.replace("-", "")]
+                ols_interaction_keys = [
+                    k
+                    for k in ols_result["params"]
+                    if ":" in k and models[j].replace("-", "") in k.replace("-", "")
+                ]
                 if ols_interaction_keys:
                     ols_sign = np.sign(ols_result["params"][ols_interaction_keys[0]])
                     boot_sign = np.sign(dod["mean_dod"])

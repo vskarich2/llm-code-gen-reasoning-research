@@ -70,28 +70,48 @@ def classify_failure(error_obj: dict, critique: dict | None) -> dict:
         for ftype, keywords in _CRITIQUE_KEYWORDS.items():
             matched = [kw for kw in keywords if kw in combined]
             if matched:
-                return _result(ftype, 0.8, "rule1_critique_keyword",
-                               critique.get("failure_type"), error_obj.get("category", ""),
-                               matched)
+                return _result(
+                    ftype,
+                    0.8,
+                    "rule1_critique_keyword",
+                    critique.get("failure_type"),
+                    error_obj.get("category", ""),
+                    matched,
+                )
 
     # Rule 2: Error category mapping
     category = error_obj.get("category", "")
     if category in _CATEGORY_MAP:
         ftype, conf = _CATEGORY_MAP[category]
-        return _result(ftype, conf, "rule2_error_category",
-                       critique.get("failure_type") if critique else None,
-                       category, [category])
+        return _result(
+            ftype,
+            conf,
+            "rule2_error_category",
+            critique.get("failure_type") if critique else None,
+            category,
+            [category],
+        )
 
     if category == "runtime":
         message = error_obj.get("message", "")
         for err_type, ftype in _RUNTIME_KEYWORDS.items():
             if err_type in message:
-                return _result(ftype, 0.5, "rule2_runtime_keyword",
-                               critique.get("failure_type") if critique else None,
-                               category, [err_type])
-        return _result("CONFOUNDING_LOGIC", 0.4, "rule2_runtime_default",
-                       critique.get("failure_type") if critique else None,
-                       category, [])
+                return _result(
+                    ftype,
+                    0.5,
+                    "rule2_runtime_keyword",
+                    critique.get("failure_type") if critique else None,
+                    category,
+                    [err_type],
+                )
+        return _result(
+            "CONFOUNDING_LOGIC",
+            0.4,
+            "rule2_runtime_default",
+            critique.get("failure_type") if critique else None,
+            category,
+            [],
+        )
 
     # Rule 3: Keyword scan on error_obj.reasons
     reasons_text = " ".join(error_obj.get("reasons", [])).lower()
@@ -102,18 +122,29 @@ def classify_failure(error_obj: dict, critique: dict | None) -> dict:
         for ftype, keywords in _CRITIQUE_KEYWORDS.items():
             matched = [kw for kw in keywords if kw in combined_text]
             if matched:
-                return _result(ftype, 0.3, "rule3_reason_keyword",
-                               critique.get("failure_type") if critique else None,
-                               category, matched)
+                return _result(
+                    ftype,
+                    0.3,
+                    "rule3_reason_keyword",
+                    critique.get("failure_type") if critique else None,
+                    category,
+                    matched,
+                )
 
     # Rule 4: UNKNOWN fallback
-    return _result("UNKNOWN", 0.0, "rule4_fallback",
-                   critique.get("failure_type") if critique else None,
-                   category, [])
+    return _result(
+        "UNKNOWN",
+        0.0,
+        "rule4_fallback",
+        critique.get("failure_type") if critique else None,
+        category,
+        [],
+    )
 
 
-def _result(failure_type, confidence, rule_path, critique_failure_type,
-            error_category, matched_keywords):
+def _result(
+    failure_type, confidence, rule_path, critique_failure_type, error_category, matched_keywords
+):
     """Build result dict. All fields always present."""
     return {
         "failure_type_final": failure_type,

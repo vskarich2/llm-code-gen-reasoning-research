@@ -1,4 +1,5 @@
 """Tests for leg_evaluator.py — strict parser, LEG computation, bias metric."""
+
 import sys
 import os
 import inspect
@@ -17,10 +18,10 @@ from leg_evaluator import (
 )
 from failure_classifier import FAILURE_TYPES
 
-
 # ============================================================
 # PARSER — VALID INPUTS
 # ============================================================
+
 
 class TestParserValid:
     def test_yes_temporal(self):
@@ -59,6 +60,7 @@ class TestParserValid:
 # ============================================================
 # PARSER — REJECTIONS (STRICT)
 # ============================================================
+
 
 class TestParserRejects:
     def test_rejects_partial(self):
@@ -117,53 +119,77 @@ class TestParserRejects:
 # LEG_true
 # ============================================================
 
+
 class TestLegTrue:
     def test_match(self):
-        e = {"pass": False, "llm_eval_blind_verdict": "YES",
-             "llm_eval_blind_type": "TEMPORAL_ORDERING",
-             "classifier_failure_type": "TEMPORAL_ORDERING"}
+        e = {
+            "pass": False,
+            "llm_eval_blind_verdict": "YES",
+            "llm_eval_blind_type": "TEMPORAL_ORDERING",
+            "classifier_failure_type": "TEMPORAL_ORDERING",
+        }
         assert compute_leg_true(e) is True
 
     def test_type_mismatch(self):
-        e = {"pass": False, "llm_eval_blind_verdict": "YES",
-             "llm_eval_blind_type": "TEMPORAL_ORDERING",
-             "classifier_failure_type": "HIDDEN_DEPENDENCY"}
+        e = {
+            "pass": False,
+            "llm_eval_blind_verdict": "YES",
+            "llm_eval_blind_type": "TEMPORAL_ORDERING",
+            "classifier_failure_type": "HIDDEN_DEPENDENCY",
+        }
         assert compute_leg_true(e) is False
 
     def test_unknown_blocks(self):
-        e = {"pass": False, "llm_eval_blind_verdict": "YES",
-             "llm_eval_blind_type": "UNKNOWN",
-             "classifier_failure_type": "UNKNOWN"}
+        e = {
+            "pass": False,
+            "llm_eval_blind_verdict": "YES",
+            "llm_eval_blind_type": "UNKNOWN",
+            "classifier_failure_type": "UNKNOWN",
+        }
         assert compute_leg_true(e) is False
 
     def test_verdict_no(self):
-        e = {"pass": False, "llm_eval_blind_verdict": "NO",
-             "llm_eval_blind_type": "TEMPORAL_ORDERING",
-             "classifier_failure_type": "TEMPORAL_ORDERING"}
+        e = {
+            "pass": False,
+            "llm_eval_blind_verdict": "NO",
+            "llm_eval_blind_type": "TEMPORAL_ORDERING",
+            "classifier_failure_type": "TEMPORAL_ORDERING",
+        }
         assert compute_leg_true(e) is False
 
     def test_pass_blocks(self):
-        e = {"pass": True, "llm_eval_blind_verdict": "YES",
-             "llm_eval_blind_type": "TEMPORAL_ORDERING",
-             "classifier_failure_type": "TEMPORAL_ORDERING"}
+        e = {
+            "pass": True,
+            "llm_eval_blind_verdict": "YES",
+            "llm_eval_blind_type": "TEMPORAL_ORDERING",
+            "classifier_failure_type": "TEMPORAL_ORDERING",
+        }
         assert compute_leg_true(e) is False
 
     def test_none_verdict(self):
-        e = {"pass": False, "llm_eval_blind_verdict": None,
-             "llm_eval_blind_type": None,
-             "classifier_failure_type": "TEMPORAL_ORDERING"}
+        e = {
+            "pass": False,
+            "llm_eval_blind_verdict": None,
+            "llm_eval_blind_type": None,
+            "classifier_failure_type": "TEMPORAL_ORDERING",
+        }
         assert compute_leg_true(e) is False
 
     def test_missing_classifier(self):
-        e = {"pass": False, "llm_eval_blind_verdict": "YES",
-             "llm_eval_blind_type": "TEMPORAL_ORDERING"}
+        e = {
+            "pass": False,
+            "llm_eval_blind_verdict": "YES",
+            "llm_eval_blind_type": "TEMPORAL_ORDERING",
+        }
         assert compute_leg_true(e) is False
 
     def test_missing_pass_defaults_true(self):
         """If pass key missing, defaults to True via .get(pass, True) → not LEG."""
-        e = {"llm_eval_blind_verdict": "YES",
-             "llm_eval_blind_type": "TEMPORAL_ORDERING",
-             "classifier_failure_type": "TEMPORAL_ORDERING"}
+        e = {
+            "llm_eval_blind_verdict": "YES",
+            "llm_eval_blind_type": "TEMPORAL_ORDERING",
+            "classifier_failure_type": "TEMPORAL_ORDERING",
+        }
         assert compute_leg_true(e) is False
 
 
@@ -171,20 +197,24 @@ class TestLegTrue:
 # reasoning_matches_truth
 # ============================================================
 
+
 class TestReasoningMatchesTruth:
     def test_match(self):
-        e = {"llm_eval_blind_type": "TEMPORAL_ORDERING",
-             "classifier_failure_type": "TEMPORAL_ORDERING"}
+        e = {
+            "llm_eval_blind_type": "TEMPORAL_ORDERING",
+            "classifier_failure_type": "TEMPORAL_ORDERING",
+        }
         assert compute_reasoning_matches_truth(e) is True
 
     def test_mismatch(self):
-        e = {"llm_eval_blind_type": "TEMPORAL_ORDERING",
-             "classifier_failure_type": "HIDDEN_DEPENDENCY"}
+        e = {
+            "llm_eval_blind_type": "TEMPORAL_ORDERING",
+            "classifier_failure_type": "HIDDEN_DEPENDENCY",
+        }
         assert compute_reasoning_matches_truth(e) is False
 
     def test_unknown(self):
-        e = {"llm_eval_blind_type": "UNKNOWN",
-             "classifier_failure_type": "TEMPORAL_ORDERING"}
+        e = {"llm_eval_blind_type": "UNKNOWN", "classifier_failure_type": "TEMPORAL_ORDERING"}
         assert compute_reasoning_matches_truth(e) is False
 
     def test_none(self):
@@ -195,6 +225,7 @@ class TestReasoningMatchesTruth:
 # ============================================================
 # EVALUATOR BIAS
 # ============================================================
+
 
 class TestEvaluatorBias:
     def test_no_bias(self):
@@ -236,12 +267,22 @@ class TestEvaluatorBias:
 # INVARIANT TESTS
 # ============================================================
 
+
 class TestInvariants:
     def test_no_heuristic_in_leg_true(self):
         source = inspect.getsource(compute_leg_true)
-        for word in ["keyword", "latent_signal", "detect_failure_type_from_reasoning",
-                      "regex", "fuzzy", "embedding", "similarity", "ontology",
-                      "alignment", "conditioned"]:
+        for word in [
+            "keyword",
+            "latent_signal",
+            "detect_failure_type_from_reasoning",
+            "regex",
+            "fuzzy",
+            "embedding",
+            "similarity",
+            "ontology",
+            "alignment",
+            "conditioned",
+        ]:
             assert word not in source.lower(), f"forbidden: '{word}' in compute_leg_true"
 
     def test_enum_complete(self):

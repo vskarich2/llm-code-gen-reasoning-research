@@ -62,7 +62,9 @@ def main():
     signal.signal(signal.SIGINT, _signal_handler)
 
     print(f"Dashboard updater started: {len(models)} models, refresh={args.refresh}s")
-    print(f"  total_jobs_per_model = {args.n_cases} × {args.n_conditions} × {args.n_trials} = {total_jobs_per_model}")
+    print(
+        f"  total_jobs_per_model = {args.n_cases} × {args.n_conditions} × {args.n_trials} = {total_jobs_per_model}"
+    )
 
     while not _stop:
         for model in models:
@@ -104,8 +106,10 @@ def main():
             trial_progress = compute_trial_progress(model, ablation_dir, args.n_trials)
             metrics["trial_progress"] = trial_progress
             complete = sum(1 for t in trial_progress if t["status"] == "COMPLETE")
-            metrics["figure_readiness"] = "READY" if complete >= args.n_trials else (
-                "PRELIMINARY" if complete >= 1 else "NOT READY"
+            metrics["figure_readiness"] = (
+                "READY"
+                if complete >= args.n_trials
+                else ("PRELIMINARY" if complete >= 1 else "NOT READY")
             )
             dashboard_path = Path(f"logs/dashboard_{model}.txt")
             write_dashboard(metrics, dashboard_path)

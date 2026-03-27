@@ -7,6 +7,7 @@ Verifies:
   - No case scores 0.5 (all have tests)
   - All V2 failure_modes have reasoning signals
 """
+
 import sys
 import os
 import json
@@ -30,13 +31,15 @@ def _concat_code(case):
 
 
 def _wrap(code):
-    return f'```python\n{code}\n```'
+    return f"```python\n{code}\n```"
 
 
 # ── V2 cases load through runner ──────────────────────────
 
+
 def test_v2_cases_load():
     from runner import load_cases
+
     cases = load_cases(cases_file="cases_v2.json")
     assert len(cases) >= 45
     assert all("code_files_contents" in c for c in cases)
@@ -56,21 +59,26 @@ def test_v2_cases_have_required_fields():
 
 # ── V2 cases route to correct tests ──────────────────────
 
+
 def test_v2_case_has_test_function():
     """Every V2 case must have a loadable test function."""
     from exec_eval import _load_v2_test
+
     cases = _load_v2_cases()
     for c in cases:
         # Skip any migrated v1 trap cases (they use _CASE_TESTS)
         if c.get("family") == "v1_trap":
             continue
         fn = _load_v2_test(c)
-        assert fn is not None, f"No test for {c['id']} (family={c.get('family')}, diff={c.get('difficulty')})"
+        assert (
+            fn is not None
+        ), f"No test for {c['id']} (family={c.get('family')}, diff={c.get('difficulty')})"
 
 
 def test_v2_buggy_code_fails_test():
     """V2 buggy code must FAIL the invariant test."""
     from exec_eval import exec_evaluate
+
     cases = _load_v2_cases()
     # Test a sample from each family
     tested_families = set()
@@ -88,6 +96,7 @@ def test_v2_buggy_code_fails_test():
 def test_v2_reference_fix_passes_test():
     """V2 reference fix must PASS the invariant test."""
     from exec_eval import exec_evaluate
+
     cases = _load_v2_cases()
     tested_families = set()
     for c in cases:
@@ -101,12 +110,15 @@ def test_v2_reference_fix_passes_test():
         if not ref_code:
             continue
         result = exec_evaluate(c, ref_code)
-        assert result["pass"], f"{c['id']}: reference fix should PASS but got {result.get('reasons', [])}"
+        assert result[
+            "pass"
+        ], f"{c['id']}: reference fix should PASS but got {result.get('reasons', [])}"
 
 
 def test_no_v2_case_scores_0_5():
     """No V2 case should get score=0.5 'no test defined'."""
     from exec_eval import exec_evaluate
+
     cases = _load_v2_cases()
     for c in cases:
         if c.get("family") == "v1_trap":
@@ -118,8 +130,10 @@ def test_no_v2_case_scores_0_5():
 
 # ── Reasoning signals exist for all V2 modes ─────────────
 
+
 def test_all_v2_failure_modes_have_signals():
     from evaluator import _REASONING_SIGNALS
+
     cases = _load_v2_cases()
     modes = set(c["failure_mode"] for c in cases if c.get("family") != "v1_trap")
     for mode in modes:

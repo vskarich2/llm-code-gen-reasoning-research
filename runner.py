@@ -15,18 +15,27 @@ import time
 from pathlib import Path
 
 from execution import (
-    build_prompt, run_single, run_repair_loop, run_contract_gated,
+    build_prompt,
+    run_single,
+    run_repair_loop,
+    run_contract_gated,
     run_leg_reduction,
-    init_run_log, close_run_log, get_current_log_path, get_log_write_stats,
+    init_run_log,
+    close_run_log,
+    get_current_log_path,
+    get_log_write_stats,
 )
 from constants import ALL_CONDITIONS, VALID_CONDITIONS, COND_LABELS, RETRY_CONDITIONS
 
 BASE_DIR = Path(__file__).parent
 
+
 def get_eval_model() -> str:
     """Get evaluator model from config. No hardcoded fallback."""
     from experiment_config import get_config
+
     return get_config().models.evaluator.name
+
 
 COND_DESCRIPTIONS = [
     "baseline",
@@ -53,7 +62,7 @@ COND_DESCRIPTIONS = [
     "retry_with_contract",
     "retry_adaptive",
     "retry_alignment",
-    "leg_reduction"
+    "leg_reduction",
 ]
 
 REPAIR_LOOP_MAX_ATTEMPTS = 2
@@ -64,6 +73,7 @@ REPAIR_LOOP_MAX_ATTEMPTS = 2
 # ============================================================
 # LOAD CASES
 # ============================================================
+
 
 def load_cases(case_id: str, cases_file: str) -> list[dict]:
     cases_path = BASE_DIR / cases_file
@@ -88,7 +98,6 @@ def load_cases(case_id: str, cases_file: str) -> list[dict]:
 
 
 def validate_import_consistency(case: dict) -> None:
-
     """Preflight: verify case files have consistent, supported import structure.
 
     Checks:
@@ -175,6 +184,7 @@ def preflight_verify_tests(cases: list[dict]) -> None:
 # launching separate runner.py processes per model/trial).
 # No threads. No ThreadPoolExecutor. No shared mutable state.
 
+
 def _run_one(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
     cid = case["id"]
     _log = __import__("logging").getLogger("t3.runner")
@@ -183,13 +193,17 @@ def _run_one(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
     try:
         result = _run_one_inner(case, model, condition)
         elapsed = __import__("time").monotonic() - t0
-        _log.info("TASK_END case=%s cond=%s elapsed=%.1fs pass=%s",
-                   cid, condition, elapsed, result[2].get("pass"))
+        _log.info(
+            "TASK_END case=%s cond=%s elapsed=%.1fs pass=%s",
+            cid,
+            condition,
+            elapsed,
+            result[2].get("pass"),
+        )
         return result
     except Exception as e:
         elapsed = __import__("time").monotonic() - t0
-        _log.error("TASK_FAILED case=%s cond=%s elapsed=%.1fs error=%s",
-                    cid, condition, elapsed, e)
+        _log.error("TASK_FAILED case=%s cond=%s elapsed=%.1fs error=%s", cid, condition, elapsed, e)
         raise
 
 
@@ -200,14 +214,16 @@ def _run_one_inner(case: dict, model: str, condition: str) -> tuple[str, str, di
         return run_contract_gated(case, model)
     if condition in RETRY_CONDITIONS and condition != "repair_loop":
         from retry_harness import run_retry_harness
+
         return run_retry_harness(case, model, condition=condition, eval_model=get_eval_model())
     if condition == "leg_reduction":
         return run_leg_reduction(case, model)
     return run_single(case, model, condition)
 
 
-def run_all(cases: list[dict], model: str, conditions: list[str],
-            quiet: bool = False) -> list[dict]:
+def run_all(
+    cases: list[dict], model: str, conditions: list[str], quiet: bool = False
+) -> list[dict]:
     """Run all (case, condition) pairs sequentially. No threads.
 
     Parallelism is achieved by launching multiple runner.py processes
@@ -276,6 +292,7 @@ def _print_progress(done: int, total: int, cid: str, cond: str, ev: dict):
 # PRINT RESULTS
 # ============================================================
 
+
 def print_results(results: list[dict], conditions: list[str], model: str):
     total = len(results)
     print(f"\n{'=' * 72}")
@@ -324,8 +341,7 @@ def print_results(results: list[dict], conditions: list[str], model: str):
         print(f"  {r['case_id']:<28} " + " ".join(f"{s:>5}" for s in scores) + f"  {ftype}")
 
     total_gaps = sum(
-        1 for r in results for c in conditions
-        if r.get(c, {}).get("reasoning_action_gap", False)
+        1 for r in results for c in conditions if r.get(c, {}).get("reasoning_action_gap", False)
     )
     if total_gaps:
         print(f"\n  * = reasoning-action gap ({total_gaps} total)")
@@ -334,6 +350,7 @@ def print_results(results: list[dict], conditions: list[str], model: str):
 # ============================================================
 # MAIN
 # ============================================================
+
 
 def validate_experiment_config(cases, conditions, model):
     """Validate experiment configuration before spending API calls."""
@@ -361,6 +378,7 @@ def validate_execution_sanity(results, conditions):
     destroys metadata (no end_time) without saving any data.
     """
     import logging as _logging
+
     _guard_log = _logging.getLogger("t3.runner.sanity")
     from collections import Counter
 
@@ -403,9 +421,7 @@ def validate_execution_sanity(results, conditions):
         )
 
     if categories.get("fail", 0) == total and total >= 10:
-        warnings.append(
-            f"SANITY WARNING: all {total} evals failed. Zero passes."
-        )
+        warnings.append(f"SANITY WARNING: all {total} evals failed. Zero passes.")
 
     for w in warnings:
         _guard_log.warning(w)
@@ -435,6 +451,7 @@ def run_ablation_mode(args):
 
     # All run parameters come from config — the single source of truth
     from experiment_config import get_config as _get_config
+
     _cfg = _get_config()
     run_dir = Path(_cfg.run.run_dir)
     trial = _cfg.run.trial
@@ -443,6 +460,7 @@ def run_ablation_mode(args):
 
     # Conditions and cases come from config ONLY — never from CLI in ablation mode
     from experiment_config import get_config
+
     conditions = list(get_config().conditions.keys())
     for c in conditions:
         if c not in VALID_CONDITIONS:
@@ -453,12 +471,13 @@ def run_ablation_mode(args):
 
     # Limit cases for smoke tests
     if args.max_cases and args.max_cases > 0:
-        cases = cases[:args.max_cases]
+        cases = cases[: args.max_cases]
 
     # PREFLIGHT: verify every case can be evaluated BEFORE spending API calls
     preflight_verify_tests(cases)
 
     from condition_registry import validate_run
+
     validate_run(cases, conditions)
 
     # PREFLIGHT: config sanity
@@ -476,9 +495,9 @@ def run_ablation_mode(args):
 
     # Step 2: Write metadata.json immediately
     try:
-        git_hash = _sp.check_output(
-            ["git", "rev-parse", "HEAD"], stderr=_sp.DEVNULL
-        ).decode().strip()
+        git_hash = (
+            _sp.check_output(["git", "rev-parse", "HEAD"], stderr=_sp.DEVNULL).decode().strip()
+        )
     except Exception:
         git_hash = "unknown"
 
@@ -509,6 +528,7 @@ def run_ablation_mode(args):
 
     # Step 4.5: Initialize call-level logger
     from call_logger import init_call_logger, close_call_logger
+
     init_call_logger(output_dir)
 
     # Step 5: Initialize run logger
@@ -528,11 +548,14 @@ def run_ablation_mode(args):
 
     # Step 7: Verify log integrity
     from execution import get_run_logger
+
     logger = get_run_logger()
     valid, reason = logger.verify_integrity()
     stats = logger.get_stats()
     if valid:
-        print(f"\n  Log verified: {log_path} (run_id={stats['run_id']}, {stats['attempted']} writes OK)")
+        print(
+            f"\n  Log verified: {log_path} (run_id={stats['run_id']}, {stats['attempted']} writes OK)"
+        )
     else:
         print(f"\n  RUN INVALID: {reason}")
 
@@ -540,6 +563,7 @@ def run_ablation_mode(args):
 
     # Step 7.5: Close call logger and record count
     from call_logger import close_call_logger, get_call_count
+
     total_calls = close_call_logger()
     print(f"  Call log: {total_calls} LLM calls logged to {output_dir}/calls/")
 
@@ -559,13 +583,16 @@ def run_ablation_mode(args):
 
 def main():
     parser = argparse.ArgumentParser(description="T3 ablation experiment runner")
-    parser.add_argument("--config", default="configs/default.yaml",
-                        help="Path to experiment YAML config (single source of truth)")
-    parser.add_argument("--case-id", default=None,
-                        help="Filter to a single case by ID")
+    parser.add_argument(
+        "--config",
+        default="configs/default.yaml",
+        help="Path to experiment YAML config (single source of truth)",
+    )
+    parser.add_argument("--case-id", default=None, help="Filter to a single case by ID")
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--max-cases", type=int, default=None,
-                        help="Limit number of cases (for smoke tests)")
+    parser.add_argument(
+        "--max-cases", type=int, default=None, help="Limit number of cases (for smoke tests)"
+    )
     # Kept for detection — hard-fail if used
     parser.add_argument("--model", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--cases", default=None, help=argparse.SUPPRESS)
@@ -578,8 +605,12 @@ def main():
 
     # ── ENFORCE: config is the single source of truth ──
     _config_only_flags = {
-        "--model": args.model, "--cases": args.cases, "--conditions": args.conditions,
-        "--trial": args.trial, "--run-dir": args.run_dir, "--run-id": args.run_id,
+        "--model": args.model,
+        "--cases": args.cases,
+        "--conditions": args.conditions,
+        "--trial": args.trial,
+        "--run-dir": args.run_dir,
+        "--run-id": args.run_id,
     }
     violations = [flag for flag, val in _config_only_flags.items() if val is not None]
     if violations:
@@ -591,14 +622,21 @@ def main():
 
     # ── LOAD CONFIG (single source of truth) ──
     from experiment_config import load_config
+
     config = load_config(args.config)
+
+    # Load prompt registry (must happen after config, before any prompt construction)
+    from prompt_registry import load_prompt_registry
+    load_prompt_registry()
 
     print(f"CONFIG LOADED: {args.config} (sha={config._config_sha256})")
     print(f"  Evaluator model: {config.models.evaluator.name}")
     print(f"  Generation models: {[m.name for m in config.models.generation]}")
     print(f"  Conditions: {list(config.conditions.keys())}")
     print(f"  Output format: {config.execution.output_format}")
-    print(f"  Run: trial={config.run.trial}, run_id={config.run.run_id}, run_dir={config.run.run_dir}")
+    print(
+        f"  Run: trial={config.run.trial}, run_id={config.run.run_id}, run_dir={config.run.run_dir}"
+    )
 
     # ── SINGLE EXECUTION PATH ──
     run_ablation_mode(args)

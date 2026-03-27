@@ -31,13 +31,21 @@ def _load_case(case_id):
 # CROSS-CHECK: bypass exec_evaluate
 # ============================================================
 
+
 class TestEvaluatorCrossCheck:
     """Run reference fix through exec_evaluate AND through a minimal direct harness.
     Assert both agree and both pass."""
 
-    @pytest.mark.parametrize("case_id", ["alias_config_a", "alias_config_b",
-                                          "stale_cache_a", "partial_update_a",
-                                          "mutable_default_a"])
+    @pytest.mark.parametrize(
+        "case_id",
+        [
+            "alias_config_a",
+            "alias_config_b",
+            "stale_cache_a",
+            "partial_update_a",
+            "mutable_default_a",
+        ],
+    )
     def test_cross_check_single_and_multi_file(self, case_id):
         case = _load_case(case_id)
         ref_code = load_reference_code(case)
@@ -67,9 +75,9 @@ class TestEvaluatorCrossCheck:
             f"exec_evaluate failed on reference fix for {case_id}: "
             f"{result_a.get('reasons', [])}"
         )
-        assert passed_b is True, (
-            f"Direct harness failed on reference fix for {case_id}: {reasons_b}"
-        )
+        assert (
+            passed_b is True
+        ), f"Direct harness failed on reference fix for {case_id}: {reasons_b}"
 
     @pytest.mark.parametrize("case_id", ["alias_config_a", "stale_cache_a"])
     def test_cross_check_buggy_code_both_fail(self, case_id):
@@ -84,15 +92,14 @@ class TestEvaluatorCrossCheck:
         mod = load_module_from_code(asm["code"], f"crosscheck_buggy_{case_id}")
         passed_b, _ = test_fn(mod)
 
-        assert result_a["pass"] == passed_b, (
-            f"CROSS-CHECK DIVERGENCE on buggy code for {case_id}"
-        )
+        assert result_a["pass"] == passed_b, f"CROSS-CHECK DIVERGENCE on buggy code for {case_id}"
         assert result_a["pass"] is False
 
 
 # ============================================================
 # EVALUATOR ASSEMBLY CORRECTNESS
 # ============================================================
+
 
 class TestEvaluatorAssembly:
     """Verify assembly doesn't corrupt code for multi-file cases."""

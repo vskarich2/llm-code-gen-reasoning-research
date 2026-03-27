@@ -41,9 +41,11 @@ _VALID_CHANGE_TYPES = frozenset(["add", "modify", "delete"])
 # PROMPT
 # ============================================================
 
+
 def build_leg_reduction_prompt(task: str, code_files: dict[str, str]) -> str:
     """Build the LEG-reduction prompt with full revision trace schema."""
     from prompts import _format_code_files
+
     file_block = _format_code_files(code_files)
 
     return f"""{task}
@@ -132,14 +134,15 @@ RULES:
 # JSON EXTRACTION (reused from old version)
 # ============================================================
 
+
 def _extract_json(raw: str) -> str | None:
     """Extract first balanced JSON object from raw text."""
     text = raw.strip()
-    text = re.sub(r'^```(?:json)?\s*', '', text)
-    text = re.sub(r'\s*```$', '', text)
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
     text = text.strip()
 
-    start = text.find('{')
+    start = text.find("{")
     if start == -1:
         return None
 
@@ -151,7 +154,7 @@ def _extract_json(raw: str) -> str | None:
         if escape_next:
             escape_next = False
             continue
-        if c == '\\' and in_string:
+        if c == "\\" and in_string:
             escape_next = True
             continue
         if c == '"' and not escape_next:
@@ -159,18 +162,19 @@ def _extract_json(raw: str) -> str | None:
             continue
         if in_string:
             continue
-        if c == '{':
+        if c == "{":
             depth += 1
-        elif c == '}':
+        elif c == "}":
             depth -= 1
             if depth == 0:
-                return text[start:i + 1]
+                return text[start : i + 1]
     return None
 
 
 # ============================================================
 # VALIDATION HELPERS
 # ============================================================
+
 
 def _extraction_fail(msg: str) -> dict:
     """Return a result for TRUE code extraction failure.
@@ -228,7 +232,9 @@ def _validate_invariant_entry(inv, idx, prefix):
     if not isinstance(inv["invariant"], str) or not inv["invariant"].strip():
         return f"{prefix}invariants_checked[{idx}].invariant: must be non-empty string"
     if inv["status"] not in _VALID_STATUSES:
-        return f"{prefix}invariants_checked[{idx}].status: must be PASS or FAIL, got {inv['status']!r}"
+        return (
+            f"{prefix}invariants_checked[{idx}].status: must be PASS or FAIL, got {inv['status']!r}"
+        )
     if not isinstance(inv["evidence"], str):
         return f"{prefix}invariants_checked[{idx}].evidence: must be string"
     return None
@@ -267,6 +273,7 @@ def _validate_change_entry(ch, idx, prefix):
 # ============================================================
 # MAIN PARSER
 # ============================================================
+
 
 def parse_leg_reduction_output(raw: str) -> dict:
     """Parse LEG-reduction response: extraction then validation.
@@ -321,6 +328,7 @@ def parse_leg_reduction_output(raw: str) -> dict:
     if not code.strip():
         if json_extraction_failed or parsed is None or not parsed.get("code"):
             from parse import parse_model_response
+
             fallback = parse_model_response(raw)
             fallback_code = fallback.get("code") or ""
             if isinstance(fallback_code, str) and fallback_code.strip():
@@ -333,8 +341,7 @@ def parse_leg_reduction_output(raw: str) -> dict:
     # If still no code: hard extraction failure
     if not code.strip():
         return _extraction_fail(
-            "no_json_object_found" if json_extraction_failed
-            else "code must be non-empty string"
+            "no_json_object_found" if json_extraction_failed else "code must be non-empty string"
         )
 
     # Code extraction succeeded
@@ -392,9 +399,16 @@ def parse_leg_reduction_output(raw: str) -> dict:
             continue
 
         # Required fields — record missing, don't abort
-        for key in ("revision", "verification", "invariants_checked",
-                     "issues_found", "changes_made", "changed_functions",
-                     "code_before", "code_after"):
+        for key in (
+            "revision",
+            "verification",
+            "invariants_checked",
+            "issues_found",
+            "changes_made",
+            "changed_functions",
+            "code_before",
+            "code_after",
+        ):
             if key not in rev:
                 errors.append(f"{prefix}missing '{key}'")
 
@@ -463,21 +477,28 @@ def parse_leg_reduction_output(raw: str) -> dict:
                     if err:
                         errors.append(err)
             else:
-                errors.append(f"{prefix}changes_made: must be list or null, got {type(changes).__name__}")
+                errors.append(
+                    f"{prefix}changes_made: must be list or null, got {type(changes).__name__}"
+                )
 
             # No-op detection
             cb = rev.get("code_before", "")
             ca = rev.get("code_after", "")
             if isinstance(cb, str) and isinstance(ca, str) and cb == ca:
                 if not changes:
-                    errors.append(f"{prefix}no-op revision: code_before == code_after with no changes_made")
+                    errors.append(
+                        f"{prefix}no-op revision: code_before == code_after with no changes_made"
+                    )
 
             # Fake iteration detection
             if changes and isinstance(changes, list) and len(changes) > 0:
                 if len(rev.get("issues_found", [])) == 0 and ri > 0:
                     prev_issues = revision_history[ri - 1].get("issues_found", [])
-                    prev_fails = [v for v in revision_history[ri - 1].get("verification", [])
-                                  if v.get("status") == "FAIL"]
+                    prev_fails = [
+                        v
+                        for v in revision_history[ri - 1].get("verification", [])
+                        if v.get("status") == "FAIL"
+                    ]
                     if len(prev_issues) == 0 and len(prev_fails) == 0:
                         errors.append(
                             f"{prefix}unjustified changes: changes_made has entries "
@@ -521,15 +542,15 @@ def parse_leg_reduction_output(raw: str) -> dict:
     # --- Top-level code == last revision code_after ---
     last_code_after = revision_history[-1].get("code_after", "") if revision_history else ""
     if revision_history and code.strip() != last_code_after.strip():
-        errors.append(
-            "top-level code does not match revision_history[-1].code_after"
-        )
+        errors.append("top-level code does not match revision_history[-1].code_after")
 
     # --- If multiple revisions, revision 0 must have had failures ---
     if len(revision_history) > 1:
         rev0 = revision_history[0]
         rev0_fails = [v for v in rev0.get("verification", []) if v.get("status") == "FAIL"]
-        rev0_inv_fails = [i for i in rev0.get("invariants_checked", []) if i.get("status") == "FAIL"]
+        rev0_inv_fails = [
+            i for i in rev0.get("invariants_checked", []) if i.get("status") == "FAIL"
+        ]
         rev0_issues = rev0.get("issues_found", [])
         if not rev0_fails and not rev0_inv_fails and not rev0_issues:
             errors.append(
@@ -555,14 +576,14 @@ def parse_leg_reduction_output(raw: str) -> dict:
 
     result = {
         # PHASE 1 result: code extraction
-        "parse_error": None,               # None because code WAS extracted
+        "parse_error": None,  # None because code WAS extracted
         "code_extracted": code_extracted,
         "extraction_source": extraction_source,
         # PHASE 2 result: metadata validation
         "valid": len(errors) == 0,
         "schema_compliant": len(errors) == 0,
         "schema_violations": errors,
-        "validation_errors": errors,       # backward compat alias
+        "validation_errors": errors,  # backward compat alias
         "violations": violations,
         "validity_score": validity_score,
         # Extracted fields
@@ -579,20 +600,27 @@ def parse_leg_reduction_output(raw: str) -> dict:
     if errors:
         # Metadata errors go to schema_violations, NOT parse_error.
         # parse_error stays None because code extraction succeeded.
-        _log.info("LEG-reduction schema violations (%d, validity=%.2f): %s",
-                  len(errors), validity_score, errors[:3])
+        _log.info(
+            "LEG-reduction schema violations (%d, validity=%.2f): %s",
+            len(errors),
+            validity_score,
+            errors[:3],
+        )
 
     if not all_verified:
         unimplemented = [v for v in verification if v.get("status") == "FAIL"]
         _log.warning(
             "LEG-reduction: %d/%d steps FAIL after %d revisions",
-            len(unimplemented), len(verification), internal_revisions
+            len(unimplemented),
+            len(verification),
+            internal_revisions,
         )
 
     if exceeded:
         _log.warning(
             "LEG-reduction: exceeded max revisions (%d > %d)",
-            internal_revisions, MAX_INTERNAL_REVISIONS
+            internal_revisions,
+            MAX_INTERNAL_REVISIONS,
         )
 
     return result

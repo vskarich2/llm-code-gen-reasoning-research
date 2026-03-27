@@ -5,9 +5,11 @@ T1.2: Known broken output fails
 T2.4: Mutation perturbation breaks invariants
 T2.7: Runtime error during invariant is surfaced
 """
+
 import sys
 import os
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault("OPENAI_API_KEY", "sk-dummy")
 
@@ -16,14 +18,17 @@ from exec_eval import exec_evaluate
 
 BASE = Path(__file__).resolve().parents[1]
 
+
 def _load_cases():
     return json.loads((BASE / "cases.json").read_text())
+
 
 def _concat_reference(case):
     parts = []
     for fp in case["code_files"]:
         parts.append((BASE / fp).read_text().strip())
     return "\n\n".join(parts)
+
 
 def _wrap(code):
     return f"```python\n{code}\n```"
@@ -33,18 +38,32 @@ def _wrap(code):
 
 # Cases whose REFERENCE code is intentionally buggy (the trap IS the original code)
 EXPECTED_FAIL_CASES = {
-    "invariant_partial_fail", "partial_rollback_multi",
+    "invariant_partial_fail",
+    "partial_rollback_multi",
     # Diagnostic probe cases — reference code contains the bug by design
-    "retry_ack_duplication", "conservation_partial_refund",
-    "alias_mutation_shadow", "lock_then_publish_order",
+    "retry_ack_duplication",
+    "conservation_partial_refund",
+    "alias_mutation_shadow",
+    "lock_then_publish_order",
     # Difficulty ladder — all levels contain the bug
-    "retry_ack_easy", "retry_ack_medium", "retry_ack_hard",
-    "conservation_easy", "conservation_medium", "conservation_hard",
-    "alias_easy", "alias_medium", "alias_hard",
-    "publish_order_easy", "publish_order_medium", "publish_order_hard",
+    "retry_ack_easy",
+    "retry_ack_medium",
+    "retry_ack_hard",
+    "conservation_easy",
+    "conservation_medium",
+    "conservation_hard",
+    "alias_easy",
+    "alias_medium",
+    "alias_hard",
+    "publish_order_easy",
+    "publish_order_medium",
+    "publish_order_hard",
     # Trivial difficulty — reference code contains the bug
-    "retry_ack_trivial", "alias_trivial", "publish_order_trivial",
+    "retry_ack_trivial",
+    "alias_trivial",
+    "publish_order_trivial",
 }
+
 
 def test_reference_code_passes_own_invariants():
     """For each case: concat reference files → exec_evaluate → passes (except intentionally buggy ones)."""
@@ -65,6 +84,7 @@ def test_reference_code_passes_own_invariants():
 
 
 # ── T1.2: Known broken output fails ─────────────────────────
+
 
 def test_known_broken_hidden_dep():
     """Mock baseline for hidden_dep uses refresh_user_snapshot → must fail."""
@@ -129,6 +149,7 @@ def test_known_broken_temporal():
 
 # ── T2.4: Mutation perturbation breaks invariant ─────────────
 
+
 def test_mutation_remove_commit_breaks_state_pipeline():
     """Removing commit(st) from reference code must cause failure."""
     cases = _load_cases()
@@ -146,6 +167,7 @@ def test_mutation_swap_cache_breaks_hidden_dep():
     cache_put_if_absent won't overwrite → Bob is lost, cache still shows Alice.
     """
     from exec_eval import load_module_from_code, _strip_local_imports, _load_v2_test
+
     cases = _load_cases()
     case = [c for c in cases if c["id"] == "hidden_dep_multihop"][0]
     test_fn = _load_v2_test(case)
@@ -153,8 +175,8 @@ def test_mutation_swap_cache_breaks_hidden_dep():
     ref = _concat_reference(case)
     # Change sync_user_to_cache to use put_if_absent (won't overwrite)
     mutated = ref.replace(
-        "def sync_user_to_cache(user):\n    cache_put(f\"user:{user['id']}\", user[\"name\"])",
-        "def sync_user_to_cache(user):\n    cache_put_if_absent(f\"user:{user['id']}\", user[\"name\"])",
+        'def sync_user_to_cache(user):\n    cache_put(f"user:{user[\'id\']}", user["name"])',
+        'def sync_user_to_cache(user):\n    cache_put_if_absent(f"user:{user[\'id\']}", user["name"])',
     )
     cleaned = _strip_local_imports(mutated)
     mod = load_module_from_code(cleaned, "mut_hidden_dep")
@@ -163,6 +185,7 @@ def test_mutation_swap_cache_breaks_hidden_dep():
 
 
 # ── T2.7: Runtime error during invariant ─────────────────────
+
 
 def test_runtime_error_during_invariant():
     """Code that raises during invariant test → status=error, not silent pass."""
@@ -177,7 +200,11 @@ def test_runtime_error_during_invariant():
     result = exec_evaluate(case, crashing)
     assert not result["pass"]
     ex = result.get("execution", {})
-    assert ex.get("status") == "error" or "crash" in str(result.get("reasons", "")).lower() or not ex.get("invariant_pass", True)
+    assert (
+        ex.get("status") == "error"
+        or "crash" in str(result.get("reasons", "")).lower()
+        or not ex.get("invariant_pass", True)
+    )
 
 
 if __name__ == "__main__":

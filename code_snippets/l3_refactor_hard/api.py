@@ -19,6 +19,7 @@ def update(prev_state, new_entries):
 def preview(entries):
     from state import make_state
     from reducers import normalize, collapse, stage, project
+
     st = make_state(entries)
     cleaned = normalize(st["raw"])
     merged = collapse(cleaned)

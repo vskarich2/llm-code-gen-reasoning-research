@@ -70,7 +70,7 @@ def _next_call_id() -> int:
 
 def _sanitize_path(name: str) -> str:
     """Replace non-filesystem-safe characters."""
-    return re.sub(r'[^a-zA-Z0-9._-]', '_', name)
+    return re.sub(r"[^a-zA-Z0-9._-]", "_", name)
 
 
 # ============================================================
@@ -103,6 +103,7 @@ def _consume_context() -> dict:
 # ============================================================
 # CORE: emit_call — ONE function, ONE entry point
 # ============================================================
+
 
 def emit_call(
     model: str,

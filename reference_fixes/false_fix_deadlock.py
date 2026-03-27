@@ -71,10 +71,14 @@ def sequential_transfers():
     reset()
     lock_ab, do_ab = make_transfer_a_to_b_steps(10)
     lock_ba, do_ba = make_transfer_b_to_a_steps(10)
-    run_steps([
-        (lock_ab, ()), (do_ab, ()),
-        (lock_ba, ()), (do_ba, ()),
-    ])
+    run_steps(
+        [
+            (lock_ab, ()),
+            (do_ab, ()),
+            (lock_ba, ()),
+            (do_ba, ()),
+        ]
+    )
     return get_state()
 
 
@@ -83,12 +87,14 @@ def interleaved_transfers():
     lock_ab, do_ab = make_transfer_a_to_b_steps(10)
     lock_ba, do_ba = make_transfer_b_to_a_steps(10)
     try:
-        run_steps([
-            (lock_ab, ()),
-            (lock_ba, ()),
-            (do_ab, ()),
-            (do_ba, ()),
-        ])
+        run_steps(
+            [
+                (lock_ab, ()),
+                (lock_ba, ()),
+                (do_ab, ()),
+                (do_ba, ()),
+            ]
+        )
         return get_state()
     except RuntimeError as e:
         return {"error": str(e)}

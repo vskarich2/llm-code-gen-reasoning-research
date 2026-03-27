@@ -23,8 +23,7 @@ def test_a(mod):
 
     if len(q2) != 1:
         return False, [
-            f"second enqueue() leaked state: got {len(q2)} items, expected 1. "
-            f"queue={q2!r}"
+            f"second enqueue() leaked state: got {len(q2)} items, expected 1. " f"queue={q2!r}"
         ]
 
     if q2[0]["name"] != "beta":
@@ -56,10 +55,7 @@ def test_b(mod):
         ]
 
     if len(r2) != 2:
-        return False, [
-            f"second batch processed {len(r2)} tasks, expected 2. "
-            f"results={r2!r}"
-        ]
+        return False, [f"second batch processed {len(r2)} tasks, expected 2. " f"results={r2!r}"]
 
     return True, ["process_batch() seen set is fresh each call"]
 
@@ -109,8 +105,6 @@ def test_c(mod):
         ]
 
     if len(one_hist) != 2:
-        return False, [
-            f"schedule_one history wrong: {len(one_hist)} entries, expected 2"
-        ]
+        return False, [f"schedule_one history wrong: {len(one_hist)} entries, expected 2"]
 
     return True, ["each decorated function has independent history"]

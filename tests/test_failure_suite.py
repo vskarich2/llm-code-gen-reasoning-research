@@ -9,6 +9,7 @@ Validates that the system correctly FAILS when it should:
   - runtime errors surfaced
   - results are structured and deterministic
 """
+
 import sys
 import os
 import json
@@ -23,9 +24,7 @@ BASE = Path(__file__).resolve().parents[1]
 def _load_case(case_id):
     cases = json.loads((BASE / "cases.json").read_text())
     for c in cases:
-        c["code_files_contents"] = {
-            fp: (BASE / fp).read_text().strip() for fp in c["code_files"]
-        }
+        c["code_files_contents"] = {fp: (BASE / fp).read_text().strip() for fp in c["code_files"]}
     return [c for c in cases if c["id"] == case_id][0]
 
 
@@ -40,16 +39,24 @@ def _wrap(code):
 def _make_parsed(code, reasoning="", raw_output=None):
     if raw_output is None:
         raw_output = code
-    return {"code": code, "reasoning": reasoning, "raw_output": raw_output, "parse_error": None, "_raw_fallback": False}
+    return {
+        "code": code,
+        "reasoning": reasoning,
+        "raw_output": raw_output,
+        "parse_error": None,
+        "_raw_fallback": False,
+    }
 
 
 # ════════════════════════════════════════════════════════════
 # 1. EXECUTION ENFORCEMENT
 # ════════════════════════════════════════════════════════════
 
+
 def test_execution_is_not_skipped():
     """evaluate_output MUST actually execute code, not just pattern-match."""
     from evaluator import evaluate_output
+
     case = _load_case("l3_state_pipeline")
     ref = _concat_ref(case)
     parsed = _make_parsed(ref, raw_output=_wrap(ref))
@@ -60,25 +67,25 @@ def test_execution_is_not_skipped():
 def test_execution_runs_on_every_case():
     """Every case with reference code triggers real execution."""
     from evaluator import evaluate_output
+
     cases = json.loads((BASE / "cases.json").read_text())
     for c in cases:
-        c["code_files_contents"] = {
-            fp: (BASE / fp).read_text().strip() for fp in c["code_files"]
-        }
+        c["code_files_contents"] = {fp: (BASE / fp).read_text().strip() for fp in c["code_files"]}
         ref = _concat_ref(c)
         parsed = _make_parsed(ref, raw_output=_wrap(ref))
         result = evaluate_output(c, parsed)
-        assert result.get("execution", {}).get("ran") is True, \
-            f"{c['id']}: execution not ran"
+        assert result.get("execution", {}).get("ran") is True, f"{c['id']}: execution not ran"
 
 
 # ════════════════════════════════════════════════════════════
 # 2. FALSE POSITIVE REJECTION
 # ════════════════════════════════════════════════════════════
 
+
 def test_false_positive_state_pipeline():
     """Code that looks clean but removes commit() must FAIL."""
     from evaluator import evaluate_output
+
     case = _load_case("l3_state_pipeline")
     reasoning = "Simplified the pipeline by removing redundant steps."
     code = (
@@ -104,6 +111,7 @@ def test_false_positive_state_pipeline():
 def test_false_positive_temporal():
     """Stats computed on cleaned data must FAIL (looks plausible, semantically wrong)."""
     from evaluator import evaluate_output
+
     case = _load_case("temporal_semantic_drift")
     code = (
         "def normalize(d):\n    m=max(d)\n    return [x/m for x in d]\n"
@@ -126,9 +134,11 @@ def test_false_positive_temporal():
 # 3. REASONING-ACTION GAP (3 cases)
 # ════════════════════════════════════════════════════════════
 
+
 def test_gap_hidden_dependency():
     """Correct reasoning ('always overwrite', 'stale') + wrong code → gap."""
     from evaluator import evaluate_output
+
     case = _load_case("hidden_dep_multihop")
     reasoning = (
         "sync_user_to_cache always overwrites via cache_put. "
@@ -150,6 +160,7 @@ def test_gap_hidden_dependency():
 def test_gap_temporal_ordering():
     """Correct reasoning ('original data') + stats on wrong data → gap."""
     from evaluator import evaluate_output
+
     case = _load_case("temporal_semantic_drift")
     reasoning = "compute_raw_stats must use original data, not normalized."
     code = (
@@ -174,6 +185,7 @@ def test_gap_temporal_ordering():
 def test_gap_state_pipeline():
     """Mentions 'frozen', 'get_committed_total' + removes commit → gap."""
     from evaluator import evaluate_output
+
     case = _load_case("l3_state_pipeline")
     reasoning = "commit() sets frozen=True. get_committed_total returns None when frozen is False."
     code = (
@@ -200,9 +212,11 @@ def test_gap_state_pipeline():
 # 4. INVARIANT STRENGTH (MUTATIONS)
 # ════════════════════════════════════════════════════════════
 
+
 def test_mutation_remove_commit():
     """Removing commit(st) from reference code must be caught."""
     from exec_eval import exec_evaluate
+
     case = _load_case("l3_state_pipeline")
     ref = _concat_ref(case)
     mutated = ref.replace("    commit(st)\n", "")
@@ -214,13 +228,14 @@ def test_mutation_swap_cache_semantics():
     """Changing cache_put to cache_put_if_absent breaks overwrite on re-save."""
     from exec_eval import load_module_from_code, _load_v2_test
     from parse import strip_local_imports
+
     case = _load_case("hidden_dep_multihop")
     test_fn = _load_v2_test(case)
     assert test_fn is not None, "No test function for hidden_dep_multihop"
     ref = _concat_ref(case)
     mutated = ref.replace(
-        "def sync_user_to_cache(user):\n    cache_put(f\"user:{user['id']}\", user[\"name\"])",
-        "def sync_user_to_cache(user):\n    cache_put_if_absent(f\"user:{user['id']}\", user[\"name\"])",
+        'def sync_user_to_cache(user):\n    cache_put(f"user:{user[\'id\']}", user["name"])',
+        'def sync_user_to_cache(user):\n    cache_put_if_absent(f"user:{user[\'id\']}", user["name"])',
     )
     mod = load_module_from_code(strip_local_imports(mutated), "mut_cache")
     passed, _ = test_fn(mod)
@@ -230,6 +245,7 @@ def test_mutation_swap_cache_semantics():
 def test_mutation_reorder_stats():
     """Moving compute_raw_stats after normalize must be caught."""
     from exec_eval import exec_evaluate
+
     case = _load_case("temporal_semantic_drift")
     ref = _concat_ref(case)
     # Move raw_stats after transforms
@@ -248,9 +264,11 @@ def test_mutation_reorder_stats():
 # 5. RUNTIME ERROR HANDLING
 # ════════════════════════════════════════════════════════════
 
+
 def test_runtime_error_surfaced():
     """Code that raises during invariant test → error status, not silent pass."""
     from exec_eval import exec_evaluate
+
     case = _load_case("l3_state_pipeline")
     crashing = _wrap(
         "def make_state(e): raise RuntimeError('test crash')\n"
@@ -266,6 +284,7 @@ def test_runtime_error_surfaced():
 def test_syntax_error_surfaced():
     """Syntactically invalid code → clear error."""
     from exec_eval import exec_evaluate
+
     case = _load_case("l3_state_pipeline")
     r = exec_evaluate(case, "def f(:\n    pass")
     assert r["pass"] is False
@@ -276,9 +295,11 @@ def test_syntax_error_surfaced():
 # 6. PARSER ROBUSTNESS
 # ════════════════════════════════════════════════════════════
 
+
 def test_parser_no_code_block():
     """Plain text with no code fences → code extracted from raw."""
     from parse import parse_model_response
+
     r = parse_model_response("def hello(): return 42")
     assert r["code"] is not None
     assert len(r["code"]) > 0
@@ -288,6 +309,7 @@ def test_parser_no_code_block():
 def test_parser_multiple_blocks_selects_last():
     """When multiple python blocks exist, use the LAST one."""
     from parse import extract_code
+
     text = (
         "First try:\n```python\nresult = 'wrong'\n```\n"
         "Better:\n```python\nresult = 'correct'\n```\n"
@@ -300,6 +322,7 @@ def test_parser_multiple_blocks_selects_last():
 def test_parser_malformed_json():
     """Broken JSON must not crash — returns parse_error."""
     from parse import parse_model_response
+
     r = parse_model_response('{"reasoning": "x", "code":')
     assert r["parse_error"] is not None
 
@@ -307,6 +330,7 @@ def test_parser_malformed_json():
 def test_parser_mixed_text_and_code():
     """Reasoning text + code block → both extracted."""
     from parse import parse_model_response
+
     text = "The issue is the frozen flag.\n\n```python\ndef f(): return 1\n```\nDone."
     r = parse_model_response(text)
     assert "return 1" in r["code"]
@@ -316,6 +340,7 @@ def test_parser_mixed_text_and_code():
 def test_parser_json_valid():
     """Valid JSON response → clean extraction, no parse error."""
     from parse import parse_model_response
+
     r = parse_model_response('{"reasoning": "ok", "code": "x = 1"}')
     assert r["code"] == "x = 1"
     assert r["parse_error"] is None
@@ -325,9 +350,11 @@ def test_parser_json_valid():
 # 7. RESULT STRUCTURE
 # ════════════════════════════════════════════════════════════
 
+
 def test_result_has_execution_fields():
     """Every evaluation result must have structured execution info."""
     from evaluator import evaluate_output
+
     case = _load_case("l3_state_pipeline")
     ref = _concat_ref(case)
     parsed = _make_parsed(ref, raw_output=_wrap(ref))
@@ -340,6 +367,7 @@ def test_result_has_execution_fields():
 def test_result_has_alignment():
     """Every evaluation result must have alignment classification."""
     from evaluator import evaluate_output
+
     case = _load_case("l3_state_pipeline")
     ref = _concat_ref(case)
     parsed = _make_parsed(ref, raw_output=_wrap(ref))
@@ -353,9 +381,11 @@ def test_result_has_alignment():
 # 8. DETERMINISM
 # ════════════════════════════════════════════════════════════
 
+
 def test_deterministic_same_input():
     """Same case + same output → identical scores."""
     from evaluator import evaluate_output
+
     case = _load_case("l3_state_pipeline")
     ref = _concat_ref(case)
     parsed = _make_parsed(ref, raw_output=_wrap(ref))
@@ -370,9 +400,11 @@ def test_deterministic_same_input():
 # 9. FULL PIPELINE
 # ════════════════════════════════════════════════════════════
 
+
 def test_full_pipeline_baseline():
     """Full pipeline (mock LLM) produces structured result."""
     from execution import run_single
+
     case = _load_case("l3_state_pipeline")
     cid, cond, ev = run_single(case, "gpt-4.1-nano", "baseline")
     assert cid == "l3_state_pipeline"
@@ -387,18 +419,28 @@ def test_full_pipeline_baseline():
 # 10. ALL CONDITIONS EXECUTE
 # ════════════════════════════════════════════════════════════
 
+
 def test_all_conditions_no_crash():
     """Every condition runs without exception on one case."""
     from runner import ALL_CONDITIONS
     from execution import run_single, run_repair_loop
+
     case = _load_case("l3_state_pipeline")
     scores = {}
-    _SPECIAL_CONDITIONS = {"repair_loop", "contract_gated", "retry_no_contract", "retry_with_contract", "retry_adaptive", "retry_alignment"}
+    _SPECIAL_CONDITIONS = {
+        "repair_loop",
+        "contract_gated",
+        "retry_no_contract",
+        "retry_with_contract",
+        "retry_adaptive",
+        "retry_alignment",
+    }
     for cond in ALL_CONDITIONS:
         if cond == "repair_loop":
             _, _, ev = run_repair_loop(case, "gpt-4.1-nano")
         elif cond in _SPECIAL_CONDITIONS:
             from runner import _run_one
+
             _, _, ev = _run_one(case, "gpt-4.1-nano", cond)
         else:
             _, _, ev = run_single(case, "gpt-4.1-nano", cond)

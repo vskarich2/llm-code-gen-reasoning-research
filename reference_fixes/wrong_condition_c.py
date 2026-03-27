@@ -3,8 +3,7 @@
 from policy import is_expired, is_under_limit, is_exempt
 
 
-def should_allow(client_id, count, limit, timestamp, now,
-                 window_seconds, exempt_list):
+def should_allow(client_id, count, limit, timestamp, now, window_seconds, exempt_list):
     """Decide whether to allow a request.
 
     Allow if:

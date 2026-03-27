@@ -18,14 +18,10 @@ def test_a(mod):
         ]
 
     if raw_stats["raw_min"] != 10:
-        return False, [
-            f"raw_min={raw_stats['raw_min']}, expected 10"
-        ]
+        return False, [f"raw_min={raw_stats['raw_min']}, expected 10"]
 
     if raw_stats["raw_sum"] != 190:
-        return False, [
-            f"raw_sum={raw_stats['raw_sum']}, expected 190"
-        ]
+        return False, [f"raw_sum={raw_stats['raw_sum']}, expected 190"]
 
     return True, ["raw_stats correctly reflect original data"]
 
@@ -43,14 +39,10 @@ def test_b(mod):
         ]
 
     if raw_stats["raw_min"] != 100:
-        return False, [
-            f"raw_min={raw_stats['raw_min']}, expected 100"
-        ]
+        return False, [f"raw_min={raw_stats['raw_min']}, expected 100"]
 
     if raw_stats["raw_sum"] != 1500:
-        return False, [
-            f"raw_sum={raw_stats['raw_sum']}, expected 1500"
-        ]
+        return False, [f"raw_sum={raw_stats['raw_sum']}, expected 1500"]
 
     return True, ["raw_stats correctly reflect original data across modules"]
 
@@ -68,18 +60,12 @@ def test_c(mod):
         ]
 
     if raw_stats["raw_min"] != 15:
-        return False, [
-            f"raw_min={raw_stats['raw_min']}, expected 15"
-        ]
+        return False, [f"raw_min={raw_stats['raw_min']}, expected 15"]
 
     if raw_stats["raw_sum"] != 330:
-        return False, [
-            f"raw_sum={raw_stats['raw_sum']}, expected 330"
-        ]
+        return False, [f"raw_sum={raw_stats['raw_sum']}, expected 330"]
 
     if raw_stats.get("raw_count") != 5:
-        return False, [
-            f"raw_count={raw_stats.get('raw_count')}, expected 5"
-        ]
+        return False, [f"raw_count={raw_stats.get('raw_count')}, expected 5"]
 
     return True, ["raw_stats correctly reflect original data in 4-stage pipeline"]

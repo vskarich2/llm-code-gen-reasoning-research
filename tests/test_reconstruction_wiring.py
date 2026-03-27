@@ -67,6 +67,7 @@ def _simulate_file_dict_pipeline(case, code_content):
 # BEHAVIORAL: reference fix through file_dict pipeline must PASS
 # ============================================================
 
+
 class TestFileDict:
 
     def test_single_file_reference_fix_passes(self):
@@ -115,12 +116,14 @@ class TestFileDict:
         code, recon = _simulate_file_dict_pipeline(case, ref_code)
         assert recon.status == "SUCCESS"
         # The unchanged file's content should NOT be in the wired code
-        unchanged_file = [f for f in case["code_files"]
-                          if f != case["reference_fix"]["file"]][0]
+        unchanged_file = [f for f in case["code_files"] if f != case["reference_fix"]["file"]][0]
         unchanged_content = case["code_files_contents"][unchanged_file]
         # Check a distinctive line from the unchanged file
-        first_func = [l for l in unchanged_content.splitlines()
-                       if l.startswith("def ")][0] if any(l.startswith("def ") for l in unchanged_content.splitlines()) else None
+        first_func = (
+            [l for l in unchanged_content.splitlines() if l.startswith("def ")][0]
+            if any(l.startswith("def ") for l in unchanged_content.splitlines())
+            else None
+        )
         if first_func:
             assert first_func not in code, (
                 f"Unchanged file content found in wired code — "
@@ -132,13 +135,20 @@ class TestFileDict:
 # EQUIVALENCE-AGAINST-ORACLE
 # ============================================================
 
+
 class TestEquivalenceAgainstOracle:
     """Compare changed-files-only path against direct reference fix (oracle)."""
 
-    @pytest.mark.parametrize("case_id", [
-        "alias_config_a", "alias_config_b", "stale_cache_a",
-        "partial_update_a", "mutable_default_a",
-    ])
+    @pytest.mark.parametrize(
+        "case_id",
+        [
+            "alias_config_a",
+            "alias_config_b",
+            "stale_cache_a",
+            "partial_update_a",
+            "mutable_default_a",
+        ],
+    )
     def test_reconstruction_matches_oracle(self, case_id):
         case = _load_case(case_id)
         ref_code_direct = load_reference_code(case)
@@ -165,6 +175,7 @@ class TestEquivalenceAgainstOracle:
 # REAL RESPONSE FIXTURES
 # ============================================================
 
+
 class TestRealResponseFixtures:
     """Parse actual model responses through the real pipeline."""
 
@@ -175,17 +186,21 @@ class TestRealResponseFixtures:
 
     def test_baseline_fixture_parses(self, fixtures):
         """Real baseline response parses as file_dict."""
-        fx = next(f for f in fixtures if f["condition"] == "baseline"
-                  and f["case_id"] == "alias_config_a")
-        parsed = parse_model_response(fx["raw_response"])
-        assert parsed["response_format"] in ("file_dict", "code_dict", "json_direct"), (
-            f"Unexpected format: {parsed['response_format']}"
+        fx = next(
+            f for f in fixtures if f["condition"] == "baseline" and f["case_id"] == "alias_config_a"
         )
+        parsed = parse_model_response(fx["raw_response"])
+        assert parsed["response_format"] in (
+            "file_dict",
+            "code_dict",
+            "json_direct",
+        ), f"Unexpected format: {parsed['response_format']}"
 
     def test_leg_reduction_fixture_parses(self, fixtures):
         """Real leg_reduction response parses with code field."""
         fx = next(f for f in fixtures if f["condition"] == "leg_reduction")
         from leg_reduction import parse_leg_reduction_output
+
         lr_parsed = parse_leg_reduction_output(fx["raw_response"])
         assert lr_parsed["code"] is not None
         assert isinstance(lr_parsed["code"], str)
@@ -193,8 +208,9 @@ class TestRealResponseFixtures:
 
     def test_baseline_fixture_executes(self, fixtures):
         """Real baseline response through reconstruction → ran=True."""
-        fx = next(f for f in fixtures if f["condition"] == "baseline"
-                  and f["case_id"] == "alias_config_a")
+        fx = next(
+            f for f in fixtures if f["condition"] == "baseline" and f["case_id"] == "alias_config_a"
+        )
         case = _load_case("alias_config_a")
         parsed = parse_model_response(fx["raw_response"])
 
@@ -211,25 +227,27 @@ class TestRealResponseFixtures:
             code = parsed.get("code", "")
 
         result = exec_evaluate(case, code)
-        assert result["execution"]["ran"] is True, (
-            f"Real baseline fixture did not run: {result.get('reasons')}"
-        )
+        assert (
+            result["execution"]["ran"] is True
+        ), f"Real baseline fixture did not run: {result.get('reasons')}"
 
     def test_leg_reduction_fixture_executes(self, fixtures):
         """Real leg_reduction response → ran=True."""
         fx = next(f for f in fixtures if f["condition"] == "leg_reduction")
         case = _load_case("alias_config_a")
         from leg_reduction import parse_leg_reduction_output
+
         lr_parsed = parse_leg_reduction_output(fx["raw_response"])
         result = exec_evaluate(case, lr_parsed["code"])
-        assert result["execution"]["ran"] is True, (
-            f"Real leg_reduction fixture did not run: {result.get('reasons')}"
-        )
+        assert (
+            result["execution"]["ran"] is True
+        ), f"Real leg_reduction fixture did not run: {result.get('reasons')}"
 
 
 # ============================================================
 # BOTH CODE PATHS EXECUTE
 # ============================================================
+
 
 class TestBothPathsExecute:
     """Baseline (file_dict) and leg_reduction (flat string) both produce executable code."""
@@ -253,6 +271,7 @@ class TestBothPathsExecute:
 # ============================================================
 # RECONSTRUCTION FAILURE HANDLING
 # ============================================================
+
 
 class TestReconstructionFailures:
 

@@ -28,8 +28,9 @@ def register(operator: NudgeOperator):
 def get(name: str) -> NudgeOperator:
     """Retrieve a registered operator. Raises KeyError if not found."""
     if name not in _REGISTRY:
-        raise KeyError(f"No operator registered with name {name!r}. "
-                       f"Available: {list(_REGISTRY.keys())}")
+        raise KeyError(
+            f"No operator registered with name {name!r}. " f"Available: {list(_REGISTRY.keys())}"
+        )
     return _REGISTRY[name]
 
 

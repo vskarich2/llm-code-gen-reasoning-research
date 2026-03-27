@@ -16,6 +16,7 @@ BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
 
 from experiment_config import load_config
+
 load_config(BASE / "configs" / "default.yaml")
 
 from reconstructor import reconstruct_strict
@@ -43,14 +44,18 @@ class TestRegressionWiringBug:
         This is the correct behavior: the model marked all files UNCHANGED (no fix attempted)."""
         case = _load_case("alias_config_a")
         from evaluator import evaluate_output
-        result = evaluate_output(case, {
-            "code": "",
-            "reasoning": "test",
-            "raw_output": "test",
-            "parse_error": None,
-            "_raw_fallback": False,
-            "_reconstruction_status": "SUCCESS",
-        })
+
+        result = evaluate_output(
+            case,
+            {
+                "code": "",
+                "reasoning": "test",
+                "raw_output": "test",
+                "parse_error": None,
+                "_raw_fallback": False,
+                "_reconstruction_status": "SUCCESS",
+            },
+        )
         assert result["pass"] is False, "Empty code after reconstruction must fail"
         assert result["execution"]["ran"] is False
 
@@ -59,6 +64,7 @@ class TestRegressionWiringBug:
         If this code is removed, the original 0% pass rate bug returns."""
         import inspect
         from execution import _do_reconstruction
+
         source = inspect.getsource(_do_reconstruction)
         assert "changed_files" in source, (
             "The changed-files-only wiring is missing from _do_reconstruction. "
@@ -76,9 +82,16 @@ class TestRegressionSmokeGate:
     def test_all_fail_events_detected(self):
         """Synthetic events with all pass=False → validation fails."""
         events = [
-            {"case_id": f"case_{i}", "condition": "baseline",
-             "model": "test", "trial": 1, "run_id": "test",
-             "pass": False, "score": 0.0, "timestamp": "2024-01-01"}
+            {
+                "case_id": f"case_{i}",
+                "condition": "baseline",
+                "model": "test",
+                "trial": 1,
+                "run_id": "test",
+                "pass": False,
+                "score": 0.0,
+                "timestamp": "2024-01-01",
+            }
             for i in range(10)
         ]
         # Simulate the validation logic

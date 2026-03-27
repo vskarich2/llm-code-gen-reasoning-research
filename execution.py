@@ -15,9 +15,14 @@ from call_logger import set_call_context
 from parse import parse_model_response
 from prompts import build_base_prompt
 from nudges.router import (
-    apply_diagnostic, apply_guardrail, apply_guardrail_strict,
-    apply_counterfactual, apply_reason_then_act, apply_self_check,
-    apply_counterfactual_check, apply_test_driven,
+    apply_diagnostic,
+    apply_guardrail,
+    apply_guardrail_strict,
+    apply_counterfactual,
+    apply_reason_then_act,
+    apply_self_check,
+    apply_counterfactual_check,
+    apply_test_driven,
     get_operator_names,
 )
 
@@ -28,71 +33,150 @@ BASE_DIR = Path(__file__).parent
 # PROMPT BUILDING
 # ============================================================
 
+
 def build_prompt(case: dict, condition: str) -> tuple[str, str | None]:
-    """Return (prompt, operator_used) for a condition."""
+    """Return (prompt, operator_used) for a condition.
+
+    Uses AssemblyEngine for all nudge/reasoning conditions.
+    SCM conditions still use legacy builders (migrated in Step 4).
+    """
+    from assembly_engine import build as _assembly_build, resolve_nudge
+    from prompts import build_base_prompt, _format_code_files
+
     code_files = case["code_files_contents"]
-    base = build_base_prompt(case["task"], code_files)
+    code_block = _format_code_files(code_files)
+    task = case["task"]
     case_id = case["id"]
     hard = case.get("hard_constraints", [])
     ops = get_operator_names(case_id)
+    base_vars = {"task": task, "code_files_block": code_block}
+
+    # Operator name → registry key mapping
+    _OP_TO_KEY = {
+        "DEPENDENCY_CHECK": "diagnostic__generic_dependency",
+        "INVARIANT_GUARD": "diagnostic__generic_invariant",
+        "TEMPORAL_ROBUSTNESS": "diagnostic__generic_temporal",
+        "STATE_LIFECYCLE": "diagnostic__generic_state",
+        "DEPENDENCY_CHECK_GUARDRAIL": "guardrail__generic_dependency",
+        "INVARIANT_GUARD_GUARDRAIL": "guardrail__generic_invariant",
+        "TEMPORAL_ROBUSTNESS_GUARDRAIL": "guardrail__generic_temporal",
+        "STATE_LIFECYCLE_GUARDRAIL": "guardrail__generic_state",
+        "COUNTERFACTUAL": "reasoning__counterfactual",
+        "REASON_THEN_ACT": "reasoning__reason_then_act",
+        "SELF_CHECK": "reasoning__self_check",
+        "COUNTERFACTUAL_CHECK": "reasoning__counterfactual_check",
+        "TEST_DRIVEN": "reasoning__test_driven",
+    }
+
+    def _resolve_nudge_text(op_name):
+        return resolve_nudge(_OP_TO_KEY[op_name])
 
     if condition == "baseline":
-        return base, None
+        r = _assembly_build(["task_and_code"], base_vars)
+        return r.final_prompt, None
+
     elif condition == "diagnostic":
-        return apply_diagnostic(case_id, base), ops.get("diagnostic")
+        op_name = _require_assignment_op(case_id, "diagnostic")
+        text = _resolve_nudge_text(op_name)
+        r = _assembly_build(["task_and_code", "nudge_diagnostic"],
+                            {**base_vars, "diagnostic_text": text})
+        return r.final_prompt, op_name
+
     elif condition == "guardrail":
-        return apply_guardrail(case_id, base), ops.get("guardrail")
+        op_name = _require_assignment_op(case_id, "guardrail")
+        text = _resolve_nudge_text(op_name)
+        r = _assembly_build(["task_and_code", "nudge_diagnostic"],
+                            {**base_vars, "diagnostic_text": text})
+        return r.final_prompt, op_name
+
     elif condition == "guardrail_strict":
-        return apply_guardrail_strict(case_id, base, hard), "STRICT+" + (ops.get("guardrail") or "HARD_ONLY")
-    elif condition == "counterfactual":
-        return apply_counterfactual(case_id, base), ops.get("counterfactual")
-    elif condition == "reason_then_act":
-        return apply_reason_then_act(case_id, base), ops.get("reason_then_act")
-    elif condition == "self_check":
-        return apply_self_check(case_id, base), ops.get("self_check")
-    elif condition == "counterfactual_check":
-        return apply_counterfactual_check(case_id, base), ops.get("counterfactual_check")
-    elif condition == "test_driven":
-        return apply_test_driven(case_id, base), ops.get("test_driven")
+        op_name = _require_assignment_op(case_id, "guardrail")
+        guardrail_text = _resolve_nudge_text(op_name)
+        # Build base + guardrail via assembly, then append strict section via legacy
+        # (exact replication of old: build_strict_guardrail(soft, hard_constraints))
+        r = _assembly_build(["task_and_code", "nudge_diagnostic"],
+                            {**base_vars, "diagnostic_text": guardrail_text})
+        from nudges.core import build_strict_guardrail
+        prompt = build_strict_guardrail(r.final_prompt, hard)
+        return prompt, "STRICT+" + (op_name or "HARD_ONLY")
+
+    elif condition in ("counterfactual", "reason_then_act", "self_check",
+                       "counterfactual_check", "test_driven"):
+        op_name = ops.get(condition) or condition.upper()
+        text = _resolve_nudge_text(op_name)
+        r = _assembly_build(["task_and_code", "nudge_reasoning"],
+                            {**base_vars, "reasoning_text": text})
+        return r.final_prompt, op_name
+
     elif condition == "repair_loop":
-        return apply_diagnostic(case_id, base), "REPAIR_LOOP"
-    # SCM conditions
+        op_name = _require_assignment_op(case_id, "diagnostic")
+        text = _resolve_nudge_text(op_name)
+        r = _assembly_build(["task_and_code", "nudge_diagnostic"],
+                            {**base_vars, "diagnostic_text": text})
+        return r.final_prompt, "REPAIR_LOOP"
+
+    # SCM conditions — still use legacy builders (migrated in Step 4)
     elif condition == "scm_descriptive":
         from scm_prompts import build_scm_descriptive
+        base = build_base_prompt(task, code_files)
         return build_scm_descriptive(base, case_id), "SCM_DESCRIPTIVE"
     elif condition == "scm_constrained":
         from scm_prompts import build_scm_constrained
+        base = build_base_prompt(task, code_files)
         return build_scm_constrained(base, case_id), "SCM_CONSTRAINED"
     elif condition == "scm_constrained_evidence":
         from scm_prompts import build_scm_constrained_evidence
+        base = build_base_prompt(task, code_files)
         return build_scm_constrained_evidence(base, case_id), "SCM_EVIDENCE"
     elif condition == "scm_constrained_evidence_minimal":
         from scm_prompts import build_scm_constrained_evidence_minimal
+        base = build_base_prompt(task, code_files)
         return build_scm_constrained_evidence_minimal(base, case_id), "SCM_EVIDENCE_MIN"
     elif condition == "evidence_only":
         from scm_prompts import build_evidence_only
+        base = build_base_prompt(task, code_files)
         return build_evidence_only(base, case_id), "EVIDENCE_ONLY"
     elif condition == "length_matched_control":
         from scm_prompts import build_length_matched_control
+        base = build_base_prompt(task, code_files)
         return build_length_matched_control(base, case_id), "LENGTH_CONTROL"
+
     # Reasoning interface conditions
     elif condition == "structured_reasoning":
-        from reasoning_prompts import build_structured_reasoning
-        return build_structured_reasoning(base), "STRUCTURED_REASONING"
+        text = resolve_nudge("reasoning__structured")
+        r = _assembly_build(["task_and_code", "nudge_reasoning"],
+                            {**base_vars, "reasoning_text": text})
+        return r.final_prompt, "STRUCTURED_REASONING"
     elif condition == "free_form_reasoning":
-        from reasoning_prompts import build_free_form_reasoning
-        return build_free_form_reasoning(base), "FREE_FORM_REASONING"
+        text = resolve_nudge("reasoning__free_form")
+        r = _assembly_build(["task_and_code", "nudge_reasoning"],
+                            {**base_vars, "reasoning_text": text})
+        return r.final_prompt, "FREE_FORM_REASONING"
     elif condition == "branching_reasoning":
-        from reasoning_prompts import build_branching_reasoning
-        return build_branching_reasoning(base), "BRANCHING_REASONING"
+        text = resolve_nudge("reasoning__branching")
+        r = _assembly_build(["task_and_code", "nudge_reasoning"],
+                            {**base_vars, "reasoning_text": text})
+        return r.final_prompt, "BRANCHING_REASONING"
+
     elif condition == "contract_gated":
-        # Contract-gated uses its own multi-step flow — prompt built inside run_contract_gated
+        base = build_base_prompt(task, code_files)
         return base, "CONTRACT_GATED"
     elif condition == "leg_reduction":
-        # LEG-reduction uses its own prompt — built inside run_leg_reduction
+        base = build_base_prompt(task, code_files)
         return base, "LEG_REDUCTION"
     else:
         raise ValueError(f"Unknown condition: {condition}")
+
+
+def _require_assignment_op(case_id: str, kind: str) -> str:
+    """Get operator name for a case/kind. Uses the existing nudge router."""
+    from nudges.mapping import get_operators_for_case
+    assignment = get_operators_for_case(case_id)
+    if assignment is None:
+        raise RuntimeError(
+            f"CONDITION INTEGRITY FAILURE: no nudge mapping for case '{case_id}'"
+        )
+    return getattr(assignment, kind)
 
 
 # ============================================================
@@ -112,8 +196,9 @@ def set_ablation_context(events_path: Path | None, trial: int | None, run_id: st
     _ablation_run_id = run_id
 
 
-def _emit_metrics_event(case: dict, model: str, condition: str, ev: dict,
-                        elapsed_seconds: float | None = None) -> None:
+def _emit_metrics_event(
+    case: dict, model: str, condition: str, ev: dict, elapsed_seconds: float | None = None
+) -> None:
     """Emit a live metrics event.
 
     In ablation mode (events_path set): writes to per-run events.jsonl via emit_event().
@@ -123,6 +208,7 @@ def _emit_metrics_event(case: dict, model: str, condition: str, ev: dict,
     # Redis stream emission (fire-and-forget, never blocks)
     try:
         from redis_metrics import emit_event as _redis_emit
+
         _redis_emit(
             run_id=_ablation_run_id or "default",
             model=model,
@@ -140,43 +226,49 @@ def _emit_metrics_event(case: dict, model: str, condition: str, ev: dict,
     if _ablation_events_path is not None:
         # Ablation mode: strict event emission with schema validation
         from live_metrics import emit_event
+
         alignment = ev.get("alignment", {})
-        emit_event({
-            "case_id": case["id"],
-            "model": model,
-            "condition": condition,
-            "trial": _ablation_trial,
-            "run_id": _ablation_run_id,
-            "pass": ev.get("pass", False),
-            "score": ev.get("score", 0),
-            "reasoning_correct": ev.get("reasoning_correct"),
-            "code_correct": ev.get("code_correct"),
-            "failure_type": ev.get("failure_type"),
-            "category": alignment.get("category"),
-            "num_attempts": ev.get("num_attempts", 1),
-            "elapsed_seconds": elapsed_seconds,
-            # Phase 1 observability
-            "code_present": ev.get("code_present", False),
-            "code_empty_reason": ev.get("code_empty_reason"),
-            "code_source": ev.get("code_source", "unknown"),
-            "case_validity": ev.get("case_validity", "unknown"),
-            "parse_tier": ev.get("parse_tier", -1),
-            "parse_repaired": ev.get("parse_repaired", False),
-            "recovery_applied": ev.get("recovery_applied", False),
-            "reconstruction_status": ev.get("reconstruction_status"),
-            "reconstruction_recovered": ev.get("reconstruction_recovered", False),
-            "content_normalized": ev.get("content_normalized", False),
-            "failure_source": ev.get("failure_source", "unknown"),
-            "failure_source_detail": ev.get("failure_source_detail", "unknown"),
-        }, _ablation_events_path)
+        emit_event(
+            {
+                "case_id": case["id"],
+                "model": model,
+                "condition": condition,
+                "trial": _ablation_trial,
+                "run_id": _ablation_run_id,
+                "pass": ev.get("pass", False),
+                "score": ev.get("score", 0),
+                "reasoning_correct": ev.get("reasoning_correct"),
+                "code_correct": ev.get("code_correct"),
+                "failure_type": ev.get("failure_type"),
+                "category": alignment.get("category"),
+                "num_attempts": ev.get("num_attempts", 1),
+                "elapsed_seconds": elapsed_seconds,
+                # Phase 1 observability
+                "code_present": ev.get("code_present", False),
+                "code_empty_reason": ev.get("code_empty_reason"),
+                "code_source": ev.get("code_source", "unknown"),
+                "case_validity": ev.get("case_validity", "unknown"),
+                "parse_tier": ev.get("parse_tier", -1),
+                "parse_repaired": ev.get("parse_repaired", False),
+                "recovery_applied": ev.get("recovery_applied", False),
+                "reconstruction_status": ev.get("reconstruction_status"),
+                "reconstruction_recovered": ev.get("reconstruction_recovered", False),
+                "content_normalized": ev.get("content_normalized", False),
+                "failure_source": ev.get("failure_source", "unknown"),
+                "failure_source_detail": ev.get("failure_source_detail", "unknown"),
+            },
+            _ablation_events_path,
+        )
         return
 
     # Legacy mode: old emit_event path (for non-ablation runs)
     try:
         from live_metrics import EVENTS_PATH
+
         events_path = Path(__file__).parent / "logs" / "events.jsonl"
         if events_path.exists() or events_path.parent.exists():
             from live_metrics import emit_event as _legacy_emit
+
             alignment = ev.get("alignment", {})
             # Legacy events don't have trial/run_id — skip strict validation
             event = {
@@ -195,6 +287,7 @@ def _emit_metrics_event(case: dict, model: str, condition: str, ev: dict,
             # In legacy mode, write without strict schema validation
             import json, os
             from datetime import datetime
+
             event["timestamp"] = datetime.now().isoformat()
             line = json.dumps(event, default=str) + "\n"
             with open(events_path, "a", encoding="utf-8") as f:
@@ -206,6 +299,7 @@ def _emit_metrics_event(case: dict, model: str, condition: str, ev: dict,
 # ============================================================
 # SINGLE RUN
 # ============================================================
+
 
 def _build_parsed_response(parse_result: dict, raw_output: str) -> dict:
     """Attach raw_output and ensure all required fields present.
@@ -237,6 +331,7 @@ def _build_parsed_response(parse_result: dict, raw_output: str) -> dict:
 # ALL evaluation flows through this ONE function.
 # No other code may parse, reconstruct, evaluate, or classify.
 
+
 def _leg_to_parse_format(lr_parsed: dict) -> dict:
     """Convert LEG parser output to parse_model_response-compatible dict.
 
@@ -252,7 +347,9 @@ def _leg_to_parse_format(lr_parsed: dict) -> dict:
         "response_format": "leg_reduction",
         "_raw_fallback": False,
         # Observability from LEG parser
-        "code_present": lr_parsed.get("code_extracted", bool((lr_parsed.get("code") or "").strip())),
+        "code_present": lr_parsed.get(
+            "code_extracted", bool((lr_parsed.get("code") or "").strip())
+        ),
         "code_empty_reason": None,
         "parse_tier": 0,
         "parse_repaired": False,
@@ -279,6 +376,7 @@ def _do_reconstruction(case: dict, parsed: dict) -> None:
     fmt = parsed.get("response_format", "")
     if fmt in ("file_dict", "code_dict", "file_dict_lenient") and parsed.get("files"):
         from reconstructor import reconstruct_strict
+
         manifest_files = case.get("code_files_contents", {})
         manifest_paths = list(manifest_files.keys())
         recon = reconstruct_strict(manifest_paths, manifest_files, parsed["files"])
@@ -288,8 +386,7 @@ def _do_reconstruction(case: dict, parsed: dict) -> None:
 
         if recon.status == "SUCCESS":
             parsed["_reconstruction_error"] = False
-            changed_parts = [recon.files[p] for p in manifest_paths
-                             if p in recon.changed_files]
+            changed_parts = [recon.files[p] for p in manifest_paths if p in recon.changed_files]
             parsed["code"] = "\n\n".join(changed_parts) if changed_parts else ""
             if not parsed["code"] or not parsed["code"].strip():
                 _exec_log.info(
@@ -310,7 +407,9 @@ def _do_reconstruction(case: dict, parsed: dict) -> None:
                 parsed["_reconstruction_recovered"] = True
                 _exec_log.info(
                     "RECONSTRUCTION RECOVERY: recovered %d files (%d chars) for case %s",
-                    len(recovered_parts), len(parsed["code"]), case.get("id", "?"),
+                    len(recovered_parts),
+                    len(parsed["code"]),
+                    case.get("id", "?"),
                 )
             else:
                 _exec_log.warning(
@@ -341,7 +440,9 @@ def _compute_observability(parsed: dict) -> None:
             parsed["code_empty_reason"] = "filtered_invalid"
         elif parsed.get("_reconstruction_error") and not parsed.get("_reconstruction_recovered"):
             parsed["code_empty_reason"] = "reconstruction_failure"
-        elif parsed.get("_reconstruction_status") == "SUCCESS" and not parsed.get("code", "").strip():
+        elif (
+            parsed.get("_reconstruction_status") == "SUCCESS" and not parsed.get("code", "").strip()
+        ):
             parsed["code_empty_reason"] = "all_unchanged"
         elif parsed.get("parse_error"):
             parsed["code_empty_reason"] = "parse_failure"
@@ -371,7 +472,9 @@ def _compute_observability(parsed: dict) -> None:
         parsed["code_source"] = "unknown"
 
     # recovery / transformation tracking
-    recovery_applied = parsed.get("parse_repaired", False) or parsed.get("_reconstruction_recovered", False)
+    recovery_applied = parsed.get("parse_repaired", False) or parsed.get(
+        "_reconstruction_recovered", False
+    )
     recovery_types = []
     if parsed.get("parse_repair_type"):
         recovery_types.append(parsed["parse_repair_type"])
@@ -389,7 +492,9 @@ def _compute_observability(parsed: dict) -> None:
     if parsed.get("_raw_fallback"):
         parsed["case_validity"] = "invalid"
     elif not parsed["code_present"] and parsed.get("code_empty_reason") in (
-        "parse_failure", "model_no_output", "filtered_invalid"
+        "parse_failure",
+        "model_no_output",
+        "filtered_invalid",
     ):
         parsed["case_validity"] = "invalid"
     elif recovery_applied:
@@ -414,13 +519,20 @@ def _compute_failure_source(parsed: dict, ev: dict) -> None:
     elif parsed["case_validity"] == "invalid" and parsed.get("_raw_fallback"):
         ev["failure_source"] = "PARSE_FAILURE"
         ev["failure_source_detail"] = "raw_fallback"
-    elif parsed["case_validity"] == "invalid" and parsed.get("code_empty_reason") == "parse_failure":
+    elif (
+        parsed["case_validity"] == "invalid" and parsed.get("code_empty_reason") == "parse_failure"
+    ):
         ev["failure_source"] = "PARSE_FAILURE"
         ev["failure_source_detail"] = parsed.get("parse_error", "unknown")
-    elif parsed["case_validity"] == "invalid" and parsed.get("code_empty_reason") == "reconstruction_failure":
+    elif (
+        parsed["case_validity"] == "invalid"
+        and parsed.get("code_empty_reason") == "reconstruction_failure"
+    ):
         ev["failure_source"] = "RECONSTRUCTION_FAILURE"
         ev["failure_source_detail"] = parsed.get("_reconstruction_status", "unknown")
-    elif parsed["case_validity"] == "invalid" and parsed.get("code_empty_reason") == "all_unchanged":
+    elif (
+        parsed["case_validity"] == "invalid" and parsed.get("code_empty_reason") == "all_unchanged"
+    ):
         ev["failure_source"] = "MODEL_FAILURE"
         ev["failure_source_detail"] = "all_unchanged"
     elif ev.get("execution", {}).get("rename_error") and parsed.get("_raw_fallback"):
@@ -446,8 +558,7 @@ def _compute_failure_source(parsed: dict, ev: dict) -> None:
     lineage.append(f"failure_source:{ev['failure_source']}")
 
 
-def evaluate_case(case: dict, raw_output: str,
-                  parser: str = "standard") -> tuple[dict, dict]:
+def evaluate_case(case: dict, raw_output: str, parser: str = "standard") -> tuple[dict, dict]:
     """THE canonical evaluation pipeline. ALL paths use this.
 
     1. Parse raw_output
@@ -467,6 +578,7 @@ def evaluate_case(case: dict, raw_output: str,
     # Step 1: Parse (ONE constructor for all paths)
     if parser == "leg":
         from leg_reduction import parse_leg_reduction_output
+
         lr_parsed = parse_leg_reduction_output(raw_output)
         parse_result = _leg_to_parse_format(lr_parsed)
     else:
@@ -505,22 +617,29 @@ def _propagate_observability(parsed: dict, ev: dict) -> None:
     ev["reconstruction_status"] = parsed.get("_reconstruction_status")
     ev["reconstruction_recovered"] = parsed.get("_reconstruction_recovered", False)
     recon = parsed.get("_reconstruction")
-    ev["content_normalized"] = recon.content_normalized if recon and hasattr(recon, "content_normalized") else False
+    ev["content_normalized"] = (
+        recon.content_normalized if recon and hasattr(recon, "content_normalized") else False
+    )
     ev["_raw_fallback"] = parsed.get("_raw_fallback", False)
     ev["response_format"] = parsed.get("response_format", "unknown")
 
 
-def _attempt_and_evaluate(case: dict, model: str, prompt: str,
-                          file_paths: list[str] | None = None,
-                          call_phase: str = "generation",
-                          call_condition: str = "",
-                          call_attempt: int = 0) -> tuple[str, dict, dict]:
+def _attempt_and_evaluate(
+    case: dict,
+    model: str,
+    prompt: str,
+    file_paths: list[str] | None = None,
+    call_phase: str = "generation",
+    call_condition: str = "",
+    call_attempt: int = 0,
+) -> tuple[str, dict, dict]:
     """Thin wrapper: call_model + evaluate_case. Used by run_single and run_repair_loop.
 
     Will be removed once all callers migrate to calling call_model + evaluate_case directly.
     """
-    set_call_context(phase=call_phase, case_id=case["id"],
-                     condition=call_condition, attempt_index=call_attempt)
+    set_call_context(
+        phase=call_phase, case_id=case["id"], condition=call_condition, attempt_index=call_attempt
+    )
     case["_condition"] = call_condition  # propagate to classifier context
     raw_output = call_model(prompt, model=model, file_paths=file_paths)
     parsed, ev = evaluate_case(case, raw_output)
@@ -541,8 +660,14 @@ def run_single(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
     token_budget_exceeded = prompt_tokens > token_budget
 
     raw_output, parsed, ev = _attempt_and_evaluate(
-        case, model, prompt, file_paths=file_paths,
-        call_phase="generation", call_condition=condition, call_attempt=0)
+        case,
+        model,
+        prompt,
+        file_paths=file_paths,
+        call_phase="generation",
+        call_condition=condition,
+        call_attempt=0,
+    )
 
     ev["operator_used"] = op_used
     ev["condition"] = condition
@@ -555,12 +680,17 @@ def run_single(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
     if token_budget_exceeded:
         _exec_log.warning(
             "TOKEN BUDGET EXCEEDED: case=%s cond=%s tokens=%d budget=%d",
-            case["id"], condition, prompt_tokens, token_budget,
+            case["id"],
+            condition,
+            prompt_tokens,
+            token_budget,
         )
     ev["reconstruction_error"] = parsed.get("_reconstruction_error")
 
     write_log(case["id"], condition, model, prompt, raw_output, parsed, ev)
-    _emit_metrics_event(case, model, condition, ev, elapsed_seconds=round(__import__("time").monotonic() - t0, 2))
+    _emit_metrics_event(
+        case, model, condition, ev, elapsed_seconds=round(__import__("time").monotonic() - t0, 2)
+    )
     return case["id"], condition, ev
 
 
@@ -568,6 +698,7 @@ def _estimate_prompt_tokens(prompt: str, model: str) -> int:
     """Estimate token count. Uses tiktoken if available, else char/4 heuristic."""
     try:
         import tiktoken
+
         try:
             enc = tiktoken.encoding_for_model(model)
         except KeyError:
@@ -580,12 +711,14 @@ def _estimate_prompt_tokens(prompt: str, model: str) -> int:
 def _get_token_budget(model: str) -> int:
     """Return effective token budget for a model from config."""
     from experiment_config import get_config
+
     return get_config().execution.token_budgets.get_budget(model)
 
 
 # ============================================================
 # REPAIR LOOP
 # ============================================================
+
 
 def run_repair_loop(case: dict, model: str) -> tuple[str, str, dict]:
     """Attempt 1 with diagnostic. If fails, attempt 2 with error feedback."""
@@ -595,33 +728,70 @@ def run_repair_loop(case: dict, model: str) -> tuple[str, str, dict]:
     # Attempt 1
     prompt, _ = build_prompt(case, "repair_loop")
     raw_output, parsed, ev = _attempt_and_evaluate(
-        case, model, prompt,
-        call_phase="generation", call_condition="repair_loop", call_attempt=0)
-    attempts.append({"attempt": 1, "pass": ev["pass"], "score": ev["score"],
-                     "reasons": ev.get("reasons", [])})
+        case, model, prompt, call_phase="generation", call_condition="repair_loop", call_attempt=0
+    )
+    attempts.append(
+        {"attempt": 1, "pass": ev["pass"], "score": ev["score"], "reasons": ev.get("reasons", [])}
+    )
 
     if ev["pass"]:
         _propagate_observability(parsed, ev)
-        ev.update(operator_used="REPAIR_LOOP", condition="repair_loop",
-                  attempts=attempts, num_attempts=1, final_pass=True)
+        ev.update(
+            operator_used="REPAIR_LOOP",
+            condition="repair_loop",
+            attempts=attempts,
+            num_attempts=1,
+            final_pass=True,
+        )
         write_log(case["id"], "repair_loop", model, prompt, raw_output, parsed, ev)
-        _emit_metrics_event(case, model, "repair_loop", ev, elapsed_seconds=round(__import__("time").monotonic() - t0, 2))
+        _emit_metrics_event(
+            case,
+            model,
+            "repair_loop",
+            ev,
+            elapsed_seconds=round(__import__("time").monotonic() - t0, 2),
+        )
         return case["id"], "repair_loop", ev
 
     # Attempt 2: feed errors back
     error_reasons = "; ".join(ev.get("reasons", [])[:3])
-    repair_prompt = prompt + f"\n\nYour previous attempt FAILED with:\n{error_reasons}\n\nFix and return corrected code."
+    repair_prompt = (
+        prompt
+        + f"\n\nYour previous attempt FAILED with:\n{error_reasons}\n\nFix and return corrected code."
+    )
     raw_2, parsed_2, ev2 = _attempt_and_evaluate(
-        case, model, repair_prompt,
-        call_phase="generation", call_condition="repair_loop", call_attempt=1)
-    attempts.append({"attempt": 2, "pass": ev2["pass"], "score": ev2["score"],
-                     "reasons": ev2.get("reasons", [])})
+        case,
+        model,
+        repair_prompt,
+        call_phase="generation",
+        call_condition="repair_loop",
+        call_attempt=1,
+    )
+    attempts.append(
+        {
+            "attempt": 2,
+            "pass": ev2["pass"],
+            "score": ev2["score"],
+            "reasons": ev2.get("reasons", []),
+        }
+    )
 
     _propagate_observability(parsed_2, ev2)
-    ev2.update(operator_used="REPAIR_LOOP", condition="repair_loop",
-               attempts=attempts, num_attempts=2, final_pass=ev2["pass"])
+    ev2.update(
+        operator_used="REPAIR_LOOP",
+        condition="repair_loop",
+        attempts=attempts,
+        num_attempts=2,
+        final_pass=ev2["pass"],
+    )
     write_log(case["id"], "repair_loop", model, repair_prompt, raw_2, parsed_2, ev2)
-    _emit_metrics_event(case, model, "repair_loop", ev2, elapsed_seconds=round(__import__("time").monotonic() - t0, 2))
+    _emit_metrics_event(
+        case,
+        model,
+        "repair_loop",
+        ev2,
+        elapsed_seconds=round(__import__("time").monotonic() - t0, 2),
+    )
     return case["id"], "repair_loop", ev2
 
 
@@ -629,12 +799,15 @@ def run_repair_loop(case: dict, model: str) -> tuple[str, str, dict]:
 # CONTRACT-GATED EXECUTION
 # ============================================================
 
+
 def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
     """Multi-step CGE: elicit contract → generate code → gate → retry → eval."""
     import logging
     from contract import (
-        parse_contract, build_contract_prompt,
-        build_code_from_contract_prompt, build_retry_prompt,
+        parse_contract,
+        build_contract_prompt,
+        build_code_from_contract_prompt,
+        build_retry_prompt,
     )
     from diff_gate import validate as gate_validate
 
@@ -648,8 +821,13 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
 
     # Step 1: Elicit contract (raw=True to avoid JSON output instruction override)
     contract_prompt = build_contract_prompt(task, code_files)
-    set_call_context(phase="generation", case_id=cid, condition="contract_gated",
-                     attempt_index=0, step="contract_elicit")
+    set_call_context(
+        phase="generation",
+        case_id=cid,
+        condition="contract_gated",
+        attempt_index=0,
+        step="contract_elicit",
+    )
     contract_raw = call_model(contract_prompt, model=model, raw=True)
     contract = parse_contract(contract_raw)
 
@@ -661,8 +839,13 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
 
     # Step 2: Generate code conditioned on contract
     code_prompt = build_code_from_contract_prompt(task, code_files, contract)
-    set_call_context(phase="generation", case_id=cid, condition="contract_gated",
-                     attempt_index=0, step="code_gen")
+    set_call_context(
+        phase="generation",
+        case_id=cid,
+        condition="contract_gated",
+        attempt_index=0,
+        step="code_gen",
+    )
     code_raw = call_model(code_prompt, model=model)
 
     # Step 3: Gate validation (extraction-only, NOT evaluation)
@@ -677,8 +860,13 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
         # Step 4: Retry with violations
         _log.info("Gate failed for %s (%d violations) — retrying", cid, len(gate_1["violations"]))
         retry_prompt = build_retry_prompt(task, code_files, contract, gate_1["violations"])
-        set_call_context(phase="generation", case_id=cid, condition="contract_gated",
-                         attempt_index=1, step="code_retry")
+        set_call_context(
+            phase="generation",
+            case_id=cid,
+            condition="contract_gated",
+            attempt_index=1,
+            step="code_retry",
+        )
         retry_raw = call_model(retry_prompt, model=model)
         retry_code = extract_code_from_raw(retry_raw)
 
@@ -737,6 +925,7 @@ def _fallback_run(case, model, contract_raw):
 # LEG-REDUCTION (intra-call self-correction)
 # ============================================================
 
+
 def run_leg_reduction(case: dict, model: str) -> tuple[str, str, dict]:
     """Run LEG-reduction condition: plan → code → verify → self-correct (one call).
 
@@ -754,8 +943,7 @@ def run_leg_reduction(case: dict, model: str) -> tuple[str, str, dict]:
 
     # Build prompt and make ONE LLM call (raw=True, prompt has its own schema)
     prompt = build_leg_reduction_prompt(task, code_files)
-    set_call_context(phase="generation", case_id=cid, condition="leg_reduction",
-                     attempt_index=0)
+    set_call_context(phase="generation", case_id=cid, condition="leg_reduction", attempt_index=0)
     raw_output = call_model(prompt, model=model, raw=True)
 
     # Evaluate through canonical pipeline with LEG parser
@@ -801,6 +989,7 @@ def run_leg_reduction(case: dict, model: str) -> tuple[str, str, dict]:
 # ============================================================
 # LOGGING — RunLogger class (no shared global state)
 # ============================================================
+
 
 class RunLogger:
     """Isolated logger for a single experiment run.
@@ -858,7 +1047,10 @@ class RunLogger:
         if parse_error and "SEVERE" in str(parse_error):
             _exec_log.warning(
                 "SEVERE parse issue for %s/%s: %s (response len=%d)",
-                case_id, condition, parse_error, len(raw_output)
+                case_id,
+                condition,
+                parse_error,
+                len(raw_output),
             )
 
         reasoning_text = parsed.get("reasoning") or ""
@@ -867,19 +1059,28 @@ class RunLogger:
 
         record = {
             "run_id": self.run_id,
-            "case_id": case_id, "condition": condition, "model": model,
+            "case_id": case_id,
+            "condition": condition,
+            "model": model,
             "model_config": get_model_config(),
             "prompt_length": len(prompt),
             "raw_response_length": len(raw_output),
             "parsed": {
-                "reasoning": reasoning_text[:200] if isinstance(reasoning_text, str) else str(reasoning_text)[:200],
-                "code_length": len(code_text) if isinstance(code_text, str) else len(str(code_text)),
+                "reasoning": (
+                    reasoning_text[:200]
+                    if isinstance(reasoning_text, str)
+                    else str(reasoning_text)[:200]
+                ),
+                "code_length": (
+                    len(code_text) if isinstance(code_text, str) else len(str(code_text))
+                ),
                 "parse_error": parse_error,
                 "_raw_fallback": parsed.get("_raw_fallback", False),
             },
             "execution": ev.get("execution", {}),
             "evaluation": {
-                "pass": ev["pass"], "score": ev["score"],
+                "pass": ev["pass"],
+                "score": ev["score"],
                 "reasoning_valid": ev.get("identified_correct_issue", False),
                 "alignment": ev.get("alignment", {}),
                 "num_attempts": ev.get("num_attempts"),
@@ -891,7 +1092,11 @@ class RunLogger:
             "audit": {
                 "case_id": case_id,
                 "condition": condition,
-                "parsed_reasoning": reasoning_text[:500] if isinstance(reasoning_text, str) else str(reasoning_text)[:500],
+                "parsed_reasoning": (
+                    reasoning_text[:500]
+                    if isinstance(reasoning_text, str)
+                    else str(reasoning_text)[:500]
+                ),
                 "parse_error": parse_error,
                 "parse_category": ev.get("parse_category"),
                 "recovery_method": recovery_method,
@@ -922,10 +1127,7 @@ class RunLogger:
                     f.write(json.dumps(data, default=str) + "\n")
             except OSError as e:
                 self.writes_failed += 1
-                _exec_log.error(
-                    "LOG WRITE FAILED for %s/%s to %s: %s",
-                    case_id, condition, path, e
-                )
+                _exec_log.error("LOG WRITE FAILED for %s/%s to %s: %s", case_id, condition, path, e)
 
     def write_summary(self, summary: dict):
         """Write a summary record to the metadata log. Injects run_id."""
@@ -951,7 +1153,8 @@ class RunLogger:
             "failed": self.writes_failed,
             "success_rate": (
                 (self.writes_attempted - self.writes_failed) / self.writes_attempted
-                if self.writes_attempted > 0 else 1.0
+                if self.writes_attempted > 0
+                else 1.0
             ),
         }
 
@@ -977,9 +1180,13 @@ class RunLogger:
         if self.closed:
             return  # idempotent
         self.closed = True
-        _exec_log.info("RunLogger closed: run_id=%s, %s (%d writes, %d failed)",
-                       self.run_id, self.log_path,
-                       self.writes_attempted, self.writes_failed)
+        _exec_log.info(
+            "RunLogger closed: run_id=%s, %s (%d writes, %d failed)",
+            self.run_id,
+            self.log_path,
+            self.writes_attempted,
+            self.writes_failed,
+        )
 
 
 # Single active logger — enforced singleton with explicit lifecycle
@@ -1008,18 +1215,16 @@ def init_run_log(model: str, log_dir: Path | None = None) -> Path:
         )
 
     if log_dir is None:
-        raise ValueError(
-            "init_run_log requires log_dir. Legacy mode has been removed."
-        )
+        raise ValueError("init_run_log requires log_dir. Legacy mode has been removed.")
 
     log_dir = Path(log_dir)
     log_path = log_dir / "run.jsonl"
 
     import uuid
+
     run_id = str(uuid.uuid4())[:8]
     _active_logger = RunLogger(log_path, model, run_id)
-    _exec_log.info("RunLogger created: run_id=%s, model=%s, log_dir=%s",
-                   run_id, model, log_dir)
+    _exec_log.info("RunLogger created: run_id=%s, model=%s, log_dir=%s", run_id, model, log_dir)
     return log_path
 
 
@@ -1034,9 +1239,7 @@ def close_run_log():
 def get_run_logger() -> RunLogger:
     """Get the active RunLogger. Raises if none active."""
     if _active_logger is None or _active_logger.closed:
-        raise RuntimeError(
-            "No active RunLogger. Call init_run_log() before writing logs."
-        )
+        raise RuntimeError("No active RunLogger. Call init_run_log() before writing logs.")
     return _active_logger
 
 

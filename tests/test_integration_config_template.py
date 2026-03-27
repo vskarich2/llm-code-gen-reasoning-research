@@ -7,10 +7,22 @@ import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from config import load_config, _validate_and_build, ConfigError, get_template_for_condition, log_resolved_config
+from config import (
+    load_config,
+    _validate_and_build,
+    ConfigError,
+    get_template_for_condition,
+    log_resolved_config,
+)
 from templates import (
-    TEMPLATE_REGISTRY, render, render_with_metadata, log_rendered_prompt,
-    init_template_hashes, get_template_hash, _reset_template_hashes, _reset_env,
+    TEMPLATE_REGISTRY,
+    render,
+    render_with_metadata,
+    log_rendered_prompt,
+    init_template_hashes,
+    get_template_hash,
+    _reset_template_hashes,
+    _reset_env,
     preflight_validate_templates,
 )
 from constants import SIMPLE_CONDITIONS, RETRY_CONDITIONS, MULTISTEP_CONDITIONS
@@ -44,6 +56,7 @@ def _load_test_config():
 
 # ── I1: Config condition selects correct template ──
 
+
 def test_config_condition_selects_template():
     config = _load_test_config()
     cond_cfg = config.conditions["baseline"]
@@ -53,6 +66,7 @@ def test_config_condition_selects_template():
 
 # ── I2: Retry condition has retry_template ──
 
+
 def test_config_retry_condition_has_retry_template():
     config = _load_test_config()
     cond_cfg = config.conditions["retry_no_contract"]
@@ -61,6 +75,7 @@ def test_config_retry_condition_has_retry_template():
 
 
 # ── I3: Contract condition has all three templates ──
+
 
 def test_config_contract_has_all_templates():
     config = _load_test_config()
@@ -72,6 +87,7 @@ def test_config_contract_has_all_templates():
 
 # ── I4: get_template_for_condition returns correct template per phase ──
 
+
 def test_get_template_for_condition():
     config = _load_test_config()
     assert get_template_for_condition(config, "retry_no_contract", "initial") == "base"
@@ -81,6 +97,7 @@ def test_get_template_for_condition():
 
 # ── I5: get_template_for_condition raises on missing phase ──
 
+
 def test_get_template_for_condition_missing_phase():
     config = _load_test_config()
     with pytest.raises(ConfigError, match="no retry_template"):
@@ -89,6 +106,7 @@ def test_get_template_for_condition_missing_phase():
 
 # ── I6: Rendered prompt matches expected ──
 
+
 def test_rendered_prompt_matches_expected():
     result = render("base", {"task": "Fix the bug", "code_files_block": "code here"})
     assert result.strip() == "Fix the bug\n\ncode here"
@@ -96,18 +114,23 @@ def test_rendered_prompt_matches_expected():
 
 # ── I7: Full pipeline: config -> template -> prompt ──
 
+
 def test_full_pipeline():
     config = _load_test_config()
     tpl_name = config.conditions["baseline"].template
-    rendered = render(tpl_name, {
-        "task": "Fix the bug",
-        "code_files_block": "def f(): pass",
-    })
+    rendered = render(
+        tpl_name,
+        {
+            "task": "Fix the bug",
+            "code_files_block": "def f(): pass",
+        },
+    )
     assert len(rendered) > 0
     assert "{{ " not in rendered
 
 
 # ── I8: config_resolved.yaml written and matches ──
+
 
 def test_e2e_config_logged(tmp_path):
     config = _load_test_config()
@@ -118,12 +141,15 @@ def test_e2e_config_logged(tmp_path):
 
 # ── I9: Prompt log record contains full variables and hash ──
 
+
 def test_prompt_log_record_complete():
     variables = {"task": "x", "code_files_block": "y"}
     rendered, meta = render_with_metadata("base", variables)
     record = log_rendered_prompt(
-        meta["template_name"], meta["template_hash"],
-        meta["variables"], rendered,
+        meta["template_name"],
+        meta["template_hash"],
+        meta["variables"],
+        rendered,
     )
     assert record["template_hash"] == meta["template_hash"]
     assert record["variables"] == variables
@@ -131,6 +157,7 @@ def test_prompt_log_record_complete():
 
 
 # ── I10: Structural invariants enforced end-to-end ──
+
 
 def test_structural_invariants_e2e():
     config = _load_test_config()
@@ -147,6 +174,7 @@ def test_structural_invariants_e2e():
 
 
 # ── I11: preflight_validate_templates passes on valid config ──
+
 
 def test_preflight_validates_successfully():
     _reset_template_hashes()

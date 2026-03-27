@@ -30,6 +30,7 @@ def _load_case(case_id):
 # TEST 1 — Early return paths must have ran=False, total_tests=0
 # ============================================================
 
+
 class TestEarlyReturnLogging:
 
     def test_rename_error_has_zero_tests(self):
@@ -72,6 +73,7 @@ class TestEarlyReturnLogging:
 # TEST 2 — Successful execution must have ran=True, total_tests>0
 # ============================================================
 
+
 class TestSuccessfulExecutionLogging:
 
     def test_passing_case_has_tests_run(self):
@@ -98,6 +100,7 @@ class TestSuccessfulExecutionLogging:
 # TEST 3 — Invariant: NOT (ran=False AND total_tests>0)
 # ============================================================
 
+
 class TestLoggingInvariant:
 
     def test_exec_info_invariant_rejects_impossible_state(self):
@@ -121,6 +124,7 @@ class TestLoggingInvariant:
 # ============================================================
 # TEST 4 — Generated code is always present
 # ============================================================
+
 
 class TestExtractedCodePresent:
 

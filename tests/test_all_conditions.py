@@ -1,7 +1,9 @@
 """Tier 2 (T2.6): All conditions execute for one case without crashes."""
+
 import sys
 import os
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ["OPENAI_API_KEY"] = "sk-dummy"
 
@@ -15,9 +17,7 @@ BASE = Path(__file__).resolve().parents[1]
 def _get_case(case_id):
     cases = json.loads((BASE / "cases.json").read_text())
     for c in cases:
-        c["code_files_contents"] = {
-            fp: (BASE / fp).read_text().strip() for fp in c["code_files"]
-        }
+        c["code_files_contents"] = {fp: (BASE / fp).read_text().strip() for fp in c["code_files"]}
     return [c for c in cases if c["id"] == case_id][0]
 
 
@@ -26,12 +26,20 @@ def test_all_conditions_execute():
     case = _get_case("l3_state_pipeline")
     results = {}
     # Conditions with special dispatch (not routed through run_single)
-    _SPECIAL_CONDITIONS = {"repair_loop", "contract_gated", "retry_no_contract", "retry_with_contract", "retry_adaptive", "retry_alignment"}
+    _SPECIAL_CONDITIONS = {
+        "repair_loop",
+        "contract_gated",
+        "retry_no_contract",
+        "retry_with_contract",
+        "retry_adaptive",
+        "retry_alignment",
+    }
     for cond in ALL_CONDITIONS:
         if cond == "repair_loop":
             _, _, ev = _run_repair_loop(case, "gpt-4.1-nano")
         elif cond in _SPECIAL_CONDITIONS:
             from runner import _run_one
+
             _, _, ev = _run_one(case, "gpt-4.1-nano", cond)
         else:
             _, _, ev = _run_single(case, "gpt-4.1-nano", cond)

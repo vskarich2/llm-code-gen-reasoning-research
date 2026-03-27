@@ -1,6 +1,8 @@
 """Test that new conditions modify prompts correctly."""
+
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nudges.router import apply_counterfactual_check, apply_test_driven
@@ -35,6 +37,7 @@ def test_test_driven_invariants():
 
 def test_original_conditions_unchanged():
     from nudges.router import apply_diagnostic, apply_guardrail
+
     dx = apply_diagnostic("hidden_dep_multihop", BASE)
     gr = apply_guardrail("hidden_dep_multihop", BASE)
     # These should still modify the prompt (not return base unchanged)

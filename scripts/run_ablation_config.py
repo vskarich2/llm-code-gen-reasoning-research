@@ -5,6 +5,7 @@ Usage:
     python scripts/run_ablation_config.py ablation_config.yaml
     python scripts/run_ablation_config.py ablation_config.yaml --dry-run
 """
+
 import argparse
 import subprocess
 import sys
@@ -13,9 +14,7 @@ from pathlib import Path
 try:
     import yaml
 except ImportError:
-    raise ImportError(
-        "pyyaml is required for config parsing. Install: pip install pyyaml"
-    )
+    raise ImportError("pyyaml is required for config parsing. Install: pip install pyyaml")
 
 
 def load_config(path):
@@ -42,11 +41,16 @@ def main():
 
     for model in models:
         cmd = [
-            str(venv_python), str(base_dir / "runner.py"),
-            "--model", model,
-            "--cases", cases_file,
-            "--conditions", conds_str,
-            "--parallel", str(parallel),
+            str(venv_python),
+            str(base_dir / "runner.py"),
+            "--model",
+            model,
+            "--cases",
+            cases_file,
+            "--conditions",
+            conds_str,
+            "--parallel",
+            str(parallel),
         ]
         print(f"\n{'='*60}")
         print(f"Running: {model} × {len(conditions)} conditions")

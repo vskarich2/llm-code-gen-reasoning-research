@@ -9,6 +9,7 @@ Examples:
     python scripts/extract_metadata.py logs/gpt-4o-mini_20260323_151334.jsonl --failures-only
     python scripts/extract_metadata.py logs/gpt-4o-mini_20260323_151334.jsonl --case alias_trivial
 """
+
 import argparse
 import json
 import sys
@@ -43,7 +44,9 @@ def main():
 
             status = "PASS" if passed else "FAIL"
             gap_mark = " GAP" if gap else ""
-            print(f"L{i:2d} {cid:<32} {status} score={score:.1f} inv={inv} ran={ran} syn={bool(syn)}{gap_mark}")
+            print(
+                f"L{i:2d} {cid:<32} {status} score={score:.1f} inv={inv} ran={ran} syn={bool(syn)}{gap_mark}"
+            )
 
             if not passed:
                 err = ex.get("error_message") or ex.get("syntax_error")
