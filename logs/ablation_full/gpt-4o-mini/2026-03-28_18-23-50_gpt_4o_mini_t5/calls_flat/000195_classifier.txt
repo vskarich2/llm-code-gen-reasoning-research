@@ -1,0 +1,230 @@
+=== CALL 000195 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: hidden_dep_multihop
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:15:59.554898
+LATENCY_MS: 30754
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+sync_user_to_cache function + user variable + it does not handle the case where the user is not already in the cache.
+
+## Failure Mechanism
+User data is updated in the database but not reflected in the cache → cache remains stale → subsequent reads from the cache return outdated user information.
+
+## Broken Invariant
+The cache should always reflect the most recent user data after any update operation.
+
+## Fix Strategy
+Consolidate sync_user_to_cache and refresh_user_snapshot into a single function that always updates the cache with the latest user data. This breaks the causal chain of stale data being propagated by ensuring the cache is always updated with the most recent user information.
+
+
+## Self-Check
+{'failure_scenario': 'If a user is updated in the database but not in the cache due to a failure in the new consolidated function, the cache could still return stale data.', 'edge_case': 'Testing with a user that has an empty name or an invalid ID to ensure the function handles these gracefully.', 'invariant_check': 'The invariant holds under multiple calls as the new function will always update the cache with the latest user data. It also holds under retries as the function will always attempt to update the cache with the latest data, and state reuse is managed by always writing the latest data.', 'conclusion': 'No flaw found; the new function ensures that the cache is always updated with the latest user data, making it safe.'}
+
+
+# Task Description
+There are too many small cache helper functions doing similar things. Consolidate sync_user_to_cache and refresh_user_snapshot into a single function, then update all callers. Return the updated code.
+
+# Code Produced
+```python
+store = {}
+
+def cache_put(key, value):
+    store[key] = value
+
+def cache_delete(key):
+    store.pop(key, None)
+
+def cache_put_if_absent(key, value):
+    if key not in store:
+        store[key] = value
+
+def cache_clear_prefix(prefix):
+    to_remove = [k for k in store if k.startswith(prefix)]
+    for k in to_remove:
+        del store[k]
+
+def sync_user_to_cache(user):
+    cache_put(f"user:{user['id']}", user["name"])
+
+
+def refresh_user_snapshot(user):
+    sync_user_to_cache(user)
+
+from cache_writer import store
+
+def get_display_name(user_id):
+    return store.get(f"user:{user_id}")
+
+def is_user_cached(user_id):
+    return f"user:{user_id}" in store
+
+def format_user_label(user_id):
+    name = get_display_name(user_id)
+    return f"@{name}" if name else "@Unknown"
+
+def get_cache_stats():
+    return {"size": len(store), "keys": list(store.keys())[:10]}
+
+class UserDB:
+    def __init__(self):
+        self._rows = {}
+
+    def insert(self, user):
+        self._rows[user["id"]] = user
+
+    def delete(self, user_id):
+        self._rows.pop(user_id, None)
+
+    def find(self, user_id):
+        return self._rows.get(user_id)
+
+    def update_name(self, user_id, new_name):
+        if user_id in self._rows:
+            self._rows[user_id]["name"] = new_name
+
+db = UserDB()
+
+def persist_user(user):
+    db.insert(user)
+
+def remove_user(user_id):
+    db.delete(user_id)
+
+def sync_user_to_db(user):
+    persist_user(user)
+
+def lookup_user(user_id):
+    return db.find(user_id)
+
+from user_repo import persist_user, remove_user, sync_user_to_db, lookup_user
+from cache_writer import cache_delete, sync_user_to_cache
+
+def save_user(user):
+    persist_user(user)
+    sync_user_to_cache(user)
+
+def delete_user(user_id):
+    remove_user(user_id)
+    cache_delete(f"user:{user_id}")
+
+def rename_user(user_id, new_name):
+    from user_repo import db
+    db.update_name(user_id, new_name)
+    updated = lookup_user(user_id)
+    if updated:
+        sync_user_to_cache(updated)
+
+def bulk_warm_cache(users):
+    for u in users:
+        sync_user_to_cache(u)
+
+def migrate_legacy_user(legacy_record):
+    converted = {"id": legacy_record["uid"], "name": legacy_record["full_name"]}
+    sync_user_to_db(converted)
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+PARTIAL;CORRECT;PARTIAL;PARTIAL;PARTIAL;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: Even if sync_user_to_cache were fixed to always write the latest user, stale-cache failures could still occur because the code shows other issues (duplicate store definitions/imports and DB-only paths) that prevent the cache from being updated or read consistently.
+Evidence: - sync_user_to_cache(user) does cache_put(f"user:{user['id']}", user["name"]) (writes name only); - refresh_user_snapshot simply delegates to sync_user_to_cache (no real consolidation); - top defines store = {} then later does "from cache_writer import store" (possible different map than earlier cache helpers); - migrate_legacy_user calls sync_user_to_db(converted) but does not update cache; - sync_user_to_db just calls persist_user (DB write) so some flows update DB without a cache write.
+Judgment: The developer correctly spots that cache updates are the root concern and specifies a clear invariant, but the causal chain is imprecise (why sync_user_to_cache fails) and the proposed consolidation is incompletely implemented; additional code issues (duplicate store/imports and DB-only paths) mean the fix as described/code produced may not eliminate stale-cache failures.

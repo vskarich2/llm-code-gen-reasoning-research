@@ -581,6 +581,71 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
             flips.append((cid, direction))
     m["anomaly_flips"] = flips[:5]
 
+    # ================================================================
+    # SECTION 8 — DUAL EXECUTION (infrastructure vs model failure)
+    # ================================================================
+    # dual_execution data may be in top-level event or in extra section
+    dual_events = [e for e in events if e.get("dual_execution") is not None
+                   or (isinstance(e.get("extra"), dict) and e["extra"].get("dual_execution") is not None)]
+
+    def _get_dual(e):
+        d = e.get("dual_execution")
+        if d is None and isinstance(e.get("extra"), dict):
+            d = e["extra"].get("dual_execution")
+        return d or {}
+
+    n_dual = len(dual_events)
+    if n_dual > 0:
+        agreement = sum(1 for e in dual_events if _get_dual(e).get("agreement"))
+        assembly_suspect = sum(1 for e in dual_events if _get_dual(e).get("assembly_suspect"))
+        assembly_confirmed = sum(1 for e in dual_events if _get_dual(e).get("assembly_confirmed"))
+        module_only_pass = sum(1 for e in dual_events if _get_dual(e).get("module_only_pass"))
+        concat_only_pass = sum(1 for e in dual_events if _get_dual(e).get("concat_only_pass"))
+
+        # Disagreement type distribution
+        dtype_counts = defaultdict(int)
+        for e in dual_events:
+            dt = _get_dual(e).get("disagreement_type", "none")
+            dtype_counts[dt] += 1
+
+        m["dual_execution"] = {
+            "n": n_dual,
+            "agreement_rate": round(agreement / n_dual, 4),
+            "assembly_suspect_rate": round(assembly_suspect / n_dual, 4),
+            "assembly_confirmed_rate": round(assembly_confirmed / n_dual, 4),
+            "module_only_pass_rate": round(module_only_pass / n_dual, 4),
+            "concat_only_pass_rate": round(concat_only_pass / n_dual, 4),
+            "disagreement_type_counts": dict(dtype_counts),
+        }
+
+        # LEG adjustment (conservative — removes only assembly_confirmed)
+        evaluated = [e for e in dual_events if e.get("reasoning_correct") is not None]
+        n_eval = len(evaluated)
+        if n_eval > 0:
+            leg_raw = sum(1 for e in evaluated
+                          if e.get("reasoning_correct") is True and e.get("pass") is False)
+            leg_adjusted = sum(1 for e in evaluated
+                               if e.get("reasoning_correct") is True
+                               and e.get("pass") is False
+                               and not _get_dual(e).get("assembly_confirmed"))
+            leg_broad = sum(1 for e in evaluated
+                            if e.get("reasoning_correct") is True
+                            and e.get("pass") is False
+                            and not _get_dual(e).get("assembly_suspect"))
+
+            leg_raw_rate = round(leg_raw / n_eval, 4) if n_eval else 0
+            leg_adj_rate = round(leg_adjusted / n_eval, 4) if n_eval else 0
+            leg_broad_rate = round(leg_broad / n_eval, 4) if n_eval else 0
+            infra_conservative = leg_raw_rate - leg_adj_rate
+            bias_conservative = round(infra_conservative / leg_raw_rate, 4) if leg_raw_rate > 0 else 0
+
+            m["dual_execution"]["LEG_raw"] = leg_raw_rate
+            m["dual_execution"]["LEG_adjusted_conservative"] = leg_adj_rate
+            m["dual_execution"]["LEG_adjusted_broad"] = leg_broad_rate
+            m["dual_execution"]["LEG_infrastructure_conservative"] = round(infra_conservative, 4)
+            m["dual_execution"]["assembly_bias_conservative"] = bias_conservative
+            m["dual_execution"]["n_evaluated"] = n_eval
+
     return m
 
 
@@ -891,6 +956,36 @@ def write_dashboard(metrics: dict, dashboard_path: Path) -> None:
                 for ft, count in ftc.items():
                     w(f"    {ft:<30s} {count:>4}")
                 w("")
+
+    # ==================================================================
+    # SECTION 8 — DUAL EXECUTION
+    # ==================================================================
+    dual = metrics.get("dual_execution")
+    if dual and dual.get("n", 0) > 0:
+        w("")
+        w("─" * 78)
+        w("  S8: DUAL EXECUTION (infrastructure vs model failure)")
+        w("─" * 78)
+        w(f"  events with dual data: {dual['n']}")
+        w(f"  agreement rate:          {dual['agreement_rate']:>7.1%}")
+        w(f"  assembly suspect rate:   {dual['assembly_suspect_rate']:>7.1%}  (concat fail, module pass)")
+        w(f"  assembly confirmed rate: {dual['assembly_confirmed_rate']:>7.1%}  (high-confidence infra error)")
+        w(f"  module only pass rate:   {dual['module_only_pass_rate']:>7.1%}")
+        w(f"  concat only pass rate:   {dual['concat_only_pass_rate']:>7.1%}")
+
+        if "LEG_raw" in dual:
+            w("")
+            w(f"  LEG raw:                 {dual['LEG_raw']:>7.1%}")
+            w(f"  LEG adjusted (conserv.): {dual['LEG_adjusted_conservative']:>7.1%}  (removes confirmed infra)")
+            w(f"  LEG adjusted (broad):    {dual['LEG_adjusted_broad']:>7.1%}  (removes all suspects — EXPLORATORY)")
+            w(f"  infrastructure bias:     {dual['assembly_bias_conservative']:>7.1%}  (fraction of LEG from infra)")
+
+        dtypes = dual.get("disagreement_type_counts", {})
+        if dtypes:
+            w("")
+            w("  disagreement types:")
+            for dt, count in sorted(dtypes.items(), key=lambda x: -x[1]):
+                w(f"    {dt:<35s} {count:>4}")
 
     # ==================================================================
     # FOOTER

@@ -1,0 +1,155 @@
+=== CALL 000054 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: mutable_default_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:36:10.777040
+LATENCY_MS: 22042
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+process_batch function + seen variable + it persists across calls, causing valid tasks to be skipped.
+
+## Failure Mechanism
+First batch of tasks is processed, and their IDs are added to the seen set → on the second batch, valid tasks with IDs already in seen are skipped → observable failure is that not all tasks in the second batch are processed.
+
+## Broken Invariant
+Each call to process_batch with a fresh batch must process ALL tasks in that batch, regardless of prior calls.
+
+## Fix Strategy
+Change the seen variable to be a local variable within the process_batch function, ensuring it resets with each call. This breaks the causal chain of skipping valid tasks by preventing the retention of previously seen task IDs.
+
+
+## Self-Check
+{'failure_scenario': 'If the process_batch function is called with the same batch multiple times, it should still process all tasks each time, which it will now do with the fix.', 'edge_case': 'Testing with an empty task list should return an empty result without errors.', 'invariant_check': 'The invariant holds under multiple calls as seen is reset each time, and retries or loops will not affect the processing of tasks since seen is not retained.', 'conclusion': 'No flaw found; the fix is safe as it ensures that each batch is processed independently.'}
+
+
+# Task Description
+Workers skip valid tasks on second batch. Fix. Return the updated code.
+
+# Code Produced
+```python
+def process_batch(tasks):
+    """Process a batch of tasks, skipping already-seen ones.
+
+    Invariant: each call to process_batch with a fresh batch must
+    process ALL tasks in that batch, regardless of prior calls.
+    """
+    seen = set()  # Reset seen for each call
+    results = []
+    for task in tasks:
+        task_id = task["name"]
+        if task_id in seen:
+            continue
+        seen.add(task_id)
+        results.append({"name": task["name"], "result": "processed"})
+    return results
+
+
+def summarize(results):
+    """Summarize processing results (distractor)."""
+    return f"{len(results)} tasks processed"
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL;INVARIANT_VIOLATION
+MEDIUM
+Counterfactual: If the persistent/shared 'seen' state across calls were removed (reset per call), the observed skipping of valid tasks on the second batch would not occur.
+Evidence: - check is "if task_id in seen: continue" causes skips; - original bug described persisted seen across calls (ids added once then reused); - produced fix moves "seen = set()" inside process_batch, removing cross-call persistence; - produced code still calls seen.add() and will skip duplicate task names within the same batch; - docstring/invariant conflict: code comments say "skipping already-seen ones" while invariant demands "process ALL tasks in that batch".
+Judgment: The developer correctly identified the persistent shared 'seen' state as the root cause and the causal chain to the observable failure, and the proposed fix targets that mechanism; however the reasoning/code miss the edge-case that duplicates inside a single batch will still be deduplicated (contradicting the stated invariant), so the fix is only partially aligned with the invariant.

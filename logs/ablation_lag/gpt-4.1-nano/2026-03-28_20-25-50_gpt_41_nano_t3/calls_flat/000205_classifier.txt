@@ -1,0 +1,240 @@
+=== CALL 000205 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: commit_gate
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:03:13.931695
+LATENCY_MS: 22883
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+The process_batch function in pipeline.py was modified to remove calls to commit(st) and freeze_view(st), which are responsible for updating the 'stable' data and setting the 'frozen' flag in the state. Without these steps, the state remains uncommitted and unfrozen, causing inconsistencies in the view and committed data.
+
+## Failure Mechanism
+When process_batch is called, it updates the 'pending' and 'view' data but does not promote 'pending' to 'stable' or set the 'frozen' flag. As a result, functions like get_committed_total and get_committed_digest, which rely on 'meta.frozen' being True, return None, and the view does not reflect the committed state, breaking the invariant that the view should be a consistent, frozen snapshot of the committed data.
+
+## Broken Invariant
+The view in the state is a reliable, frozen snapshot of the committed data when 'meta.frozen' is True, and get_committed_total and get_committed_digest return meaningful values only when 'meta.frozen' is True.
+
+## Fix Strategy
+Re-adding the commit(st) and freeze_view(st) calls in process_batch restores the promotion of pending data to stable and sets the 'frozen' flag, ensuring that the view is consistent with the committed data and the invariants are maintained.
+
+
+
+# Task Description
+After simplifying the pipeline by removing commit() and freeze_view(), the system is broken. Restore the necessary steps. Return the updated code.
+
+# Code Produced
+```python
+def make_state(entries):
+    return {
+        "raw": list(entries),
+        "pending": [],
+        "stable": [],
+        "view": [],
+        "meta": {"version": 0, "frozen": False},
+    }
+
+
+def normalize(raw):
+    return [dict(e) for e in raw]
+
+
+def collapse(entries):
+    merged = {}
+    for e in entries:
+        merged[e["id"]] = e
+    return list(merged.values())
+
+
+def stage(st, data):
+    st["pending"] = list(data)
+    st["view"] = list(data)
+    st["meta"]["version"] += 1
+
+
+def commit(st):
+    """Promote pending to stable. Sorts by id for canonical ordering. Sets frozen gate."""
+    st["stable"] = sorted(st["pending"], key=lambda e: e["id"])
+    st["meta"]["frozen"] = True
+
+
+def freeze_view(st):
+    """Rebuild view from committed (stable) data."""
+    st["view"] = list(st["stable"])
+
+
+def materialize(st):
+    return list(st["view"])
+
+
+def get_committed_total(st):
+    """Returns total only if state is committed (frozen). None otherwise."""
+    if not st["meta"]["frozen"]:
+        return None
+    return sum(e.get("val", 0) for e in st["stable"])
+
+
+def get_view_digest(st):
+    """Order-sensitive digest of view items."""
+    return "|".join(e["id"] for e in st["view"])
+
+
+def get_committed_digest(st):
+    """Order-sensitive digest of committed items."""
+    if not st["meta"]["frozen"]:
+        return None
+    return "|".join(e["id"] for e in st["stable"])
+
+
+from state import make_state
+from reducers import normalize, collapse, stage, commit, freeze_view, materialize
+
+
+def process_batch(entries):
+    st = make_state(entries)
+    cleaned = normalize(st["raw"])
+    merged = collapse(cleaned)
+    stage(st, merged)
+    commit(st)
+    freeze_view(st)
+    return st, materialize(st)
+
+
+from pipeline import process_batch
+from selectors import get_committed_total, get_view_digest, get_committed_digest
+from reducers import stage
+from state import make_state
+
+
+def ingest(entries):
+    st, items = process_batch(entries)
+    total = get_committed_total(st)
+    return {"items": items, "total": total}
+
+
+def preview(entries):
+    from reducers import normalize, collapse
+    st = make_state(entries)
+    cleaned = normalize(st["raw"])
+    merged = collapse(cleaned)
+    stage(st, merged)
+    return {"items": list(st["view"]), "frozen": st["meta"]["frozen"]}
+
+
+def ingest_and_verify(entries):
+    """Full pipeline: ingest then verify view is consistent with committed data."""
+    st, items = process_batch(entries)
+    committed_total = get_committed_total(st)
+    view_digest = get_view_digest(st)
+    committed_digest = get_committed_digest(st)
+    return {
+        "items": items,
+        "committed_total": committed_total,
+        "consistent": view_digest == committed_digest,
+    }
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If commit() and freeze_view() had not been removed (i.e., the root cause absent), the selectors would see a frozen committed state and the failure would not occur.
+Evidence: - process_batch stages data into st['pending'] and st['view']; - get_committed_total/get_committed_digest both early-return None when st['meta']['frozen'] is False; - commit(st) assigns st['stable']=sorted(st['pending'], key=... ) and sets st['meta']['frozen']=True; - freeze_view(st) copies st['stable'] into st['view']; - the updated process_batch calls commit() and freeze_view().
+Judgment: The developer correctly identifies the missing commit/freeze_view calls as the causal root and the causal chain to selectors returning None; the provided code reintroduces the exact operations and therefore properly restores the invariant.

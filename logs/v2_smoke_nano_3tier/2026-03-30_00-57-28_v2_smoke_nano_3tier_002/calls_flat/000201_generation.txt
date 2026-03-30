@@ -1,0 +1,202 @@
+=== CALL 000201 ===
+MODEL: gpt-4.1-nano
+PHASE: generation
+CASE_ID: wrong_condition_b
+CONDITION: leg_reduction_v2
+TRIAL: 1
+RUN_ID: v2_smoke_nano_3tier_002
+TRACE_ID: 938b3a32f41f4651a6b744b4164d7357
+TIMESTAMP: 2026-03-30T01:30:17.870445
+LATENCY_MS: 2612
+
+--- PROMPT ---
+Rate limiter allows too many requests. Fix the policy. Return the updated code.
+
+## Codebase (2 files)
+
+### FILE 1/2: code_snippets_v2/wrong_condition_b/limiter.py ###
+```python
+"""Rate limiter using policy checks."""
+
+from policy import is_allowed
+
+
+class RateLimiter:
+    """Tracks request counts and enforces rate + quota policies."""
+
+    def __init__(self, rate_limit=100, daily_quota=10000):
+        self.rate_limit = rate_limit
+        self.daily_quota = daily_quota
+        self._minute_count = 0
+        self._daily_count = 0
+
+    def try_request(self):
+        """Attempt a request. Returns True if allowed, False if blocked."""
+        allowed = is_allowed(
+            self._minute_count, self.rate_limit,
+            self._daily_count, self.daily_quota,
+        )
+        if allowed:
+            self._minute_count += 1
+            self._daily_count += 1
+        return allowed
+
+    def reset_minute(self):
+        """Reset the per-minute counter (called each minute)."""
+        self._minute_count = 0
+
+    def get_stats(self):
+        """Return current counters."""
+        return {
+            "minute": self._minute_count,
+            "daily": self._daily_count,
+        }
+```
+
+### FILE 2/2: code_snippets_v2/wrong_condition_b/policy.py ###
+```python
+"""Rate and quota policy checks."""
+
+
+def check_rate(requests_per_minute, rate_limit):
+    """Return True if rate is within acceptable bounds."""
+    return requests_per_minute < rate_limit
+
+
+def check_quota(daily_total, daily_quota):
+    """Return True if daily quota is not exceeded."""
+    return daily_total < daily_quota
+
+
+def is_allowed(requests_per_minute, rate_limit, daily_total, daily_quota):
+    """Check if a request is allowed under BOTH rate and quota policies.
+
+    A request should only be allowed if it passes rate AND quota checks.
+    """
+    rate_ok = check_rate(requests_per_minute, rate_limit)
+    quota_ok = check_quota(daily_total, daily_quota)
+    # BUG: uses 'or' instead of 'and' — allows if EITHER passes
+    return rate_ok or quota_ok
+```
+
+You are fixing a bug using a structured reasoning-to-code process.
+
+Your goal is not just to describe the bug. Your goal is to make your diagnosis produce a concrete, checkable code fix.
+
+Follow this procedure exactly. Return a SINGLE valid JSON object.
+
+## STEP 1 — Diagnose the mechanism
+
+Identify the bug mechanism precisely.
+
+You MUST state:
+- the specific function, variable, or operation involved
+- the causal relationship that produces the failure
+- the bug mechanism, not just the symptom
+
+Good:
+- "create_config returns DEFAULTS directly, so later mutation aliases global state"
+- "update_product writes the database but does not invalidate cache, so reads return stale cached values"
+
+Bad:
+- "there is a state bug"
+- "cache is wrong"
+- "this function has an issue"
+
+## STEP 2 — State explicit fix commitments
+
+Convert your diagnosis into explicit, local, checkable commitments.
+
+A valid commitment MUST be:
+- LOCAL: names a specific function, variable, or operation
+- CHECKABLE: a reviewer could inspect the code and decide whether it is satisfied
+- DIRECTLY IMPLIED by your diagnosis
+
+Write 1–3 commitments.
+
+Each commitment MUST use this form:
+
+<scope> must <action>
+
+Examples:
+- "create_config must return a copy of DEFAULTS"
+- "update_product must invalidate cache after write"
+- "retry_send must stop retrying after success"
+
+Do NOT write vague commitments like:
+- "fix shared state"
+- "improve correctness"
+- "avoid bugs"
+
+## STEP 3 — Plan the fix
+
+Describe the concrete code change you will make and why it satisfies the commitments.
+
+Your fix strategy must:
+- name the file/function you will change
+- describe the exact operation you will add/remove/change
+- explain why that change addresses the mechanism
+
+## STEP 4 — Risk check (CRITICAL)
+
+Before finalizing code, answer:
+
+What is the most likely way this fix could still fail?
+
+Rules:
+- The risk must be specific and tied to the actual patch
+- If the risk is real, REVISE your fix before writing final code
+- If the risk is not real, explain specifically why the patch is safe
+- Do NOT give a generic answer like "there may be edge cases"
+
+Good:
+- "This could still fail if update_product invalidates one cache layer but api reads from a separate local cache"
+- "This is safe because create_config is the only constructor returning DEFAULTS and the patch replaces the direct shared reference"
+
+Bad:
+- "It might still fail in some cases"
+- "There could be bugs elsewhere"
+
+## STEP 5 — Return fixed code
+
+Return your response as JSON with this exact schema:
+
+{
+  "root_cause": "<specific mechanism with function/variable/causal relationship>",
+  "code_commitments": [
+    "<scope> must <action>",
+    "<scope> must <action>"
+  ],
+  "fix_strategy": "<concrete code change and why it satisfies the commitments>",
+  "risk_check": "<most likely residual failure mode, and whether you revised or why the patch is safe>",
+  "files": {
+    ""code_snippets_v2/wrong_condition_b/limiter.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/wrong_condition_b/policy.py": "<complete file contents or UNCHANGED>""
+  }
+}
+
+RULES:
+- ALL fields are REQUIRED and must be non-empty substantive content
+- "code_commitments" MUST contain 1–3 commitments
+- Each commitment MUST be atomic, local, and checkable
+- Do NOT include vague or generic commitments
+- "files" MUST contain one entry for EVERY file listed above
+- For files you did NOT modify, set the value to the exact string "UNCHANGED"
+- For files you DID modify, include the COMPLETE updated file contents
+- Do NOT include markdown formatting inside file values
+- Do NOT omit any file
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "The is_allowed function uses 'or' to combine check_rate and check_quota, allowing requests if either policy passes, which permits exceeding the rate limit or quota individually.",
+  "code_commitments": [
+    "policy.py must change the logical operator in is_allowed from 'or' to 'and'",
+    "policy.py must ensure both rate and quota policies are enforced simultaneously"
+  ],
+  "fix_strategy": "In policy.py, modify the is_allowed function to replace the 'or' operator with 'and'. This change ensures that a request is only allowed if it passes both the rate check and the quota check, fixing the bug where requests could be permitted if they only passed one policy.",
+  "risk_check": "The most likely residual failure is if the is_allowed function is called with incorrect parameters or if other parts of the code bypass this function. Since the fix directly modifies the logical operator in is_allowed, and the parameters are correctly passed from limiter.py, the patch is safe and addresses the core bug.",
+  "files": {
+    "code_snippets_v2/wrong_condition_b/limiter.py": "UNCHANGED",
+    "code_snippets_v2/wrong_condition_b/policy.py": \"\"\"Rate and quota policy checks.\"\"\"\n\ndef check_rate(requests_per_minute, rate_limit):\n    \"\"\"Return True if rate is within acceptable bounds.\"\"\"\n    return requests_per_minute < rate_limit\n\ndef check_quota(daily_total, daily_quota):\n    \"\"\"Return True if daily quota is not exceeded.\"\"\"\n    return daily_total < daily_quota\n\ndef is_allowed(requests_per_minute, rate_limit, daily_total, daily_quota):\n    \"\"\"Check if a request is allowed under BOTH rate and quota policies.\n\n    A request should only be allowed if it passes rate AND quota checks.\n    \"\"\"\n    rate_ok = check_rate(requests_per_minute, rate_limit)\n    quota_ok = check_quota(daily_total, daily_quota)\n    # Fixed: use 'and' to require both policies to pass\n    return rate_ok and quota_ok"
+  }
+}

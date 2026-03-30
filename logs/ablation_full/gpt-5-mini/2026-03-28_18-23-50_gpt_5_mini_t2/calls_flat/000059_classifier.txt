@@ -1,0 +1,190 @@
+=== CALL 000059 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: mutable_default_c
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:44:45.814149
+LATENCY_MS: 29377
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+with_history decorator in scheduler.py: the parameter 'history' is given a module-level mutable default (_shared_log) so each decoration binds the same list; the operation 'history.append(...)' thus mutates a shared list across multiple wrappers.
+
+## Failure Mechanism
+Decorating schedule_one and schedule_batch (cause) → both wrapper functions receive the same default 'history' list reference because with_history(history=_shared_log) is evaluated at definition time (mutation source) → each wrapper call executes history.append(...) (mutation/event) → both wrappers read from the same list when wrapper.get_history() is called (propagation) → observable failure: schedule_one.get_history() and schedule_batch.get_history() contain interleaved entries from both functions instead of independent histories, and get_all_stats() reports wrong counts.
+
+## Broken Invariant
+Invariant violated: "Each decorated function must have its OWN independent history list." Testable property: after calling schedule_one(task) once and schedule_batch([task]) once, schedule_one.get_history() must have length 1 and only entries with 'func' == 'schedule_one', and schedule_batch.get_history() must have length 1 and only entries with 'func' == 'schedule_batch'. Current code fails this.
+
+## Fix Strategy
+Modify with_history to avoid using a mutable module-level default. Implement with_history so that if no explicit history is provided it creates a new list at decoration time. Also support the decorator being used with optional explicit history (so semantics remain flexible). This breaks the causal chain because each decoration invocation will get its own fresh 'history' list (history = [] when history is None), so history.append in one wrapper won't affect another wrapper's list.
+
+
+## Self-Check
+{'failure_scenario': "If a caller decorates functions using @with_history(history=shared_list) intentionally, histories will still be shared because they're explicitly passed. This is expected behavior because the caller explicitly requested sharing; the fix preserves that explicit capability. Another failure scenario: if code dynamically reassigns wrapper.get_history or wrapper.clear_history after decoration, that could break invariants — but that's external misuse, not a decorator bug.", 'edge_case': 'Decorating with_history using parentheses but no arguments (e.g., @with_history()) should still work. The implementation supports both @with_history and @with_history(history=some_list). Also check empty-call behavior: calling schedule_batch([]) should record a call with args_count equal to 1 (the tasks list argument), and get_history should contain that entry.', 'invariant_check': "Under the new code: (1) multiple calls — repeated calls to schedule_one or schedule_batch append to the specific wrapper's internal 'history' list only, so schedule_one.get_history() length increases only when schedule_one is called. (2) retries/loops — looping calls to the same decorated function append repeatedly to its own history as expected. (3) state reuse — re-importing the module creates new wrapper objects with fresh histories; running schedule_one followed by schedule_batch will leave their histories separate. These checks follow from the code where 'history = []' is executed at decoration time when history is None, creating a list local to that wrapper closure. wrapper.get_history returns a copy list(history) so external callers cannot mutate the stored history except by calling wrapper.clear_history().", 'conclusion': "No flaw found in the chosen fix for the reported bug: creating a fresh list at decoration time for the 'history' variable prevents shared mutation across decorated functions while preserving optional explicit sharing when a history is passed. The code supports both @with_history and @with_history(history=existing_list) usage and returns defensive copies via get_history()."}
+
+
+# Task Description
+Scheduler history is shared across jobs. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Scheduler with decorator that tracks call history."""
+
+from worker import process, batch_process
+
+_shared_log = []
+
+
+def with_history(func=None, history=None):
+    """Decorator that records call history for a function.
+
+    Usage:
+    - @with_history
+    - @with_history()
+    - @with_history(history=some_list)
+
+    Invariant: each decorated function must have its OWN
+    independent history list unless an explicit history is provided.
+    """
+    # Support both @with_history and @with_history(...)
+    if func is None:
+        return lambda f: with_history(f, history=history)
+
+    # Create a fresh history list at decoration time if none provided.
+    if history is None:
+        history = []
+
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        history.append({"func": func.__name__, "args_count": len(args)})
+        return result
+
+    wrapper.get_history = lambda: list(history)
+    wrapper.clear_history = lambda: history.clear()
+    return wrapper
+
+
+@with_history
+def schedule_one(task):
+    """Schedule and process a single task."""
+    return process(task)
+
+
+@with_history
+def schedule_batch(tasks):
+    """Schedule and process a batch of tasks."""
+    return batch_process(tasks)
+
+
+def get_all_stats():
+    """Get combined stats (distractor)."""
+    return {
+        "one_calls": len(schedule_one.get_history()),
+        "batch_calls": len(schedule_batch.get_history()),
+    }
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If the module-level shared list were removed (so each decoration gets its own list at decoration time), the interleaved/shared-history failure would not occur.
+Evidence: _shared_log = [] is defined at module scope; a default like history=_shared_log would make multiple decorations share that object; wrapper uses history.append(...) which mutates the shared list; the new code sets history = [] when history is None at decoration time, so each wrapper closes over its own list; wrapper.get_history = lambda: list(history) returns a defensive copy.
+Judgment: The developer correctly identifies the shared-default cause, traces the mutation and propagation to the observable failure, and the supplied code implements the stated fix (fresh per-decoration list, optional explicit sharing preserved); only minor nitpick is the unused _shared_log leftover but it doesn't undermine the fix.

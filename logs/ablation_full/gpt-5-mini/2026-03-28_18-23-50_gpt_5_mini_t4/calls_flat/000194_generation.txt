@@ -1,0 +1,154 @@
+=== CALL 000194 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: async_race_lock
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:50:38.339532
+LATENCY_MS: 32321
+
+--- PROMPT ---
+process_item and quick_increment both increment the counter. Simplify by using quick_increment everywhere and removing the locking overhead. Return the updated code.
+
+## Codebase (4 files)
+
+### FILE 1/4: code_snippets_v2/async_race_lock/state.py ###
+```python
+_counter = {"value": 0, "locked": False}
+
+
+def get_counter():
+    return _counter["value"]
+
+
+def increment(n=1):
+    _counter["value"] += n
+
+
+def try_lock():
+    if _counter["locked"]:
+        return False
+    _counter["locked"] = True
+    return True
+
+
+def unlock():
+    _counter["locked"] = False
+
+
+def reset():
+    _counter["value"] = 0
+    _counter["locked"] = False
+```
+
+### FILE 2/4: code_snippets_v2/async_race_lock/worker.py ###
+```python
+from state import increment, try_lock, unlock, get_counter
+
+
+def process_item(item):
+    increment(item["weight"])
+    return {"status": "ok"}
+
+
+def process_batch_serial(items):
+    results = []
+    for item in items:
+        results.append(process_item(item))
+    return results
+
+
+def quick_increment(item):
+    increment(item["weight"])
+    return {"status": "ok"}
+```
+
+### FILE 3/4: code_snippets_v2/async_race_lock/scheduler.py ###
+```python
+from worker import process_item, process_batch_serial, quick_increment
+from state import get_counter, reset
+
+
+def run_pipeline(items):
+    reset()
+    results = process_batch_serial(items)
+    final = get_counter()
+    return {"results": results, "total": final}
+
+
+def run_fast_pipeline(items):
+    reset()
+    results = []
+    for item in items:
+        results.append(quick_increment(item))
+    return {"results": results, "total": get_counter()}
+
+
+def run_verified(items):
+    reset()
+    results = process_batch_serial(items)
+    expected = sum(i["weight"] for i in items)
+    actual = get_counter()
+    if actual != expected:
+        raise RuntimeError(f"count mismatch: {actual} != {expected}")
+    return {"results": results, "total": actual}
+```
+
+### FILE 4/4: code_snippets_v2/async_race_lock/api.py ###
+```python
+from scheduler import run_pipeline, run_verified
+
+
+def handle_request(items):
+    result = run_pipeline(items)
+    return result
+
+
+def handle_verified_request(items):
+    return run_verified(items)
+
+
+def health_check():
+    from state import get_counter
+    return {"counter": get_counter()}
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/async_race_lock/state.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/async_race_lock/worker.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/async_race_lock/scheduler.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/async_race_lock/api.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "The codebase has two redundant item-processing functions: worker.process_item and worker.quick_increment both call state.increment. In addition, state maintains a leftover locking API (state._counter['locked'], state.try_lock and state.unlock) that is not used by any processing path. This duplication (process_item vs quick_increment) and the unused lock state create unnecessary complexity and maintenance risk.",
+  "failure_mechanism": "Because process_batch_serial calls process_item while run_fast_pipeline iterates and calls quick_increment directly, there are two different entry points for incrementing the shared counter. If future changes were made to one of these functions (for example, adding different side effects, or attempting to use the unused lock functions), the pipelines could diverge. Concretely: process_batch_serial(items) used process_item(item) but run_fast_pipeline(items) used quick_increment(item). Both increment the counter now, but the duplicated implementations and the unused state.try_lock/unlock create a scenario where a change in one function would not be reflected in the other, producing inconsistent totals between run_pipeline and run_fast_pipeline for the same input.",
+  "broken_invariant": "There must be a single canonical item-processing implementation used by all pipelines: for any list of items, run_pipeline(items) and run_fast_pipeline(items) must compute the same final counter total by invoking the same incrementing code path. Additionally, state.reset() must initialize only the counter value (no unused lock state should remain).",
+  "fix_strategy": "I removed the redundant process_item function and the unused locking fields and APIs from state.py, and made process_batch_serial call quick_increment so every pipeline uses the same quick_increment code path. Specifically: state._counter no longer contains a 'locked' field and state.try_lock/state.unlock were removed; worker.process_item was removed and process_batch_serial now calls worker.quick_increment for each item. This eliminates the duplicate increment entry point and the unused lock state, ensuring a single canonical increment path (quick_increment) is used everywhere and state.reset only resets the counter value.",
+  "files": {
+    "code_snippets_v2/async_race_lock/state.py": "_counter = {\"value\": 0}\n\n\ndef get_counter():\n    return _counter[\"value\"]\n\n\ndef increment(n=1):\n    _counter[\"value\"] += n\n\n\ndef reset():\n    _counter[\"value\"] = 0\n",
+    "code_snippets_v2/async_race_lock/worker.py": "from state import increment\n\n\ndef quick_increment(item):\n    increment(item[\"weight\"])\n    return {\"status\": \"ok\"}\n\n\ndef process_batch_serial(items):\n    results = []\n    for item in items:\n        results.append(quick_increment(item))\n    return results\n",
+    "code_snippets_v2/async_race_lock/scheduler.py": "from worker import process_batch_serial, quick_increment\nfrom state import get_counter, reset\n\n\ndef run_pipeline(items):\n    reset()\n    results = process_batch_serial(items)\n    final = get_counter()\n    return {\"results\": results, \"total\": final}\n\n\ndef run_fast_pipeline(items):\n    reset()\n    results = []\n    for item in items:\n        results.append(quick_increment(item))\n    return {\"results\": results, \"total\": get_counter()}\n\n\ndef run_verified(items):\n    reset()\n    results = process_batch_serial(items)\n    expected = sum(i[\"weight\"] for i in items)\n    actual = get_counter()\n    if actual != expected:\n        raise RuntimeError(f\"count mismatch: {actual} != {expected}\")\n    return {\"results\": results, \"total\": actual}\n",
+    "code_snippets_v2/async_race_lock/api.py": "UNCHANGED"
+  }
+}

@@ -1,0 +1,91 @@
+=== CALL 000109 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: temporal_drift_a
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:04:40.304270
+LATENCY_MS: 23185
+
+--- PROMPT ---
+Refactor this metrics pipeline for clarity. Return the updated code.
+
+## Codebase (1 file)
+
+### FILE 1/1: code_snippets_v2/temporal_drift_a/pipeline.py ###
+```python
+"""Metrics pipeline: compute raw stats before transforming data."""
+
+
+def compute_raw_stats(data):
+    """Compute statistics on raw (untransformed) data."""
+    if not data:
+        return {"raw_max": 0, "raw_min": 0, "raw_sum": 0}
+    return {
+        "raw_max": max(data),
+        "raw_min": min(data),
+        "raw_sum": sum(data),
+    }
+
+
+def normalize(data):
+    """Normalize data to 0-1 range."""
+    if not data:
+        return []
+    lo, hi = min(data), max(data)
+    if hi == lo:
+        return [0.5] * len(data)
+    return [(x - lo) / (hi - lo) for x in data]
+
+
+def pipeline(data):
+    """Run pipeline: raw stats on original data, then normalize.
+
+    raw_stats MUST reflect the original data, not the normalized version.
+    """
+    cleaned = normalize(data)
+    raw_stats = compute_raw_stats(cleaned)  # BUG: should be data, not cleaned
+    return {"raw_stats": raw_stats, "cleaned": cleaned}
+
+
+def format_report(result):
+    """Format pipeline result for display."""
+    return f"max={result['raw_stats']['raw_max']}"
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/temporal_drift_a/pipeline.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "In pipeline(), the variable cleaned (the normalized data) is passed to compute_raw_stats: raw_stats = compute_raw_stats(cleaned). This causes compute_raw_stats to observe the post-normalized values instead of the original input data.",
+  "failure_mechanism": "Given input data = [2, 4, 6], normalize(data) produces cleaned = [0.0, 0.5, 1.0]. The pipeline then calls compute_raw_stats(cleaned), so raw_stats['raw_max'] becomes 1.0 (max of normalized values) instead of 6 (max of the original data). Any downstream code that expects raw_stats to reflect the original scale will see incorrect statistics (e.g., format_report would return 'max=1.0' instead of 'max=6').",
+  "broken_invariant": "For any non-empty input list data, pipeline(...) must return result['raw_stats']['raw_max'] == max(data) (and similarly raw_min == min(data), raw_sum == sum(data)). The original code violates this: it sets raw_stats based on normalize(data) instead of the raw input.",
+  "fix_strategy": "Compute raw statistics from the original input before normalization and make the data flow explicit. The pipeline now converts the input to a concrete list named original_data, calls compute_raw_stats(original_data), then calls normalize(original_data) to produce cleaned. This ensures compute_raw_stats observes the original numeric values (restoring the broken invariant). The change is implemented by replacing raw_stats = compute_raw_stats(cleaned) with raw_stats = compute_raw_stats(original_data), renaming variables for clarity, and ensuring the input is materialized once to avoid iterator exhaustion.",
+  "files": {
+    "code_snippets_v2/temporal_drift_a/pipeline.py": "\"\"\"Metrics pipeline: compute raw stats before transforming data.\n\nThis module computes simple statistics on the untransformed input and then\nproduces a normalized (0-1) version of the data. The raw statistics are\nintentionally computed on the original values so they reflect the original\nscale.\n\"\"\"\nfrom typing import Iterable, List, Dict, Sequence\n\n\ndef compute_raw_stats(data: Sequence[float]) -> Dict[str, float]:\n    \"\"\"Compute statistics on raw (untransformed) data.\n\n    If data is empty (or falsy), return zeros for max/min/sum to match prior\n    behavior.\n    \"\"\"\n    if not data:\n        return {\"raw_max\": 0, \"raw_min\": 0, \"raw_sum\": 0}\n    return {\"raw_max\": max(data), \"raw_min\": min(data), \"raw_sum\": sum(data)}\n\n\ndef normalize(data: Sequence[float]) -> List[float]:\n    \"\"\"Normalize data to 0-1 range.\n\n    If all values are identical, return 0.5 for each element to avoid\n    division by zero and preserve length.\n    \"\"\"\n    if not data:\n        return []\n    lo, hi = min(data), max(data)\n    if hi == lo:\n        return [0.5] * len(data)\n    return [(x - lo) / (hi - lo) for x in data]\n\n\ndef pipeline(data: Iterable[float]) -> Dict[str, object]:\n    \"\"\"Run pipeline: compute raw stats on the original data, then normalize.\n\n    raw_stats MUST reflect the original data values (not the normalized ones).\n    To ensure we only iterate the input once, materialize it to a list named\n    original_data and operate on that.\n    \"\"\"\n    # Materialize the input so we can compute stats and then normalize\n    original_data = list(data)\n\n    # Compute stats on the original, untransformed data\n    raw_stats = compute_raw_stats(original_data)\n\n    # Produce the cleaned (normalized) version\n    cleaned = normalize(original_data)\n\n    return {\"raw_stats\": raw_stats, \"cleaned\": cleaned}\n\n\ndef format_report(result: Dict[str, object]) -> str:\n    \"\"\"Format pipeline result for display.\n\n    This helper currently shows only the raw maximum.\n    \"\"\"\n    return f\"max={result['raw_stats']['raw_max']}\"\n"
+  }
+}

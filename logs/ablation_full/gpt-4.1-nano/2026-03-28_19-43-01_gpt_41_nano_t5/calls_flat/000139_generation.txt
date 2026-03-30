@@ -1,0 +1,150 @@
+=== CALL 000139 ===
+MODEL: gpt-4.1-nano
+PHASE: generation
+CASE_ID: wrong_condition_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:09:42.801387
+LATENCY_MS: 5550
+
+--- PROMPT ---
+Expired tokens still allowed for exempt users. Fix. Return the updated code.
+
+## Codebase (3 files)
+
+### FILE 1/3: code_snippets_v2/wrong_condition_c/limiter.py ###
+```python
+"""Core rate limiter logic."""
+
+from policy import is_expired, is_under_limit, is_exempt
+
+
+def should_allow(client_id, count, limit, timestamp, now,
+                 window_seconds, exempt_list):
+    """Decide whether to allow a request.
+
+    Allow if:
+      - token is not expired AND (under limit OR exempt)
+
+    Exempt clients bypass the rate limit even if over it,
+    but expired tokens are always rejected.
+    """
+    expired = is_expired(timestamp, now, window_seconds)
+    under_limit = is_under_limit(count, limit)
+    exempt = is_exempt(client_id, exempt_list)
+
+    # BUG: operator precedence — Python parses this as:
+    #   ((not expired) and under_limit) or exempt
+    # Correct intent: (not expired) and (under_limit or exempt)
+    # When expired=True AND exempt=True:
+    #   buggy:  (False and under_limit) or True = True  (allows!)
+    #   correct: False and (under_limit or True) = False (blocks!)
+    return not expired and under_limit or exempt
+```
+
+### FILE 2/3: code_snippets_v2/wrong_condition_c/middleware.py ###
+```python
+"""Rate limiting middleware for request processing."""
+
+from limiter import should_allow
+
+
+# Default configuration
+DEFAULT_WINDOW = 60  # seconds
+DEFAULT_LIMIT = 100
+EXEMPT_CLIENTS = {"internal-service", "health-checker"}
+
+
+def process_request(request, client_states):
+    """Process a request through the rate limiter.
+
+    Args:
+        request: dict with 'client_id' and 'timestamp'
+        client_states: dict mapping client_id -> {count, first_seen}
+
+    Returns:
+        dict with 'allowed' and 'reason'
+    """
+    client_id = request["client_id"]
+    now = request["timestamp"]
+
+    state = client_states.get(client_id, {"count": 0, "first_seen": now})
+
+    allowed = should_allow(
+        client_id=client_id,
+        count=state["count"],
+        limit=DEFAULT_LIMIT,
+        timestamp=state["first_seen"],
+        now=now,
+        window_seconds=DEFAULT_WINDOW,
+        exempt_list=EXEMPT_CLIENTS,
+    )
+
+    if allowed:
+        state["count"] = state.get("count", 0) + 1
+        client_states[client_id] = state
+        return {"allowed": True, "reason": "ok"}
+
+    return {"allowed": False, "reason": "rate_limited"}
+```
+
+### FILE 3/3: code_snippets_v2/wrong_condition_c/policy.py ###
+```python
+"""Rate limiting policy definitions."""
+
+
+def is_expired(timestamp, now, window_seconds):
+    """Check if a timestamp is outside the current window."""
+    return (now - timestamp) > window_seconds
+
+
+def is_under_limit(count, limit):
+    """Check if count is under the allowed limit."""
+    return count < limit
+
+
+def is_exempt(client_id, exempt_list):
+    """Check if a client is exempt from rate limiting."""
+    return client_id in exempt_list
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/wrong_condition_c/limiter.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/wrong_condition_c/middleware.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/wrong_condition_c/policy.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "The function should_allow in limiter.py uses the expression 'not expired and under_limit or exempt', which relies on Python's operator precedence. This causes the 'exempt' condition to be evaluated only when 'not expired' is True, allowing expired tokens for exempt users to bypass the rate limit.",
+  "failure_mechanism": "When a token is expired (is_expired returns True), the 'not expired' condition becomes False. Due to operator precedence, the expression evaluates as '(False and under_limit) or exempt', which simplifies to 'False or exempt'. If the client is exempt, the function returns True, allowing expired tokens for exempt users, contrary to the intended policy that expired tokens should always be rejected regardless of exemption.",
+  "broken_invariant": "The should_allow function should return False for any expired token, even if the client is exempt, ensuring expired tokens are always rejected regardless of exemption status.",
+  "fix_strategy": "Adding parentheses around '(under_limit or exempt)' in the return statement enforces the correct evaluation order, ensuring that the token is allowed only if it is not expired and either under the limit or exempt. This aligns the code with the intended logic that expired tokens are always rejected, even for exempt clients.",
+  "files": {
+    "code_snippets_v2/wrong_condition_c/limiter.py": "\"\"\"Core rate limiter logic.\"\"\"\n\nfrom policy import is_expired, is_under_limit, is_exempt\n\ndef should_allow(client_id, count, limit, timestamp, now,\n                 window_seconds, exempt_list):\n    \"\"\"Decide whether to allow a request.\n\n    Allow if:\n      - token is not expired AND (under limit OR exempt)\n\n    Exempt clients bypass the rate limit even if over it,\n    but expired tokens are always rejected.\n    \"\"\"\n    expired = is_expired(timestamp, now, window_seconds)\n    under_limit = is_under_limit(count, limit)\n    exempt = is_exempt(client_id, exempt_list)\n\n    # Corrected operator precedence with parentheses\n    return (not expired) and (under_limit or exempt)"
+  ,
+    "code_snippets_v2/wrong_condition_c/middleware.py": "\"\"\"Rate limiting middleware for request processing.\"\"\"\n\nfrom limiter import should_allow\n\n\n# Default configuration\nDEFAULT_WINDOW = 60  # seconds\nDEFAULT_LIMIT = 100\nEXEMPT_CLIENTS = {\"internal-service\", \"health-checker\"}\n\n\ndef process_request(request, client_states):\n    \"\"\"Process a request through the rate limiter.\n\n    Args:\n        request: dict with 'client_id' and 'timestamp'\n        client_states: dict mapping client_id -> {count, first_seen}\n\n    Returns:\n        dict with 'allowed' and 'reason'\n    \"\"\"\n    client_id = request[\"client_id\"]\n    now = request[\"timestamp\"]\n\n    state = client_states.get(client_id, {\"count\": 0, \"first_seen\": now})\n\n    allowed = should_allow(\n        client_id=client_id,\n        count=state[\"count\"],\n        limit=DEFAULT_LIMIT,\n        timestamp=state[\"first_seen\"],\n        now=now,\n        window_seconds=DEFAULT_WINDOW,\n        exempt_list=EXEMPT_CLIENTS,\n    )\n\n    if allowed:\n        state[\"count\"] = state.get(\"count\", 0) + 1\n        client_states[client_id] = state\n        return {\"allowed\": True, \"reason\": \"ok\"}\n\n    return {\"allowed\": False, \"reason\": \"rate_limited\"}"
+  ,
+    "code_snippets_v2/wrong_condition_c/policy.py": "\"\"\"Rate limiting policy definitions.\"\"\"\n\n\ndef is_expired(timestamp, now, window_seconds):\n    \"\"\"Check if a timestamp is outside the current window.\"\"\"\n    return (now - timestamp) > window_seconds\n\n\ndef is_under_limit(count, limit):\n    \"\"\"Check if count is under the allowed limit.\"\"\"\n    return count < limit\n\n\ndef is_exempt(client_id, exempt_list):\n    \"\"\"Check if a client is exempt from rate limiting.\"\"\"\n    return client_id in exempt_list"
+  }
+}

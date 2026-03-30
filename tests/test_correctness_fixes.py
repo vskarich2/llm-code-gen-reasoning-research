@@ -86,77 +86,63 @@ def test_mutable_default_b_fixed():
 # ISSUE 2: IMPORT STRIPPING
 # ============================================================
 
+def _make_case(files):
+    """Helper: build a minimal case dict for assembly tests."""
+    return {
+        "code_files": list(files.keys()),
+        "code_files_contents": files,
+        "failure_mode": "TEST",
+        "reference_fix": {},
+    }
+
+
 def test_stdlib_import_preserved():
     """Known stdlib imports must be preserved, not stripped."""
-    from parse import strip_local_imports
+    from code_assembly import assemble_code
 
     code = "import os\nimport json\nfrom collections import Counter\nx = 1"
-    result = strip_local_imports(code)
+    case = _make_case({"config.py": "pass", "cache.py": "pass"})
+    result = assemble_code(code, case).code
     assert "import os" in result, "os import was stripped"
     assert "import json" in result, "json import was stripped"
     assert "from collections import Counter" in result, "collections import was stripped"
 
-    print("[TEST: STDLIB IMPORTS PRESERVED]")
-    print("  PASS")
-
 
 def test_local_import_stripped():
     """Local sibling imports must be stripped."""
-    from parse import strip_local_imports
+    from code_assembly import assemble_code
 
     code = "from config import create_config\nimport cache\nx = 1"
-    result = strip_local_imports(code)
+    case = _make_case({"config.py": "def create_config(): pass", "cache.py": "pass"})
+    result = assemble_code(code, case).code
     assert "from config" not in result, "local import was not stripped"
     assert "import cache" not in result, "local import was not stripped"
     assert "x = 1" in result, "non-import code was incorrectly removed"
 
-    print("[TEST: LOCAL IMPORTS STRIPPED]")
-    print("  PASS")
 
-
-def test_unknown_import_fails_strict():
-    """In strict mode, unknown imports must raise RuntimeError."""
-    from parse import strip_local_imports
+def test_unknown_import_preserved_safe_mode():
+    """Unknown non-stdlib, non-local imports are preserved in safe mode (conservative)."""
+    from code_assembly import assemble_code
 
     code = "import decimal\nx = 1"
-    case_local = frozenset(["config", "cache"])
-
-    try:
-        strip_local_imports(code, case_local_modules=case_local, strict=True)
-        assert False, "Should have raised RuntimeError for unknown import 'decimal'"
-    except RuntimeError as e:
-        assert "decimal" in str(e), f"Error should mention 'decimal', got: {e}"
-
-    print("[TEST: UNKNOWN IMPORT FAILS STRICT]")
-    print("  PASS")
-
-
-def test_unknown_import_silent_without_strict():
-    """Without strict mode, unknown imports are stripped (backward compat)."""
-    from parse import strip_local_imports
-
-    code = "import decimal\nx = 1"
-    result = strip_local_imports(code)
-    assert "import decimal" not in result, "unknown import should be stripped in non-strict mode"
+    case = _make_case({"a.py": "pass", "b.py": "pass"})
+    result = assemble_code(code, case).code
+    # decimal is not in STDLIB_MODULES and not a local module
+    # safe mode preserves unknown imports (conservative)
+    assert "import decimal" in result
     assert "x = 1" in result
 
-    print("[TEST: UNKNOWN IMPORT STRIPPED NON-STRICT]")
-    print("  PASS")
 
-
-def test_known_local_stripped_strict():
-    """Known local modules are stripped even in strict mode."""
-    from parse import strip_local_imports
+def test_known_local_stripped():
+    """Known local modules are stripped."""
+    from code_assembly import assemble_code
 
     code = "from config import create_config\nimport os\nx = 1"
-    case_local = frozenset(["config"])
-    result = strip_local_imports(code, case_local_modules=case_local, strict=True)
+    case = _make_case({"config.py": "def create_config(): pass"})
+    result = assemble_code(code, case).code
     assert "from config" not in result
     assert "import os" in result
     assert "x = 1" in result
-
-    print("[TEST: KNOWN LOCAL STRIPPED IN STRICT]")
-    print("  PASS")
 
 
 # ============================================================

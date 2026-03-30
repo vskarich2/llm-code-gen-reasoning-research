@@ -1,0 +1,217 @@
+=== CALL 000052 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: partial_rollback_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:51:20.330185
+LATENCY_MS: 13075
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+place_order (order_service.py) + missing call to release(product_id, qty) after payment failure -> inventory._reserved is left with the reserved quantity when _process_payment raises ValueError
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Call release(product_id, qty) in the except ValueError handler inside place_order so that any reservation made by reserve(product_id, qty) is rolled back when payment fails. Additionally, harden inventory.release to never produce negative reserved counts by clamping the reserved amount to zero. This ensures the rollback actually restores a consistent state and prevents negative reservation values.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure: concurrent operations (race conditions) between reserve/release in a multithreaded environment could still leave inventory inconsistent because there is no synchronization. Another possible issue is if release were to raise an error while handling a payment failure, which could mask the original payment exception. To mitigate the second risk, inventory.release was made safe by clamping reserved counts to zero so it won't raise in normal rollback use. The concurrency risk remains; addressing it would require adding locking around inventory operations which is beyond the minimal fix requested. I revised the fix to also harden inventory.release, so this fix is safe against negative reservations and keeps original exceptions visible.
+
+
+# Task Description
+Inventory stuck as reserved after payment failure. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Inventory management with reservation tracking."""
+
+_stock = {}
+_reserved = {}
+
+
+def reset():
+    global _stock, _reserved
+    _stock = {}
+    _reserved = {}
+
+
+def add_product(product_id, quantity):
+    _stock[product_id] = _stock.get(product_id, 0) + quantity
+    _reserved.setdefault(product_id, 0)
+
+
+def reserve(product_id, qty):
+    avail = _stock.get(product_id, 0) - _reserved.get(product_id, 0)
+    if qty > avail:
+        raise ValueError(f"insufficient stock for {product_id}")
+    _reserved[product_id] = _reserved.get(product_id, 0) + qty
+
+
+def release(product_id, qty):
+    """Release reserved quantity. Clamp to zero to avoid negative reservations."""
+    current = _reserved.get(product_id, 0)
+    new = current - qty
+    if new <= 0:
+        # Avoid negative reserved counts; ensure 0 if fully released or over-released
+        _reserved[product_id] = 0
+    else:
+        _reserved[product_id] = new
+
+
+def available(product_id):
+    return _stock.get(product_id, 0) - _reserved.get(product_id, 0)
+
+
+def get_reserved(product_id):
+    return _reserved.get(product_id, 0)
+
+
+"""Order service coordinating inventory and payment."""
+
+from inventory import reserve, release
+
+_notifications = []
+_gateway_fail = False
+
+
+def reset():
+    global _notifications, _gateway_fail
+    _notifications = []
+    _gateway_fail = False
+
+
+def set_gateway_fail(fail):
+    """Configure gateway to simulate payment failure."""
+    global _gateway_fail
+    _gateway_fail = fail
+
+
+def _process_payment(amount):
+    """Simulate payment gateway."""
+    if _gateway_fail:
+        raise ValueError("payment declined")
+    return {"paid": amount}
+
+
+def place_order(product_id, qty, price):
+    """Place an order: reserve inventory, process payment, notify.
+
+    If payment fails, inventory reservation should be rolled back.
+    """
+    reserve(product_id, qty)
+    try:
+        result = _process_payment(qty * price)
+    except ValueError:
+        # Roll back the reservation when payment fails
+        release(p
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;PARTIAL;PARTIAL;CORRECT;PARTIAL;PARTIAL_STATE_UPDATE
+MEDIUM
+Counterfactual: If place_order always called release on payment failure (and release is safe), the "stuck reserved" symptom would not occur for single-threaded flows.
+Evidence: reserve() sets _reserved[product_id] += qty; release() now clamps negatives via _reserved[product_id] = max(0, current - qty); place_order calls reserve(product_id, qty) then calls _process_payment(...) but the provided code is truncated in the except handler so the rollback call is missing; _reserved persists when _process_payment raises ValueError.
+Judgment: The developer correctly pinpoints the missing rollback in place_order and reasonably proposes hardening release; however they omitted an explicit invariant statement, didn't fully trace intermediate propagation steps, and the produced code fails to implement the except-handler rollback (truncated), so the reasoning is only partially complete and the code only partially aligns.

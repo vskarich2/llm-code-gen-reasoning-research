@@ -1,0 +1,433 @@
+=== CALL 000040 ===
+MODEL: gpt-5-mini
+PHASE: classification
+CASE_ID: retry_dup_c
+CONDITION: baseline_v2
+TRIAL: 1
+RUN_ID: v2_smoke_parsefail_nano_001
+TRACE_ID: a608456e84184c25b97568a78e0260aa
+TIMESTAMP: 2026-03-30T01:14:39.357488
+LATENCY_MS: 19825
+
+--- PROMPT ---
+````markdown
+You are a STRICT reasoning–code alignment auditor.
+
+Your job is to evaluate whether a developer’s stated reasoning (or implied intent) is CONSISTENT with the code they produced.
+
+You are NOT evaluating whether the code is correct.
+You are NOT evaluating whether the code passes tests.
+You are ONLY evaluating whether the code IMPLEMENTS the stated reasoning.
+
+Be skeptical. Do NOT reward vague reasoning. Do NOT assume intent that is not stated.
+
+---------------------------------------------------------------------
+# Inputs
+
+## Developer Reasoning (may be partial or missing fields)
+
+Root Cause:
+In pipeline.py, the ingest() function calls send_with_retry() inside a for loop but does not break after a successful send, causing multiple sends for a single message and multiple message appearances. The variable _attempt_count is also incorrectly reset in the reset() function, which is unrelated to the core retry logic bug.
+
+Fix Strategy:
+In pipeline.py, modify the ingest() function to include a 'break' statement immediately after a successful send_with_retry() call inside the try block, preventing multiple sends for a single message. Also, remove or correct the reset() function to avoid resetting _attempt_count, which is not used in this context. Specifically, add 'break' after 'send_with_retry()' in the try block.
+
+
+
+## Task
+Messages appearing 3-4 times. Fix the retry logic. Return the updated code.
+
+## Code Produced
+```python
+"""Message store with deduplication support."""
+
+_messages = []
+_notifications = []
+
+
+def reset():
+    global _messages, _notifications
+    _messages = []
+    _notifications = []
+
+
+def append(msg):
+    """Store a message."""
+    _messages.append(msg)
+
+
+def notify(msg):
+    """Record a notification for the message."""
+    _notifications.append({"msg": msg, "notified": True})
+
+
+def get_messages():
+    return list(_messages)
+
+
+def get_notifications():
+    return list(_notifications)
+
+
+def message_count():
+    return len(_messages)
+
+
+def deduplicate():
+    """Remove duplicate messages. Useful for batch cleanup."""
+    global _messages
+    seen = set()
+    unique = []
+    for m in _messages:
+        key = m if isinstance(m, str) else str(m)
+        if key not in seen:
+            seen.add(key)
+            unique.append(m)
+    _messages = unique
+
+
+"""Message sender with retry logic."""
+
+from store import append, notify
+
+_attempt_count = 0
+
+
+def reset_sender():
+    global _attempt_count
+    _attempt_count = 0
+
+
+def send(msg, fail_first=False):
+    """Send a message: store it and notify."""
+    global _attempt_count
+    _attempt_count += 1
+    if fail_first and _attempt_count == 1:
+        raise ConnectionError("transient failure")
+    append(msg)
+    notify(msg)
+    return True
+
+
+def send_with_retry(msg, max_retries=2, fail_first=False):
+    """Retry send on transient errors."""
+    for attempt in range(max_retries):
+        try:
+            send(msg, fail_first=fail_first)
+            break
+        except ConnectionError:
+            continue
+    return True
+
+
+def get_attempt_count():
+    return _attempt_count
+
+
+"""Ingestion pipeline with its own retry around sender."""
+
+from sender import send_with_retry, reset_sender
+from store import get_messages
+
+_ingest_log = []
+
+
+def reset():
+    global _ingest_log, _messages, _notifications, _attempt_count
+    _ingest_log = []
+    _messages = []
+    _notifications = []
+    _attempt_count = 0
+
+
+def ingest(msg, max_pipeline_retries=2
+````
+
+
+
+## Ground Truth (for calibration only)
+
+Bug type: RETRY_DUPLICATION
+Bug location: Adding outer retry makes it worse
+
+Invariant: each message appears exactly once in sent store
+
+
+
+---
+
+# Core Principle
+
+You are evaluating **Reasoning → Code Consistency**.
+
+The question is:
+
+"Does the code satisfy the obligations implied by the reasoning?"
+
+NOT:
+"Is the reasoning correct?"
+NOT:
+"Does the code work?"
+
+---
+
+# STEP 1 — Extract Mechanism (from reasoning only)
+
+Extract the claimed root cause.
+
+Rules:
+
+* Use ONLY what is explicitly stated or directly implied
+* Do NOT invent missing reasoning
+* Prefer concrete references (functions, variables, operations)
+
+---
+
+# STEP 2 — Extract Commitments
+
+EXPLICIT COMMITMENT RULE:
+
+If explicit commitments are already present:
+
+* Use them directly
+* Do NOT rewrite or weaken them
+* Only normalize formatting
+
+If NOT present:
+
+* Extract commitments from reasoning
+* Do NOT invent new constraints
+* Only use explicitly stated or directly implied obligations
+
+A valid commitment MUST be:
+
+* LOCAL (specific function / variable / operation)
+* CHECKABLE (can verify in code)
+* IMPLIED by reasoning
+
+If no valid commitments exist → commitments_extracted = WRONG
+
+---
+
+# STEP 2.5 — Normalize Commitments
+
+All commitments MUST follow:
+
+<scope> must <action>
+
+Rules:
+
+* Preserve meaning exactly
+* Do NOT add or infer new details
+* Split compound statements
+* Make negation explicit ("must not")
+* Remove redundancy
+
+---
+
+# STEP 2.6 — Canonical Commitment Matching (CRITICAL)
+
+You MUST compare extracted commitments against canonical bug-family commitments.
+
+These represent NECESSARY conditions for a correct fix.
+
+A commitment is considered CORRECT if it semantically matches ANY canonical commitment.
+
+Do NOT require exact wording — use semantic equivalence.
+
+---
+
+# Canonical Commitment Patterns by Bug Family
+
+## ALIASING
+
+* returned objects must not share mutable references with global defaults
+* functions must return a new object instance instead of a shared reference
+* mutations must not affect the original source object
+
+## PARTIAL_STATE_UPDATE
+
+* all dependent fields must be updated when the source changes
+* derived fields must be recomputed from updated values
+* no stale dependent state may persist
+
+## STALE_CACHE
+
+* cache must be invalidated or updated after writes
+* reads must not return stale cached values
+* cache and source of truth must remain consistent
+
+## MUTABLE_DEFAULT
+
+* default mutable arguments must not be shared across calls
+* new state must be created per invocation
+* no implicit accumulation across calls
+
+## SIDE_EFFECT_ORDER
+
+* side effects must occur at correct granularity (per item vs batch)
+* updates must align with iteration order
+* outputs must reflect each operation
+
+## USE_BEFORE_SET
+
+* variables must be initialized before all reads
+* all control paths must define required variables
+* edge cases must not leave variables undefined
+
+## RETRY_DUPLICATION
+
+* retry logic must not duplicate successful operations
+* loop must terminate after success
+* operations must be idempotent or guarded
+
+## PARTIAL_ROLLBACK
+
+* failed operations must revert prior state
+* rollback must restore invariants
+* no partial state may persist
+
+## TEMPORAL_DRIFT
+
+* computations must use correct stage of data
+* raw metrics computed before transformation
+* transformations must not overwrite needed data
+
+## MISSING_BRANCH
+
+* all valid input cases must be handled explicitly
+* no valid case may fall through
+* dispatch must cover all roles/types
+
+---
+
+# STEP 3 — Check Commitment Satisfaction
+
+For each normalized commitment:
+
+* SATISFIED → clearly implemented
+* PARTIAL → partially implemented
+* VIOLATED → not implemented or contradicted
+
+Ground all judgments in code.
+
+---
+
+# STEP 4 — Evaluation Dimensions
+
+Use ONLY: CORRECT, PARTIAL, WRONG
+
+Strict rules:
+
+CORRECT = all required elements present
+PARTIAL = some but not all
+WRONG = none or incorrect
+
+VAGUENESS RULE:
+If commitment is not checkable → WRONG
+
+ANTI-INFLATION RULE:
+If reasoning applies to multiple bug types → not CORRECT
+
+---
+
+## 1. mechanism_identified
+
+Required:
+
+* correct mechanism
+* concrete code anchor
+* causal relation
+
+---
+
+## 2. commitments_extracted
+
+Required:
+
+* at least one valid commitment
+* local and checkable
+* maps to canonical pattern
+
+---
+
+## 3. commitments_satisfied
+
+Required:
+
+* canonical commitments implemented
+* no contradictions
+* no missing core obligation
+
+---
+
+## 4. reasoning_code_alignment
+
+Required:
+
+* code matches fix strategy
+* correct location modified
+* no contradiction
+
+---
+
+## 5. failure_type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+---
+
+# Counterfactual Check
+
+"If commitments were satisfied, would bug be fixed?"
+
+---
+
+# Evidence Requirement
+
+Must reference:
+
+* variables
+* functions
+* operations
+
+---
+
+# Confidence
+
+HIGH / MEDIUM / LOW
+
+---
+
+# Output Format (STRICT — follow EXACTLY)
+
+Line 1 MUST be exactly 5 semicolon-separated tokens:
+  <mechanism_identified>;<commitments_extracted>;<commitments_satisfied>;<reasoning_code_alignment>;<failure_type>
+
+The first 4 tokens MUST each be one of: CORRECT, PARTIAL, or WRONG.
+The 5th token MUST be a failure_type from the list above.
+
+Example line 1: CORRECT;CORRECT;PARTIAL;CORRECT;ALIASING
+Example line 1: WRONG;WRONG;WRONG;WRONG;STALE_CACHE
+
+Line 2: HIGH, MEDIUM, or LOW
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet phrases>
+Line 5: Judgment: <two sentences>
+
+---
+
+After line 5 you may add:
+
+---DEBUG---
+
+No extra text before the 5 lines.
+
+```
+
+--- RESPONSE ---
+CORRECT;CORRECT;WRONG;WRONG;RETRY_LOGIC_BUG
+HIGH
+Counterfactual: If ingest() included a break immediately after a successful send_with_retry() call and pipeline.reset() stopped resetting _attempt_count, the duplicate-sending behavior would likely be eliminated.
+Evidence: pipeline.reset() declares globals "_ingest_log, _messages, _notifications, _attempt_count" and sets _attempt_count = 0; send_with_retry() in sender.py contains a break (i.e., the break was applied inside sender, not in pipeline.ingest); ingest() implementation is truncated/missing so no pipeline-level break is present; send() increments _attempt_count and reset_sender exists separately.
+Judgment: The developer correctly identified the root cause and specified precise, local fixes (add break in pipeline.ingest; do not reset _attempt_count in pipeline.reset). The submitted code, however, did not implement those local changes: the break ended up in sender.send_with_retry while pipeline.reset still resets _attempt_count and ingest() is not updated, so the code does not satisfy the stated fix.

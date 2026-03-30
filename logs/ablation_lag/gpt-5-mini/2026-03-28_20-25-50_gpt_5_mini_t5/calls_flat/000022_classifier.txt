@@ -1,0 +1,173 @@
+=== CALL 000022 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: partial_update_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:33:50.571130
+LATENCY_MS: 21083
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In code_snippets_v2/partial_update_c/profile.py, the function update_profile updates user['email'] but does not modify user['verified'] or user['cached_greeting'] when the email actually changes. The variables involved are old_email (the previous user['email']) and user['cached_greeting']; because verified/ cached_greeting are not updated after assigning the new email, the old greeting and a previously True verified flag can persist.
+
+## Failure Mechanism
+Example: A user is created and then verified (user['verified'] == True) and user['cached_greeting'] holds "Hello, Alice!". Calling update_profile(user, {'email': 'alice.new@example.com'}) runs the email branch: old_email is read, user['email'] is set to the new address, but the function never sets user['verified'] to False nor clears user['cached_greeting']. As a result, the user remains marked verified and the cached greeting still shows the old name/greeting even though the email changed. Concretely, the code path in update_profile reaches the line user['email'] = value and then falls through without executing any further adjustments because the missing statements were not implemented.
+
+## Broken Invariant
+When update_profile is called with changes that include a validated email change (validate_email(value) is True) and should_reverify(old_email, new_email) returns True, then after update_profile returns it must hold that user['verified'] == False and user['cached_greeting'] is None. Currently this is not guaranteed because the function does not clear verified or cached_greeting on email changes.
+
+## Fix Strategy
+In update_profile I added logic in the email-handling branch to call should_reverify(old_email, value) and, if it returns True, set user['verified'] = False and user['cached_greeting'] = None. This directly enforces the invariant by making the function clear the cached greeting and mark the user unverified when the email has effectively changed (respecting should_reverify's case-insensitive comparison and old_email None handling). The change is localized to the email branch and preserves the existing name-handling behavior.
+
+
+
+# Task Description
+After changing email, old greeting still shows. Fix the update. Return the updated code.
+
+# Code Produced
+```python
+"""User profile with email verification and cached greeting."""
+
+from validation import validate_email, validate_name
+from notifications import build_greeting, should_reverify
+
+
+def create_user(name, email):
+    """Create a user with verified status and cached greeting."""
+    return {
+        "name": name,
+        "email": email,
+        "verified": False,
+        "cached_greeting": build_greeting({"name": name}),
+    }
+
+
+def verify_user(user):
+    """Mark user as verified."""
+    user["verified"] = True
+    return user
+
+
+def update_profile(user, changes):
+    """Update profile fields.
+
+    Invariant: changing email must set verified=False and clear cached_greeting.
+    Invariant: changing name must update cached_greeting.
+    """
+    for key, value in changes.items():
+        if key == "email" and validate_email(value):
+            old_email = user.get("email")
+            user["email"] = value
+            # If the email effectively changed, require re-verification and clear greeting
+            if should_reverify(old_email, value):
+                user["verified"] = False
+                user["cached_greeting"] = None
+        elif key == "name" and validate_name(value):
+            user["name"] = value
+            user["cached_greeting"] = build_greeting(user)
+    return user
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If the omission of clearing user['verified'] and user['cached_greeting'] on email change were removed, the stale verified flag and greeting would not persist.
+Evidence: - update_profile previously assigns user['email'] = value and did not modify user['verified'] or user['cached_greeting']; - create_user initializes cached_greeting via build_greeting({"name": name}) so greeting can remain stale; - the fix calls should_reverify(old_email, value) and then sets user['verified']=False and user['cached_greeting']=None; - name branch updates cached_greeting (user['cached_greeting']=build_greeting(user)) showing symmetric behavior missing for email changes.
+Judgment: The developer traces a valid causal chain from the email-assignment omission to the observable stale greeting/verification state and specifies a precise invariant; the provided code implements the described fix and directly addresses the root cause.

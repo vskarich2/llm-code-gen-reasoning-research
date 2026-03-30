@@ -1,0 +1,244 @@
+=== CALL 000224 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: check_then_act
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:46:46.432175
+LATENCY_MS: 21409
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+make_withdraw_steps (step_check uses check_balance which reads _accounts and sets result['approved']; step_act later calls do_withdraw) + variable _accounts + causal relationship: the separation of the CHECK (reading _accounts and storing result['approved']) from the ACT (decrementing _accounts) allows both checks to observe the same initial balance before either debits it, so both withdrawals are approved and the subsequent debits overdraft the account.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Make the actual withdrawal operation atomic by moving the authoritative check-then-act into do_withdraw and protecting it with a per-account lock. Change do_withdraw to acquire a lock for the account, verify the balance, and perform the decrement only if sufficient funds remain, returning True/False. Update the step_act to call do_withdraw and update result['approved'] with the actual outcome. This prevents the race where two separate checks both succeed before either debit occurs because the final debit now re-checks and only one will succeed under interleaving; the lock ensures the check-and-act is atomic in multithreaded scenarios.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure mode: a user of the module might bypass do_withdraw and directly modify _accounts, reintroducing races; or a tiny race could occur on creation of per-account locks if many threads try to create the same lock simultaneously. Mitigation: create_account initializes a lock for the account and do_withdraw uses _locks.setdefault(name, threading.Lock()) to ensure a lock exists; this reduces the window for lock-creation races. Given these measures, and that the authoritative check-and-act is now inside a locked region, the fix is safe for the intended use. I revised the fix to include per-account locks and to ensure locks are created both at account creation and on-demand in do_withdraw.
+
+
+# Task Description
+Under interleaving, two withdrawals of 80 from balance=100 both succeed, leaving -60. Fix so balance never goes negative.
+
+# Code Produced
+```python
+import threading
+
+"""Bank with safe check-then-act withdrawal, simulated via steps.
+
+This version prevents the interleaving bug by making the ACT operation
+perform an authoritative check-and-act under a per-account lock.
+"""
+
+_accounts = {}
+_locks = {}
+
+
+def reset():
+    _accounts.clear()
+    _locks.clear()
+
+
+def create_account(name, balance):
+    _accounts[name] = balance
+    # ensure a lock exists for the account
+    _locks[name] = threading.Lock()
+
+
+def get_balance(name):
+    lock = _locks.get(name)
+    if lock:
+        with lock:
+            return _accounts.get(name, 0)
+    return _accounts.get(name, 0)
+
+
+def check_balance(name, amount):
+    """CHECK: is balance sufficient? (best-effort view)
+
+    Note: this is a non-authoritative check; the authoritative check-and-act
+    happens in do_withdraw which is locked.
+    """
+    lock = _locks.get(name)
+    if lock:
+        with lock:
+            return _accounts.get(name, 0) >= amount
+    return _accounts.get(name, 0) >= amount
+
+
+def do_withdraw(name, amount):
+    """ACT: atomically verify balance and decrement under a lock.
+
+    Returns True if withdrawal succeeded, False otherwise.
+    """
+    # Ensure a lock exists for this account (on-demand)
+    lock = _locks.setdefault(name, threading.Lock())
+    with lock:
+        current = _accounts.get(name, 0)
+        if current >= amount:
+            _accounts[name] = current - amount
+            return True
+        return False
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def make_withdraw_steps(name, amount):
+    """Split withdrawal into separate check and act steps.
+
+    The CHECK step still provides a preliminary approval, but the ACT step
+    performs the authoritative, locked check-and-act by calling do_withdraw.
+    This prevents two interleaved checks from both leading to successful
+    debits.
+    """
+    result = {"approved": False}
+
+    def step_check():
+        result["approved"] = check_balance(name, amount)
+        return ("check", result["approved"])
+
+    def step_act():
+        # Perform the authoritative, locked check-and-act. Update the
+        # approval to reflect the actual outcome at the time of the act.
+        result["approved"] = do_withdraw(name, amount)
+        return ("act", result["approved"])
+
+    return step_check, step_act
+
+
+def sequential_withdrawals():
+    """Two withdrawals of 80 from balance=100. Sequential: second denied."""
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (act_a, ()), (check_b, ()), (act_b, ())])
+    return get_balance("alice")
+
+
+def interleaved_withdrawals():
+    """Two withdrawals of 80, interleaved: fixed — only one approved."""
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (check_b, ()), (act_a, ()), (act_b, ())])
+    return get_balance("alice")
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;WRONG;CORRECT;CORRECT;CORRECT;TEMPORAL_ORDERING
+HIGH
+Counterfactual: If the CHECK and ACT were made atomic (no separated unchecked reads of _accounts), the double-withdrawal failure would not occur.
+Evidence: - create_account sets _accounts[name] and _locks[name]=Lock; - make_withdraw_steps: step_check uses check_balance() which reads _accounts and sets result["approved"]; - step_act calls do_withdraw() which does a lock-protected check-and-decrement on _accounts; - run_steps can interleave as (check_a, check_b, act_a, act_b) so two checks may both observe 100 before any decrement; - do_withdraw's per-account lock makes the authoritative check-and-act serial, preventing both debits.
+Judgment: The developer correctly identified the concurrency root cause and proposed a matching lock-based fix that the code implements; however they failed to state the explicit invariant ("balance never negative") and left the Failure Mechanism/Broken Invariant sections blank, which weakens the reasoning completeness.

@@ -1,0 +1,193 @@
+=== CALL 000080 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: use_before_set_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:44:51.594528
+LATENCY_MS: 22241
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+load function + _status + on empty/None source, _status stays at previous value instead of being set to 'empty'
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Set _status to 'empty' when the source is empty or None, which directly addresses the bug mechanism by ensuring the status reflects the current state of the data loading process.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+The most likely failure mode is that the status might not be set correctly if the source is an unexpected type. However, since we are checking for None and length, this fix is safe as it explicitly handles empty and None cases.
+
+
+# Task Description
+Pipeline crashes on empty data source. Fix. Return the updated code.
+
+# Code Produced
+```python
+'''Data loader with status tracking.'''
+
+_status = 'idle'
+_data = None
+
+def reset():
+    global _status, _data
+    _status = 'idle'
+    _data = None
+
+def load(source):
+    '''Load data from source. Sets status on success only.'''
+    global _status, _data
+    if source and len(source) > 0:
+        _data = [x for x in source]
+        _status = 'loaded'
+    else:
+        _status = 'empty'  # Fix applied here
+    return _data
+
+def get_status():
+    return _status
+
+def get_data():
+    return _data
+
+def validate_format(data):
+    '''Distractor: checks data format, unrelated to bug.'''
+    if data is None:
+        return False
+    return isinstance(data, list)
+
+
+'''Data pipeline that uses loader.'''
+
+from loader import load, get_status, get_data
+
+def reset():
+    global _status, _data
+    _status = 'idle'
+    _data = None
+
+def run_pipeline(source):
+    '''Load data and return status-tagged result.
+
+    Contract: status must reflect THIS call's outcome,
+    not a previous call's state.
+    '''
+    load(source)
+    status = get_status()
+    data = get_data()
+
+    return {
+        'status': status,
+        'count': len(data) if data else 0,
+        'data': data,
+    }
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+PARTIAL;WRONG;WRONG;PARTIAL;PARTIAL;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If the status were always set to 'empty' on empty/None source, the specific symptom of stale status would be removed, but the observable failure could still occur because _data is never cleared on empty inputs.
+Evidence: load() else branch sets _status = 'empty' but does not set _data = None; run_pipeline() reads get_data() and may observe stale _data from a previous load; load() condition uses "if source and len(source) > 0" which can skip clearing state for falsy-but-non-empty types; the developer left Failure Mechanism and Broken Invariant empty in reasoning.
+Judgment: The developer correctly pointed at loader._status as implicated but failed to state the broken invariant or trace the mutation-to-failure propagation; the proposed fix updates status but omits clearing _data, leaving a partial-state-update bug — reasoning is therefore incomplete and only partially aligned with the code.

@@ -184,7 +184,7 @@ def run_single(run_dir: str, run_id: str, model: str,
 
     sys.path.insert(0, ".")
     from runner import load_cases
-    from execution import build_prompt, evaluate_case, set_call_context
+    from execution import build_prompt, evaluate_case
     from llm import call_model
 
     cases_file = config["cases"].get("source", "cases_v2.json")
@@ -206,12 +206,17 @@ def run_single(run_dir: str, run_id: str, model: str,
 
         try:
             # Build prompt
-            prompt, op_used = build_prompt(case, condition)
+            prompt, op_used, prompt_asm = build_prompt(case, condition)
 
             # Generate
             gen_start = time.monotonic()
             file_paths = list(case.get("code_files_contents", {}).keys()) or None
-            raw_output = call_model(prompt, model=model, file_paths=file_paths)
+            raw_output = call_model(
+                prompt, model=model, file_paths=file_paths,
+                logger=logger, case_id=case_id,
+                phase="generation", condition=condition,
+                prompt_assembly=prompt_asm,
+            )
             gen_elapsed = time.monotonic() - gen_start
 
             logger.log_call(

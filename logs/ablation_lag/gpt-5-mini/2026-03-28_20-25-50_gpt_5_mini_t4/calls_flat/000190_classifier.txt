@@ -1,0 +1,166 @@
+=== CALL 000190 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: feature_flag_drift
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:33:03.534025
+LATENCY_MS: 20092
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In api.checkout the parameter use_new_pricing is accepted but never used. The function simply calls create_invoice(customer, items) without altering any feature flag. Because pricing.compute_price queries flags.is_enabled("new_pricing"), the provided use_new_pricing boolean is ignored and never propagated to the flags system.
+
+## Failure Mechanism
+If a caller invokes checkout(customer, items, use_new_pricing=True), api.checkout does not enable the "new_pricing" feature flag. create_invoice calls pricing.compute_price which calls is_enabled("new_pricing"). Since the flag was not set, compute_price continues to use _v1_price, so invoice['pricing_version'] is "v1" and prices do not reflect the intended v2 logic. In short: use_new_pricing=True -> checkout does nothing -> flag remains False -> pricing uses v1 results.
+
+## Broken Invariant
+Calling checkout(customer, items, use_new_pricing=True) must produce an invoice whose pricing_version is "v2" and whose line amounts are computed by pricing._v2_price. Conversely, calling checkout(..., use_new_pricing=False) must ensure pricing_version is "v1" and amounts use pricing._v1_price. This property is currently violated because checkout does not toggle the flag.
+
+## Fix Strategy
+Make checkout temporarily set the global "new_pricing" flag according to use_new_pricing while creating the invoice, then restore the original flag state. I use flags.get_all_flags() to snapshot the current setting, then enable() or disable() for the requested mode before calling create_invoice, and finally restore the original flag value in a finally block to avoid leaving global state changed. This ensures compute_price and get_pricing_version observe the requested flag during invoice creation but does not leak the override to other callers.
+
+
+
+# Task Description
+The checkout function takes a use_new_pricing flag but pricing doesn't seem to respect it. Fix the flag propagation. Return the updated code.
+
+# Code Produced
+```python
+from billing import create_invoice, get_invoices
+from flags import enable, disable, get_all_flags
+
+
+def checkout(customer, items, use_new_pricing=False):
+    # Snapshot current flags so we can restore after creating the invoice
+    snapshot = get_all_flags()
+    try:
+        if use_new_pricing:
+            enable("new_pricing")
+        else:
+            disable("new_pricing")
+        invoice = create_invoice(customer, items)
+    finally:
+        # Restore the original new_pricing flag value
+        if snapshot.get("new_pricing", False):
+            enable("new_pricing")
+        else:
+            disable("new_pricing")
+
+    return invoice
+
+
+def admin_report():
+    return get_invoices()
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: If checkout propagated use_new_pricing into the flags system during invoice creation, the invoice would reflect v2 pricing when requested and the failure would not occur.
+Evidence: - checkout snapshots flags via get_all_flags(); - it calls enable("new_pricing") or disable("new_pricing") based on use_new_pricing before create_invoice(customer, items); - create_invoice -> pricing.compute_price reads flags.is_enabled("new_pricing") so the flag controls pricing_version; - finally restores original flag via snapshot.get("new_pricing") so behaviour matches reasoning.
+Judgment: The developer correctly identifies the missing propagation of use_new_pricing into the global flags as the root cause and traces the causal chain to the observable wrong pricing; the provided code implements the described fix but creates a hidden global-state dependency (possible concurrency/side-effect risk) that the reasoning did not address.
+
+---DEBUG---
+Detailed notes:
+- mechanism_identified: The developer names api.checkout (checkout) and the chain through create_invoice and pricing.compute_price -> flags.is_enabled("new_pricing"), which is concrete and accurate.
+- invariant_identified: The invariant is testable (invoice['pricing_version']=="v2" when use_new_pricing=True) and matches the described behavior of pricing._v1_price/_v2_price.
+- causal_chain_complete: The chain is complete: ignored parameter -> flag not set -> compute_price reads false -> uses v1 -> invoice shows v1. All intermediate steps referenced.
+- fix_alignment: The proposed snapshot/enable/disable/restore directly forces flags.is_enabled to reflect the parameter during create_invoice; that addresses the immediate propagation gap.
+- code_alignment: The produced code calls get_all_flags(), enable/disable(), create_invoice(), and restores flag state in finally, matching the reasoning precisely.
+- Remaining concern: The fix relies on temporally mutating a global flag, which can impact concurrent requests; the reasoning section's "does not leak override to other callers" is only true if there is no concurrency or if enable/disable are atomic/isolated per-request — an important unstated assumption.

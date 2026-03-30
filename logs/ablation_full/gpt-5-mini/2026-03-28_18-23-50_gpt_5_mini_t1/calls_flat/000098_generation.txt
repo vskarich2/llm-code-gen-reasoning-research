@@ -1,0 +1,198 @@
+=== CALL 000098 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: partial_rollback_a
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:02:52.124700
+LATENCY_MS: 37274
+
+--- PROMPT ---
+Refactor this order system for clarity. Return the updated code.
+
+## Codebase (1 file)
+
+### FILE 1/1: code_snippets_v2/partial_rollback_a/order.py ###
+```python
+"""Order fulfillment with inventory and wallet."""
+
+
+class Inventory:
+    def __init__(self, stock):
+        self.stock = stock
+        self.reserved = 0
+
+    def reserve(self, qty):
+        if qty > self.stock - self.reserved:
+            raise ValueError("insufficient stock")
+        self.reserved += qty
+
+    def release(self, qty):
+        self.reserved -= qty
+
+    def available(self):
+        return self.stock - self.reserved
+
+
+class Wallet:
+    def __init__(self, balance):
+        self.balance = balance
+
+    def charge(self, amount):
+        if amount > self.balance:
+            raise ValueError("insufficient funds")
+        self.balance -= amount
+
+
+def place_order(inventory, wallet, qty, price):
+    """Reserve inventory, then charge wallet. Release on failure."""
+    inventory.reserve(qty)
+    try:
+        wallet.charge(qty * price)
+    except ValueError:
+        raise  # BUG: re-raises without releasing inventory reservation
+    return {"status": "confirmed", "qty": qty, "total": qty * price}
+```
+
+You are implementing a STRICT reasoning + code generation procedure designed to REDUCE reasoning-execution mismatch.
+
+This is NOT a formatting task. This is a TWO-PASS reasoning process with adversarial verification.
+
+You MUST follow the procedure exactly.
+
+Return a SINGLE valid JSON object. No text outside JSON. No markdown fences.
+
+# GOAL
+
+Fix the bug AND ensure your reasoning is causally correct and robust to failure.
+
+You are required to:
+- identify the correct mechanism
+- challenge your own hypothesis
+- verify your fix against failure scenarios
+
+# PROCEDURE (MANDATORY)
+
+## STEP 1 — DIAGNOSE (PRIMARY HYPOTHESIS)
+
+Identify:
+
+- root_cause:
+  Name the exact function + variable + operation causing the bug.
+  Must describe a causal relationship (not just "missing X").
+
+- failure_mechanism:
+  Give a concrete scenario:
+  cause → mutation/event → propagation → observable failure
+
+- broken_invariant:
+  A specific, testable property that is violated.
+
+## STEP 2 — ALTERNATIVE HYPOTHESIS (CRITICAL)
+
+Propose ONE alternative explanation for the bug.
+
+- What else could plausibly be the cause?
+- Why might your primary hypothesis be wrong?
+
+Then explicitly reject it:
+
+- Why is your original diagnosis more correct?
+- What evidence in the code supports this?
+
+This step is REQUIRED. Do not skip.
+
+## STEP 3 — PLAN FIX
+
+Describe:
+
+- fix_strategy:
+  What exact change you will make
+  Why it breaks the causal chain
+
+Must reference actual code behavior.
+
+## STEP 4 — CODE
+
+Implement the fix.
+
+Rules:
+- Modify ONLY necessary files
+- Return COMPLETE contents for modified files
+- Use "UNCHANGED" for others
+
+## STEP 5 — ADVERSARIAL SELF-CHECK (MANDATORY)
+
+You must actively try to BREAK your own fix.
+
+Answer ALL:
+
+1. Failure Scenario:
+   Describe a concrete scenario where your fix might still fail.
+
+2. Edge Case:
+   Identify a boundary condition (e.g., retries, empty values, ordering).
+
+3. Invariant Check:
+   Verify your invariant holds under:
+   - multiple calls
+   - retries / loops
+   - state reuse
+
+4. Conclusion:
+   - If a flaw is found → REVISE your fix
+   - If no flaw → explain WHY it is safe
+
+Your answer MUST reference your actual code.
+
+# OUTPUT FORMAT (STRICT JSON)
+
+{
+  "root_cause": "<exact function + variable + causal relationship>",
+  "failure_mechanism": "<cause → mutation → propagation → observable failure>",
+  "broken_invariant": "<specific testable property that is violated>",
+  "alternative_hypothesis": "<one alternative explanation for the bug>",
+  "hypothesis_rejection": "<why primary hypothesis is correct, with code evidence>",
+  "fix_strategy": "<what change you will make and why it breaks the causal chain>",
+  "self_check": {
+    "failure_scenario": "<concrete scenario where fix might still fail>",
+    "edge_case": "<boundary condition to test>",
+    "invariant_check": "<verify invariant under multiple calls, retries, state reuse>",
+    "conclusion": "<flaw found → revise, or why it is safe>"
+  },
+  "files": {"<path>": "<complete file contents or UNCHANGED>"}
+}
+
+# RULES
+
+- All fields are REQUIRED and must be substantive
+- No generic statements — ground every claim in actual code
+- Must reference actual variables and behavior
+- Do NOT restate the task
+- Do NOT skip alternative hypothesis
+- Do NOT skip adversarial self-check
+- For files you did NOT modify, set value to "UNCHANGED"
+- Do NOT include markdown formatting (no ```python blocks) inside file values
+- File values must be raw Python source code, not markdown
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "place_order: the except ValueError: raise operation re-raises wallet.charge failure without calling inventory.release(qty), leaving Inventory.reserved incremented",
+  "failure_mechanism": "call place_order(inventory, wallet, qty, price) → inventory.reserve(qty) increments Inventory.reserved → wallet.charge(qty * price) raises ValueError due to insufficient funds → except branch re-raises the ValueError without calling inventory.release(qty) → Inventory.reserved remains incremented → inventory.available() is reduced incorrectly and future orders may fail due to seemingly insufficient stock",
+  "broken_invariant": "After a failed place_order (where wallet.charge raises), Inventory.reserved should be the same as before the call; i.e., inventory.available() must equal pre-call available(). This invariant is violated because reserved is not decremented on failure.",
+  "alternative_hypothesis": "The bug could be caused by a faulty Inventory.release implementation (for example, release subtracting the wrong amount or allowing reserved to go negative), so calling release on failure would not restore invariants.",
+  "hypothesis_rejection": "The code shows Inventory.release(self, qty) simply does self.reserved -= qty. The symptom (reserved left incremented) matches the absence of any call to release in place_order's error path. There is no evidence in the repository that release is incorrect; the only observable missing action in the error flow is the missing release call. Thus the most direct causal link is the missing release in place_order rather than a broken release implementation.",
+  "fix_strategy": "Ensure that any reservation made by inventory.reserve(qty) is released if wallet.charge(...) fails for any reason. Concretely: after inventory.reserve(qty) succeeds, wrap wallet.charge in a try/except that releases the same qty on any exception and then re-raises. This breaks the causal chain by guaranteeing Inventory.reserved is decremented whenever the payment step does not complete, restoring the invariant that failed attempts leave inventory unchanged.",
+  "self_check": {
+    "failure_scenario": "If inventory.release raises an exception (e.g., due to a bug or corrupted state) when called from the except block, the release attempt itself will raise and the original wallet.charge exception will be masked or combined with the release error. In the current code inventory.release just decrements reserved, so this scenario depends on a separate bug in Inventory.release.",
+    "edge_case": "If inventory.reserve(qty) raises (insufficient stock) we must not attempt to release; the fix calls reserve first and only calls release in the except path after reserve, so no double-release occurs. Another edge is if wallet.charge raises BaseException subclasses (KeyboardInterrupt/SystemExit); the fix releases reservation for all exception types to avoid leaving reservations on abnormal termination.",
+    "invariant_check": "Multiple calls: For a sequence of successful orders, reserved increments and stays reserved (as before) and available reduces accordingly. For a failed order due to insufficient funds, reserve increments then release is called in the except block, returning reserved to the pre-call value. Retries / loops: retrying place_order after a failed attempt will see the correct available() because the reservation was released. State reuse: the code only modifies inventory.reserved when reserve succeeds and only releases the same qty on failure, ensuring consistent state transitions. The code change is localized to place_order and doesn't touch Inventory.release implementation, so existing behavior remains except that failed payment paths clean up reservations.",
+    "conclusion": "No fundamental flaw remains in the payment-reservation rollback path: by releasing the reservation on any exception from wallet.charge we restore the broken invariant. The remaining risk is if Inventory.release itself is buggy (not shown in this file). Given the current Inventory.release implementation (self.reserved -= qty), the fix is safe and restores correct behavior. Therefore no further code revision is necessary in this file."
+  },
+  "files": {
+    "code_snippets_v2/partial_rollback_a/order.py": " \"\"\"Order fulfillment with inventory and wallet.\"\"\"\n\n\nclass Inventory:\n    def __init__(self, stock):\n        self.stock = stock\n        self.reserved = 0\n\n    def reserve(self, qty):\n        if qty > self.stock - self.reserved:\n            raise ValueError(\"insufficient stock\")\n        self.reserved += qty\n\n    def release(self, qty):\n        self.reserved -= qty\n\n    def available(self):\n        return self.stock - self.reserved\n\n\nclass Wallet:\n    def __init__(self, balance):\n        self.balance = balance\n\n    def charge(self, amount):\n        if amount > self.balance:\n            raise ValueError(\"insufficient funds\")\n        self.balance -= amount\n\n\ndef place_order(inventory, wallet, qty, price):\n    \"\"\"Reserve inventory, then charge wallet. Release reservation on any failure.\n\n    Behavior:\n    - Reserve inventory before attempting payment.\n    - If payment fails (raises any exception), release the reserved quantity\n      to avoid leaking reservations and re-raise the original exception.\n    \"\"\"\n    # Perform reservation first; if this raises, nothing was reserved and no\n    # release is necessary.\n    inventory.reserve(qty)\n    try:\n        # Attempt to charge the wallet. If this raises for any reason we must\n        # release the previously made reservation to maintain invariants.\n        wallet.charge(qty * price)\n    except BaseException:\n        # Ensure reservation is released on *any* failure (including\n        # KeyboardInterrupt/SystemExit) so we do not leave stock locked.\n        inventory.release(qty)\n        raise\n\n    return {\"status\": \"confirmed\", \"qty\": qty, \"total\": qty * price}\n"
+  }
+}

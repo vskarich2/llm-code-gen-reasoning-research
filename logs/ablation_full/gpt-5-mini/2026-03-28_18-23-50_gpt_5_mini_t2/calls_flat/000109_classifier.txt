@@ -1,0 +1,181 @@
+=== CALL 000109 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: temporal_drift_a
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:09:16.784069
+LATENCY_MS: 17561
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In pipeline(), raw_stats is computed from the variable 'cleaned' (the normalized data) by calling compute_raw_stats(cleaned). The causal relationship: compute_raw_stats takes its input to compute raw_min/raw_max/raw_sum, so providing the normalized list instead of the original 'data' causes raw_stats to reflect transformed values rather than the original data.
+
+## Failure Mechanism
+Given input data = [1, 2, 3], normalize(data) produces cleaned = [0.0, 0.5, 1.0]. The existing pipeline computes raw_stats = compute_raw_stats(cleaned), resulting in {'raw_max': 1.0, 'raw_min': 0.0, 'raw_sum': 1.5}. This is incorrect: the intended raw_stats for the original data should be {'raw_max': 3, 'raw_min': 1, 'raw_sum': 6}. The incorrect call site (compute_raw_stats(cleaned)) is the direct cause of this wrong output.
+
+## Broken Invariant
+The pipeline must ensure raw_stats reflect the original input data: for any non-empty numeric input 'data', pipeline(data)['raw_stats']['raw_max'] == max(data), pipeline(data)['raw_stats']['raw_min'] == min(data), and pipeline(data)['raw_stats']['raw_sum'] == sum(data).
+
+## Fix Strategy
+I changed pipeline() to compute raw_stats from the original 'data' before normalizing (raw_stats = compute_raw_stats(data); cleaned = normalize(data)). This restores the original-data invariant. I also added type hints and clearer docstrings/comments to make the intended ordering explicit and avoid future regression.
+
+
+# Task Description
+Refactor this metrics pipeline for clarity. Return the updated code.
+
+# Code Produced
+```python
+'''Metrics pipeline: compute raw stats before transforming data.'''
+
+from typing import List, Dict, Sequence
+
+
+def compute_raw_stats(data: Sequence[float]) -> Dict[str, float]:
+    """Compute statistics on raw (untransformed) numeric data.
+
+    Returns a dictionary with keys 'raw_max', 'raw_min', and 'raw_sum'.
+    For empty input, returns zeros to match previous behavior.
+    """
+    if not data:
+        return {"raw_max": 0, "raw_min": 0, "raw_sum": 0}
+    return {
+        "raw_max": max(data),
+        "raw_min": min(data),
+        "raw_sum": sum(data),
+    }
+
+
+def normalize(data: Sequence[float]) -> List[float]:
+    """Normalize numeric data to the 0-1 range.
+
+    If data is empty, returns an empty list. If all values are equal,
+    returns a list of 0.5 values (midpoint) to avoid division-by-zero.
+    """
+    if not data:
+        return []
+    lo, hi = min(data), max(data)
+    if hi == lo:
+        return [0.5] * len(data)
+    return [(x - lo) / (hi - lo) for x in data]
+
+
+def pipeline(data: Sequence[float]) -> Dict[str, object]:
+    """Run pipeline: compute raw stats on original data, then normalize.
+
+    Important: raw_stats MUST reflect the original (untransformed) data.
+    """
+    # Compute raw statistics from the ORIGINAL input data.
+    raw_stats = compute_raw_stats(data)
+    # Then compute the cleaned/normalized representation.
+    cleaned = normalize(data)
+    return {"raw_stats": raw_stats, "cleaned": cleaned}
+
+
+def format_report(result: Dict[str, object]) -> str:
+    """Format pipeline result for display (keeps original simple behavior)."""
+    return f"max={result['raw_stats']['raw_max']}"
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;TEMPORAL_ORDERING
+HIGH
+Counterfactual: If compute_raw_stats were called with the original data (removing the incorrect call-site), the wrong raw_stats would not be produced.
+Evidence: pipeline originally passed 'cleaned' into compute_raw_stats; normalize(data) maps [1,2,3] → [0.0,0.5,1.0] changing max/min/sum; compute_raw_stats returns {'raw_max': max(...), 'raw_min': min(...), 'raw_sum': sum(...)} so its input determines output; updated pipeline sets raw_stats = compute_raw_stats(data) before cleaned = normalize(data).
+Judgment: The reasoning correctly identifies the mis-ordered call as the root cause, specifies a testable invariant, traces the causal chain to the observed incorrect stats, and the code change implements the described fix.

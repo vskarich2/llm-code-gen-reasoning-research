@@ -1,0 +1,230 @@
+=== CALL 000218 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: check_then_act
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:01:54.053896
+LATENCY_MS: 36774
+
+--- PROMPT ---
+Under interleaving, two withdrawals of 80 from balance=100 both succeed, leaving -60. Fix so balance never goes negative.
+
+## Codebase (1 file)
+
+### FILE 1/1: code_snippets_v2/check_then_act/bank.py ###
+```python
+"""Bank with non-atomic check-then-act withdrawal, simulated via steps."""
+
+_accounts = {}
+
+
+def reset():
+    _accounts.clear()
+
+
+def create_account(name, balance):
+    _accounts[name] = balance
+
+
+def get_balance(name):
+    return _accounts.get(name, 0)
+
+
+def check_balance(name, amount):
+    """CHECK: is balance sufficient?"""
+    return _accounts.get(name, 0) >= amount
+
+
+def do_withdraw(name, amount):
+    """ACT: decrement balance. Assumes caller verified."""
+    _accounts[name] = _accounts.get(name, 0) - amount
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def make_withdraw_steps(name, amount):
+    """Split withdrawal into separate check and act steps.
+
+    BUG: under interleaving, both checks pass before either debits.
+    """
+    result = {"approved": False}
+
+    def step_check():
+        result["approved"] = check_balance(name, amount)
+        return ("check", result["approved"])
+
+    def step_act():
+        if result["approved"]:
+            do_withdraw(name, amount)
+        return ("act", result["approved"])
+
+    return step_check, step_act
+
+
+def sequential_withdrawals():
+    """Two withdrawals of 80 from balance=100. Sequential: second denied."""
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (act_a, ()), (check_b, ()), (act_b, ())])
+    return get_balance("alice")
+
+
+def interleaved_withdrawals():
+    """Two withdrawals of 80, interleaved: BUG — both approved, overdraft."""
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (check_b, ()), (act_a, ()), (act_b, ())])
+    return get_balance("alice")
+```
+
+You are implementing a STRICT reasoning + code generation procedure designed to REDUCE reasoning-execution mismatch.
+
+This is NOT a formatting task. This is a TWO-PASS reasoning process with adversarial verification.
+
+You MUST follow the procedure exactly.
+
+Return a SINGLE valid JSON object. No text outside JSON. No markdown fences.
+
+# GOAL
+
+Fix the bug AND ensure your reasoning is causally correct and robust to failure.
+
+You are required to:
+- identify the correct mechanism
+- challenge your own hypothesis
+- verify your fix against failure scenarios
+
+# PROCEDURE (MANDATORY)
+
+## STEP 1 — DIAGNOSE (PRIMARY HYPOTHESIS)
+
+Identify:
+
+- root_cause:
+  Name the exact function + variable + operation causing the bug.
+  Must describe a causal relationship (not just "missing X").
+
+- failure_mechanism:
+  Give a concrete scenario:
+  cause → mutation/event → propagation → observable failure
+
+- broken_invariant:
+  A specific, testable property that is violated.
+
+## STEP 2 — ALTERNATIVE HYPOTHESIS (CRITICAL)
+
+Propose ONE alternative explanation for the bug.
+
+- What else could plausibly be the cause?
+- Why might your primary hypothesis be wrong?
+
+Then explicitly reject it:
+
+- Why is your original diagnosis more correct?
+- What evidence in the code supports this?
+
+This step is REQUIRED. Do not skip.
+
+## STEP 3 — PLAN FIX
+
+Describe:
+
+- fix_strategy:
+  What exact change you will make
+  Why it breaks the causal chain
+
+Must reference actual code behavior.
+
+## STEP 4 — CODE
+
+Implement the fix.
+
+Rules:
+- Modify ONLY necessary files
+- Return COMPLETE contents for modified files
+- Use "UNCHANGED" for others
+
+## STEP 5 — ADVERSARIAL SELF-CHECK (MANDATORY)
+
+You must actively try to BREAK your own fix.
+
+Answer ALL:
+
+1. Failure Scenario:
+   Describe a concrete scenario where your fix might still fail.
+
+2. Edge Case:
+   Identify a boundary condition (e.g., retries, empty values, ordering).
+
+3. Invariant Check:
+   Verify your invariant holds under:
+   - multiple calls
+   - retries / loops
+   - state reuse
+
+4. Conclusion:
+   - If a flaw is found → REVISE your fix
+   - If no flaw → explain WHY it is safe
+
+Your answer MUST reference your actual code.
+
+# OUTPUT FORMAT (STRICT JSON)
+
+{
+  "root_cause": "<exact function + variable + causal relationship>",
+  "failure_mechanism": "<cause → mutation → propagation → observable failure>",
+  "broken_invariant": "<specific testable property that is violated>",
+  "alternative_hypothesis": "<one alternative explanation for the bug>",
+  "hypothesis_rejection": "<why primary hypothesis is correct, with code evidence>",
+  "fix_strategy": "<what change you will make and why it breaks the causal chain>",
+  "self_check": {
+    "failure_scenario": "<concrete scenario where fix might still fail>",
+    "edge_case": "<boundary condition to test>",
+    "invariant_check": "<verify invariant under multiple calls, retries, state reuse>",
+    "conclusion": "<flaw found → revise, or why it is safe>"
+  },
+  "files": {"<path>": "<complete file contents or UNCHANGED>"}
+}
+
+# RULES
+
+- All fields are REQUIRED and must be substantive
+- No generic statements — ground every claim in actual code
+- Must reference actual variables and behavior
+- Do NOT restate the task
+- Do NOT skip alternative hypothesis
+- Do NOT skip adversarial self-check
+- For files you did NOT modify, set value to "UNCHANGED"
+- Do NOT include markdown formatting (no ```python blocks) inside file values
+- File values must be raw Python source code, not markdown
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "make_withdraw_steps.step_act uses the previously-set mutable variable result['approved'] (set by step_check) as the sole condition for calling do_withdraw(name, amount). This uses stale authorization without re-checking _accounts[name] before mutating it.",
+  "failure_mechanism": "step_check sets result['approved']=True because check_balance('alice', 80) sees balance 100 → control returns to caller which interleaves another step_check that also sets result['approved']=True for the second withdrawal (both checks read the unchanged balance 100) → step_act for the first withdrawal sees result['approved'] True and calls do_withdraw('alice', 80) (mutates _accounts['alice'] to 20) → step_act for the second withdrawal still sees result['approved'] True (stale value from its earlier check) and calls do_withdraw('alice', 80) (mutates _accounts['alice'] to -60) → observable failure: final balance -60.",
+  "broken_invariant": "Invariant: after any withdrawal act executes, _accounts[name] >= 0. This is violated (get_balance('alice') == -60) when two interleaved withdrawals both act based on stale result['approved'] without re-validation.",
+  "alternative_hypothesis": "The bug could be caused by run_steps executing steps in an unexpected order or duplicating calls (e.g., run_steps might call the same step twice or reorder act/check pairs), rather than the stale approval variable. In other words, maybe the orchestration (run_steps) is faulty rather than the approval usage.",
+  "hypothesis_rejection": "run_steps simply iterates the provided steps list and calls each function with its args; it neither reorders nor duplicates items. Evidence: run_steps implementation (for fn, args in steps: results.append(fn(*args))) is deterministic and only executes exactly what's passed. The sequential_withdrawals path uses the same run_steps mechanism and yields correct final balance (20) when steps are ordered as check_a, act_a, check_b, act_b. The only difference in failing interleaving is ordering of check/check/act/act; this exposes that the decision in step_act depends on stale state captured earlier (result['approved']). Therefore the primary cause is the stale approval read in make_withdraw_steps.step_act, not run_steps.",
+  "fix_strategy": "In make_withdraw_steps.step_act, revalidate the current balance by calling check_balance(name, amount) immediately before calling do_withdraw. If the re-check fails, clear result['approved'] and do not call do_withdraw. This breaks the causal chain where a prior check's approval (which may be stale) directly causes a withdrawal despite the current balance being insufficient. By performing the final guard check at the moment of mutation, we ensure the balance cannot go negative under the simulated interleaving semantics (sequential calls in run_steps).",
+  "self_check": {
+    "failure_scenario": "If the environment were truly concurrent (e.g., two threads calling step_act simultaneously), both acts could call check_balance concurrently, both observe balance >= amount, and both call do_withdraw leading to overdraft. In other words, re-check-then-withdraw is not atomic under concurrent execution without synchronization (locks or atomic compare-and-swap).",
+    "edge_case": "Zero or negative amounts: if amount <= 0, behavior of check_balance and do_withdraw still allows withdrawal (check_balance will be True) and do_withdraw will increase balance for negative amounts. Boundary tests should include amount == 0 and amount < 0. Also, repeated reuse of the same make_withdraw_steps result dict across multiple run_steps sequences could cause lingering result['approved'] values; but the code creates a fresh result per make_withdraw_steps call.",
+    "invariant_check": "Under the modified code, for any single call sequence executed by run_steps (which performs steps sequentially), do_withdraw(name, amount) is only called when check_balance(name, amount) returns True at the moment just before the mutation. Since check_balance enforces _accounts.get(name, 0) >= amount, the call to do_withdraw reduces the balance to at least 0. Thus the invariant 'balance never goes negative after any act' holds for any ordering of check and act steps executed sequentially by run_steps. This holds across multiple calls because make_withdraw_steps creates a fresh result dict each time, and do_withdraw always subtracts only when the immediate precondition holds. Retries: if an act finds insufficient funds on re-check, it sets result['approved']=False and does not call do_withdraw, so retries would need an intervening check that again sets approved=True and then a subsequent act that re-checks and withdraws safely. State reuse: reset() clears _accounts so reuse across runs is safe.",
+    "conclusion": "For the given simulated single-threaded interleaving model implemented by run_steps, the re-check-in-act fix is sufficient and safe: it prevents overdraft by ensuring each mutation is guarded by an up-to-date balance check. However, the fix is not sufficient in a true concurrent (multi-threaded/process) environment because the check-then-act remains non-atomic. If the code might be used concurrently, a stronger fix (perform check-and-debit atomically inside one function or protect the critical section with a lock) is required. Given the current codebase's execution model (run_steps sequentially invoking steps), I consider the fix correct and robust for the simulated interleaving scenarios.",
+  "files": {
+    "code_snippets_v2/check_then_act/bank.py": " \"\"\"Bank with non-atomic check-then-act withdrawal, simulated via steps.\"\"\"\n\n_accounts = {}\n\n\ndef reset():\n    _accounts.clear()\n\n\ndef create_account(name, balance):\n    _accounts[name] = balance\n\n\ndef get_balance(name):\n    return _accounts.get(name, 0)\n\n\ndef check_balance(name, amount):\n    \"\"\"CHECK: is balance sufficient?\"\"\"\n    return _accounts.get(name, 0) >= amount\n\n\ndef do_withdraw(name, amount):\n    \"\"\"ACT: decrement balance. Assumes caller verified.\"\"\"\n    _accounts[name] = _accounts.get(name, 0) - amount\n\n\ndef run_steps(steps):\n    results = []\n    for fn, args in steps:\n        results.append(fn(*args))\n    return results\n\n\ndef make_withdraw_steps(name, amount):\n    \"\"\"Split withdrawal into separate check and act steps.\n\n    BUG: under interleaving, both checks pass before either debits.\n    \"\"\"\n    result = {\"approved\": False}\n\n    def step_check():\n        result[\"approved\"] = check_balance(name, amount)\n        return (\"check\", result[\"approved\"])\n\n    def step_act():\n        # Re-validate at the moment of the mutation to avoid using a stale approval.\n        if result[\"approved\"] and check_balance(name, amount):\n            do_withdraw(name, amount)\n            return (\"act\", True)\n        # If the re-check fails, clear approval and do not withdraw.\n        result[\"approved\"] = False\n        return (\"act\", False)\n\n    return step_check, step_act\n\n\ndef sequential_withdrawals():\n    \"\"\"Two withdrawals of 80 from balance=100. Sequential: second denied.\"\"\"\n    reset()\n    create_account(\"alice\", 100)\n    check_a, act_a = make_withdraw_steps(\"alice\", 80)\n    check_b, act_b = make_withdraw_steps(\"alice\", 80)\n    run_steps([(check_a, ()), (act_a, ()), (check_b, ()), (act_b, ())])\n    return get_balance(\"alice\")\n\n\ndef interleaved_withdrawals():\n    \"\"\"Two withdrawals of 80, interleaved: BUG — both approved, overdraft.\"\"\"\n    reset()\n    create_account(\"alice\", 100)\n    check_a, act_a = make_withdraw_steps(\"alice\", 80)\n    check_b, act_b = make_withdraw_steps(\"alice\", 80)\n    run_steps([(check_a, ()), (check_b, ()), (act_a, ()), (act_b, ())])\n    return get_balance(\"alice\")\n"
+  }
+}

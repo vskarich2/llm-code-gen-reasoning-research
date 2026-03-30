@@ -1,0 +1,168 @@
+=== CALL 000020 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: partial_update_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:30:18.152381
+LATENCY_MS: 14263
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+update_profile: missing recomputation (assignment) of user['full_name'] after updating user['first_name'] in the first_name branch (no operation updates full_name when only first_name changes).
+
+## Failure Mechanism
+User supplies changes with a new first_name → update_profile loop sanitizes and validates and assigns user['first_name'] = value in the first_name branch → code does not update user['full_name'] in that branch (no mutation of full_name) → user['full_name'] remains the old "first last" string → the observable failure is that the UI or any consumer reads user['full_name'] and sees the stale name that does not reflect the updated first_name.
+
+## Broken Invariant
+After calling update_profile(user, changes), the property user['full_name'] == user['first_name'] + ' ' + user['last_name'] can be false (testable by updating only first_name and asserting full_name equals the concatenation).
+
+## Fix Strategy
+After applying all accepted changes to user['first_name'] and user['last_name'], recompute user['full_name'] exactly once from the canonical fields: user['full_name'] = user['first_name'] + ' ' + user['last_name']. This guarantees the invariant regardless of which fields were changed or the order in changes.items(). It breaks the causal chain by ensuring no code path leaves full_name stale after applying accepted updates.
+
+
+## Self-Check
+{'failure_scenario': "If user dictionary lacks 'first_name' or 'last_name' keys (malformed user object), the recomputation user['first_name'] + ' ' + user['last_name'] could raise a KeyError. For example, if an external piece of code constructs user = {'first_name': 'A'} (missing last_name), update_profile will fail during recomputation.", 'edge_case': 'If changes contains non-string values (e.g., None or integers), sanitize_string will return the non-string unchanged and validate_name will reject non-strings; in that case no assignment happens and the final recomputation uses the original strings. If both first_name and last_name are provided in changes, the loop updates both fields and the final recomputation uses the updated values regardless of the order of the keys.', 'invariant_check': "Multiple calls: each call to update_profile recomputes full_name at the end, so calling update_profile repeatedly will keep full_name synchronized each time. Retries/loops: if update_profile is called in a retry loop, each successful invocation will recompute full_name; unsuccessful validation simply leaves fields unchanged and recomputation uses the last-valid values. State reuse: since the function mutates the passed-in user dict and then recomputes full_name from user['first_name'] and user['last_name'], reuse of the same dict across calls preserves the invariant as long as create_user or previous operations maintained valid first_name/last_name strings.", 'conclusion': "No flaw found in this fix for the original bug: recomputing full_name after applying validated/sanitized field updates ensures the invariant user['full_name'] == user['first_name'] + ' ' + user['last_name'] holds in all normal use-cases shown in the code. To mitigate the KeyError failure scenario, callers should not pass malformed user objects; alternatively, a defensive check could be added to provide defaults or raise a clearer error. For the scope of this fix (keeping full_name in sync during profile updates), recomputing full_name at the end is safe and robust."}
+
+
+# Task Description
+Users report their full name not updating. Fix the profile update. Return the updated code.
+
+# Code Produced
+```python
+ """User profile with derived full_name field."""
+
+from validation import validate_name, sanitize_string
+
+
+def create_user(first_name, last_name, email):
+    """Create user with derived full_name."""
+    return {
+        "first_name": first_name,
+        "last_name": last_name,
+        "full_name": first_name + " " + last_name,
+        "email": email,
+    }
+
+
+def update_profile(user, changes):
+    """Update profile fields. full_name must stay in sync.
+
+    Invariant: full_name == first_name + ' ' + last_name
+    """
+    for key, value in changes.items():
+        value = sanitize_string(value)
+        if key == "first_name" and validate_name(value):
+            user["first_name"] = value
+            # full_name will be recomputed after applying all changes
+        elif key == "last_name" and validate_name(value):
+            user["last_name"] = value
+        elif key == "email":
+            user["email"] = value
+    # Recompute full_name from the canonical source fields so it's always in sync
+    user["full_name"] = user["first_name"] + " " + user["last_name"]
+    return user
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If the missing recomputation of full_name were removed (i.e., full_name is recomputed after applying updates), the stale full_name failure would not occur.
+Evidence: update_profile loop contains user["first_name"] = value with no user["full_name"] update; create_user initializes full_name from first_name+last_name; patched code adds user["full_name"] = user["first_name"] + " " + user["last_name"] after the loop; code still lacks defensive checks for missing first_name/last_name keys as noted in self-check.
+Judgment: The developer's reasoning correctly identifies the precise function, variable, invariant, and causal chain and the fix directly addresses the root cause; only an edge-case (malformed user dict causing KeyError) was acknowledged but not fixed, which is a minor omission relative to the reported bug.

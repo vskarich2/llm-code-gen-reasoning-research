@@ -1,0 +1,112 @@
+=== CALL 000077 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: use_before_set_b
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:52:47.261399
+LATENCY_MS: 29688
+
+--- PROMPT ---
+Pipeline crashes on empty data source. Fix. Return the updated code.
+
+## Codebase (2 files)
+
+### FILE 1/2: code_snippets_v2/use_before_set_b/loader.py ###
+```python
+"""Data loader with status tracking."""
+
+_status = "idle"
+_data = None
+
+
+def reset():
+    global _status, _data
+    _status = "idle"
+    _data = None
+
+
+def load(source):
+    """Load data from source. Sets status on success only."""
+    global _status, _data
+    if source and len(source) > 0:
+        _data = [x for x in source]
+        _status = "loaded"
+    # BUG: on empty/None source, _status stays at previous value
+    # instead of being set to "empty"
+    return _data
+
+
+def get_status():
+    return _status
+
+
+def get_data():
+    return _data
+
+
+def validate_format(data):
+    """Distractor: checks data format, unrelated to bug."""
+    if data is None:
+        return False
+    return isinstance(data, list)
+```
+
+### FILE 2/2: code_snippets_v2/use_before_set_b/pipeline.py ###
+```python
+"""Data pipeline that uses loader."""
+
+from loader import load, get_status, get_data
+
+
+def reset():
+    global _status, _data
+    _status = "idle"
+    _data = None
+
+
+def run_pipeline(source):
+    """Load data and return status-tagged result.
+
+    Contract: status must reflect THIS call's outcome,
+    not a previous call's state.
+    """
+    load(source)
+    status = get_status()
+    data = get_data()
+
+    return {
+        "status": status,
+        "count": len(data) if data else 0,
+        "data": data,
+    }
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/use_before_set_b/loader.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/use_before_set_b/pipeline.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{"root_cause":"In code_snippets_v2/use_before_set_b/loader.py the function load() uses the expression `if source and len(source) > 0:` and only assigns to the module state variables `_status` and `_data` inside that branch. As a result, when `source` is empty/None (or when `len(source)` raises because the source is a non-sized iterable like a generator), `_status` is not updated and `_data` is not cleared. The bug is therefore in loader.load: it both relies on `len(source)` (which can raise) and fails to set `_status` for empty inputs, leaving stale values in `_status`/_data.","failure_mechanism":"Concrete scenario: pipeline.run_pipeline(iter(())) or run_pipeline(some_generator) calls load(source). In load, the test `if source and len(source) > 0:` attempts to evaluate `len(source)` on a generator (no __len__), which raises TypeError and propagates out of load to pipeline.run_pipeline, causing the pipeline to crash. Alternatively, if source is a sized empty list `[]`, the `if` branch is false and load returns without setting `_status` or clearing `_data`, so `_status` retains the previous 'loaded' value and stale `_data` is returned — violating the contract that status must reflect THIS call's outcome.","broken_invariant":"After run_pipeline(source) completes, get_status() must reflect the outcome of that call: it must be exactly 'loaded' when the provided source yields one or more items, and exactly 'empty' when the provided source yields zero items or is None. This is a specific, testable invariant: for any sequence/iterable source, calling run_pipeline(source) must produce a response where response['status'] == ('loaded' if len(list(source))>0 else 'empty').","fix_strategy":"I changed loader.load so it no longer calls len(source) directly and always updates both `_data` and `_status` for every call. The function now: (1) converts source safely to a list via `list(source)` when source is not None (this accepts generators/iterators without calling len on them), (2) sets `_data` to that list (or `[]` for None), and (3) sets `_status` to 'loaded' if the resulting list is non-empty, otherwise to 'empty'. This prevents the TypeError from len() on non-sized iterables, clears stale `_data`, and guarantees the status reflects the current call.","files":{"code_snippets_v2/use_before_set_b/loader.py":"\"\"\"Data loader with status tracking.\"\"\"\n\n_status = \"idle\"\n_data = None\n\n\ndef reset():\n    global _status, _data\n    _status = \"idle\"\n    _data = None\n\n\ndef load(source):\n    \"\"\"Load data from source. Always sets status to reflect this call's outcome.\n\n    This implementation avoids calling len(source) on the original input (which\n    can raise for generators/iterators) by converting the input to a list when\n    present. It also ensures `_data` is cleared and `_status` updated for empty\n    or None sources so previous state cannot leak.\n    \"\"\"\n    global _status, _data\n\n    if source is None:\n        _data = []\n        _status = \"empty\"\n        return _data\n\n    # Convert to a list to support generators/iterators safely\n    try:\n        collected = list(source)\n    except TypeError:\n        # If source is not iterable, treat it as empty\n        collected = []\n\n    _data = [x for x in collected]\n    if len(_data) > 0:\n        _status = \"loaded\"\n    else:\n        _status = \"empty\"\n\n    return _data\n\n\ndef get_status():\n    return _status\n\n\ndef get_data():\n    return _data\n\n\ndef validate_format(data):\n    \"\"\"Distractor: checks data format, unrelated to bug.\"\"\"\n    if data is None:\n        return False\n    return isinstance(data, list)\n","code_snippets_v2/use_before_set_b/pipeline.py":"UNCHANGED"}}

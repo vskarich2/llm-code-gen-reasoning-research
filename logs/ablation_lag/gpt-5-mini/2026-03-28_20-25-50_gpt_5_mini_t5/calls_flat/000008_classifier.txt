@@ -1,0 +1,161 @@
+=== CALL 000008 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: alias_config_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:28:50.639513
+LATENCY_MS: 21075
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+create_config() returns the module-level DEFAULTS dict by reference (config = DEFAULTS). Because callers receive and may mutate that same dict (for example via apply_overrides), DEFAULTS itself gets mutated and subsequent calls — even after clearing the app cache — observe the mutated values.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Change create_config() to return a deep copy of DEFAULTS (use copy.deepcopy(DEFAULTS)) and then apply any overrides to that copy. This ensures callers receive an independent dict and cannot mutate the module-level DEFAULTS, so clearing the cache and re-reading configuration yields the original defaults.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure mode is shared mutable nested objects inside DEFAULTS; a shallow copy would still share those nested objects. To avoid that, I used a deep copy (copy.deepcopy), which prevents nested-mutability issues. Another possible concern is callers relying on identity of the returned dict; that's not an intended behavior and changing it to return an independent copy is safe and expected. No revision was necessary after this analysis.
+
+
+# Task Description
+get_settings() returns stale data after config changes. Simplify the config loading. Return the updated code.
+
+# Code Produced
+```python
+import copy
+
+DEFAULTS = {'timeout': 30, 'retries': 3, 'debug': False}
+
+
+def create_config(overrides=None):
+    '''Return a config dict based on defaults, with optional overrides.'''
+    config = copy.deepcopy(DEFAULTS)
+    if overrides:
+        config.update(overrides)
+    return config
+
+
+def merge_overrides(base, overrides):
+    '''Merge overrides into a copy of base. Used by admin tools.'''
+    result = dict(base)
+    result.update(overrides)
+    return result
+
+
+def reset_defaults():
+    '''Restore defaults to factory values.'''
+    global DEFAULTS
+    DEFAULTS = {'timeout': 30, 'retries': 3, 'debug': False}
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;PARTIAL;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If create_config returned an independent copy instead of exposing DEFAULTS, callers' mutations could not corrupt module-level defaults and the stale-settings failure would not occur.
+Evidence: DEFAULTS is a module-level dict; create_config now does config = copy.deepcopy(DEFAULTS) (preventing aliasing); config.update(overrides) mutates the returned dict (would have mutated DEFAULTS if aliased); merge_overrides uses dict(base) to make a copy; reset_defaults reassigns DEFAULTS to the original literal.
+Judgment: The developer correctly identified the shared-reference aliasing in create_config and the deep-copy fix directly addresses that causal mechanism; however they failed to explicitly state the Broken Invariant or a concrete Failure Mechanism in their writeup (those were only implied).

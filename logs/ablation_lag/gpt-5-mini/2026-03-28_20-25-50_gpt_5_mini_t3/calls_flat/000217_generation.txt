@@ -1,0 +1,115 @@
+=== CALL 000217 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: lost_update
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:43:17.864927
+LATENCY_MS: 27384
+
+--- PROMPT ---
+Two concurrent increments produce value=1 instead of 2 under interleaving. Fix so counter is correct under any interleaving.
+
+## Codebase (1 file)
+
+### FILE 1/1: code_snippets_v2/lost_update/counter.py ###
+```python
+"""Counter with non-atomic read-modify-write, simulated via step functions."""
+
+_value = 0
+
+
+def reset():
+    global _value
+    _value = 0
+
+
+def get():
+    return _value
+
+
+def _set(v):
+    global _value
+    _value = v
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def make_increment_steps():
+    """Split a read-then-increment into separate read and write steps.
+
+    BUG: under interleaving, two increments both read the same value
+    and both write value+1, losing one update.
+    """
+    captured = {}
+
+    def step_read():
+        captured["current"] = get()
+        return ("read", captured["current"])
+
+    def step_write():
+        _set(captured["current"] + 1)
+        return ("write", captured["current"] + 1)
+
+    return step_read, step_write
+
+
+def sequential_double_increment():
+    """Two increments, sequential: expect value=2."""
+    reset()
+    read_a, write_a = make_increment_steps()
+    read_b, write_b = make_increment_steps()
+    run_steps([(read_a, ()), (write_a, ()), (read_b, ()), (write_b, ())])
+    return get()
+
+
+def interleaved_double_increment():
+    """Two increments, interleaved: BUG — both read 0, both write 1."""
+    reset()
+    read_a, write_a = make_increment_steps()
+    read_b, write_b = make_increment_steps()
+    run_steps([(read_a, ()), (read_b, ()), (write_a, ()), (write_b, ())])
+    return get()
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/lost_update/counter.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "In make_increment_steps(), the inner function step_write() uses captured['current'] (set earlier by step_read()) when calling _set. The captured dict is per-increment closure, so if two increments call their step_read() before either step_write(), both captured values are the same (e.g., 0). step_write() then writes captured['current'] + 1, overwriting the global _value with the stale value+1.",
+  "failure_mechanism": "In interleaved_double_increment() the steps are run as: read_a, read_b, write_a, write_b. Execution: read_a sets captured_a['current']=0; read_b sets captured_b['current']=0; write_a does _set(captured_a['current']+1) -> _set(1); write_b does _set(captured_b['current']+1) -> _set(1), so the second write overwrites the first and the final get() returns 1 instead of 2.",
+  "broken_invariant": "The counter must satisfy: after performing two increment operations (each produced by make_increment_steps() and executed as read then write in any interleaving), get() == 2. Currently this invariant is violated for the interleaving read_a, read_b, write_a, write_b.",
+  "fix_strategy": "Make the write step compute the increment from the current global state at write time instead of using the earlier-captured snapshot. Concretely, change step_write() to call get() and then _set(get() + 1). This ensures each write observes the most recent _value and increments it, so two increments produce 2 under any ordering of read/write steps. The read step still records the observed value for diagnostics, but the write no longer relies on the stale captured value.",
+  "files": {
+    "code_snippets_v2/lost_update/counter.py": " \"\"\"Counter with non-atomic read-modify-write, simulated via step functions.\"\"\"\n\n_value = 0\n\n\ndef reset():\n    global _value\n    _value = 0\n\n\ndef get():\n    return _value\n\n\ndef _set(v):\n    global _value\n    _value = v\n\n\ndef run_steps(steps):\n    results = []\n    for fn, args in steps:\n        results.append(fn(*args))\n    return results\n\n\ndef make_increment_steps():\n    \"\"\"Split a read-then-increment into separate read and write steps.\n\n    Fixed: the write step reads the current global value at write-time\n    instead of trusting the earlier captured snapshot, so interleavings\n    where multiple reads happen before writes do not lose updates.\n    \"\"\"\n    captured = {}\n\n    def step_read():\n        captured[\"current\"] = get()\n        return (\"read\", captured[\"current\"])\n\n    def step_write():\n        # Read the up-to-date global value at write time and increment it.\n        # This avoids using the stale captured['current'] when other\n        # increments have already updated _value between the read and write.\n        current = get()\n        _set(current + 1)\n        return (\"write\", current + 1)\n\n    return step_read, step_write\n\n\ndef sequential_double_increment():\n    \"\"\"Two increments, sequential: expect value=2.\"\"\"\n    reset()\n    read_a, write_a = make_increment_steps()\n    read_b, write_b = make_increment_steps()\n    run_steps([(read_a, ()), (write_a, ()), (read_b, ()), (write_b, ())])\n    return get()\n\n\ndef interleaved_double_increment():\n    \"\"\"Two increments, interleaved: fixed — writes observe current value at write-time.\"\"\"\n    reset()\n    read_a, write_a = make_increment_steps()\n    read_b, write_b = make_increment_steps()\n    run_steps([(read_a, ()), (read_b, ()), (write_a, ()), (write_b, ())])\n    return get()\n"
+  }
+}

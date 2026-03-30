@@ -1,0 +1,150 @@
+=== CALL 000104 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: config_shadowing
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:11:29.622344
+LATENCY_MS: 17086
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+service.run_background_job calls defaults.get_defaults() (via get_defaults) and reads defaults.DEFAULTS['timeout'] which is 5, so it bypasses env_config._OVERRIDES (30) and returns the wrong timeout.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Modify code in code_snippets_v2/config_shadowing/service.py so run_background_job uses env_config.get_config() (the same as handle_request) instead of defaults.get_defaults(). This ensures the env_config overrides (timeout: 30) are applied to the background job.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure mode is an import/circular-import issue if env_config.get_config() cannot be imported at runtime; however handle_request already imports and uses get_config successfully, so switching run_background_job to use get_config is safe and does not introduce a new circular-import problem. No revision needed.
+
+
+# Task Description
+The background job uses the wrong timeout (5 instead of 30). Fix the configuration. Return the updated code.
+
+# Code Produced
+```python
+from env_config import get_config
+
+
+def handle_request():
+    return {"timeout": get_config()["timeout"], "source": "request"}
+
+
+def run_background_job():
+    return {"timeout": get_config()["timeout"], "source": "background"}
+
+
+def run_system_check():
+    return {"request": handle_request(), "background": run_background_job()}
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;WRONG;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If run_background_job stopped calling defaults.get_defaults() and used env_config.get_config(), the background job would receive the overridden timeout (30) and the failure would not occur.
+Evidence: service.run_background_job was reported to call defaults.get_defaults() and read defaults.DEFAULTS['timeout']==5; env_config provides get_config() which applies env_config._OVERRIDES with timeout==30; handle_request already uses get_config() (consistent behavior); the supplied patch replaces run_background_job to import get_config and return get_config()['timeout'].
+Judgment: The developer correctly identified the specific function call causing the discrepant timeout and proposed a fix that the submitted code implements; however they failed to state the broken invariant or explicitly document the intermediate failure mechanism, which weakens the reasoning completeness.

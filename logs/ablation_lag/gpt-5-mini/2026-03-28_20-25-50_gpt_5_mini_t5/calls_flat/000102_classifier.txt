@@ -1,0 +1,180 @@
+=== CALL 000102 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: partial_rollback_b
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:01:07.977609
+LATENCY_MS: 12225
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In order_service.place_order, the except block for payment failure re-raises the ValueError without calling release(product_id, qty). The call to reserve(product_id, qty) increments inventory._reserved but there is no compensating call to release when _process_payment raises, leaving inventory._reserved higher than it should be.
+
+## Failure Mechanism
+Example: inventory.add_product('widget', 10) sets stock to 10 and reserved 0. place_order('widget', 2, price) calls reserve('widget', 2) so inventory._reserved becomes 2. If set_gateway_fail(True) causes _process_payment to raise ValueError, the except block currently executes 'raise' without calling release('widget', 2). As a result _reserved['widget'] remains 2 even though the order failed and payment was not captured, so available('widget') reports 8 less than actual available stock.
+
+## Broken Invariant
+If place_order(product_id, qty, ...) raises a ValueError due to payment failure, then get_reserved(product_id) must equal its value before the call to place_order. Currently get_reserved(product_id) increases by qty and is not decremented on payment failure, violating this invariant.
+
+## Fix Strategy
+Call release(product_id, qty) inside the except handler before re-raising the payment error. This compensating action undoes the prior reserve(product_id, qty) so inventory._reserved is restored to its previous value, preserving the invariant that failed orders do not leave reservations. The change only adds the release call and re-raises the same ValueError to preserve original error behavior.
+
+
+
+# Task Description
+Inventory stuck as reserved after payment failure. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Order service coordinating inventory and payment."""
+
+from inventory import reserve, release
+
+_notifications = []
+_gateway_fail = False
+
+
+def reset():
+    global _notifications, _gateway_fail, _stock, _reserved
+    _notifications = []
+    _gateway_fail = False
+    _stock = {}
+    _reserved = {}
+
+
+def set_gateway_fail(fail):
+    """Configure gateway to simulate payment failure."""
+    global _gateway_fail
+    _gateway_fail = fail
+
+
+def _process_payment(amount):
+    """Simulate payment gateway."""
+    if _gateway_fail:
+        raise ValueError("payment declined")
+    return {"paid": amount}
+
+
+def place_order(product_id, qty, price):
+    """Place an order: reserve inventory, process payment, notify.
+
+    If payment fails, inventory reservation should be rolled back.
+    """
+    reserve(product_id, qty)
+    try:
+        result = _process_payment(qty * price)
+    except ValueError:
+        # Ensure we release the inventory reservation before propagating the payment error
+        release(product_id, qty)
+        raise
+    _notifications.append({"product": product_id, "qty": qty})
+    return {"status": "confirmed", "payment": result}
+
+
+def get_notifications():
+    return list(_notifications)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If the missing compensating release were performed in the except path, the reserved counter would not remain elevated and the observed stuck-reservation failure would not occur.
+Evidence: reserve(product_id, qty) increases inventory._reserved; _process_payment(amount) raises ValueError when _gateway_fail is True; place_order previously re-raised the ValueError without calling release, leaving _reserved incremented; the provided patch inserts release(product_id, qty) in the except handler before re-raising.
+Judgment: The developer's reasoning precisely identifies the function (place_order), the mutated state (inventory._reserved via reserve), the exception flow that prevents compensation, and a direct compensating fix; the submitted code implements that fix correctly.

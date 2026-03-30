@@ -1,0 +1,227 @@
+=== CALL 000221 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: ordering_dependency
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:03:42.435205
+LATENCY_MS: 54349
+
+--- PROMPT ---
+process() runs before init() and items are lost. Fix so all items are processed regardless of arrival order.
+
+## Codebase (1 file)
+
+### FILE 1/1: code_snippets_v2/ordering_dependency/pipeline.py ###
+```python
+"""Pipeline with ordering dependency: process must run after init."""
+
+_log = []
+_initialized = False
+_buffer = []
+
+
+def reset():
+    global _initialized
+    _log.clear()
+    _buffer.clear()
+    _initialized = False
+
+
+def init():
+    global _initialized
+    _initialized = True
+    _log.append("init")
+
+
+def process(item):
+    """Must run AFTER init. BUG: logs error and skips if not initialized."""
+    if not _initialized:
+        _log.append(f"error:not_init:{item}")
+        return False
+    _log.append(f"processed:{item}")
+    return True
+
+
+def shutdown():
+    _log.append("shutdown")
+    return list(_log)
+
+
+def get_log():
+    return list(_log)
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def correct_order():
+    """init -> process(a) -> process(b) -> shutdown. Correct."""
+    reset()
+    run_steps([
+        (init, ()),
+        (process, ("a",)),
+        (process, ("b",)),
+        (shutdown, ()),
+    ])
+    return get_log()
+
+
+def broken_order():
+    """process(a) runs BEFORE init. BUG: item a is lost."""
+    reset()
+    run_steps([
+        (process, ("a",)),
+        (init, ()),
+        (process, ("b",)),
+        (shutdown, ()),
+    ])
+    return get_log()
+```
+
+You are implementing a STRICT reasoning + code generation procedure designed to REDUCE reasoning-execution mismatch.
+
+This is NOT a formatting task. This is a TWO-PASS reasoning process with adversarial verification.
+
+You MUST follow the procedure exactly.
+
+Return a SINGLE valid JSON object. No text outside JSON. No markdown fences.
+
+# GOAL
+
+Fix the bug AND ensure your reasoning is causally correct and robust to failure.
+
+You are required to:
+- identify the correct mechanism
+- challenge your own hypothesis
+- verify your fix against failure scenarios
+
+# PROCEDURE (MANDATORY)
+
+## STEP 1 — DIAGNOSE (PRIMARY HYPOTHESIS)
+
+Identify:
+
+- root_cause:
+  Name the exact function + variable + operation causing the bug.
+  Must describe a causal relationship (not just "missing X").
+
+- failure_mechanism:
+  Give a concrete scenario:
+  cause → mutation/event → propagation → observable failure
+
+- broken_invariant:
+  A specific, testable property that is violated.
+
+## STEP 2 — ALTERNATIVE HYPOTHESIS (CRITICAL)
+
+Propose ONE alternative explanation for the bug.
+
+- What else could plausibly be the cause?
+- Why might your primary hypothesis be wrong?
+
+Then explicitly reject it:
+
+- Why is your original diagnosis more correct?
+- What evidence in the code supports this?
+
+This step is REQUIRED. Do not skip.
+
+## STEP 3 — PLAN FIX
+
+Describe:
+
+- fix_strategy:
+  What exact change you will make
+  Why it breaks the causal chain
+
+Must reference actual code behavior.
+
+## STEP 4 — CODE
+
+Implement the fix.
+
+Rules:
+- Modify ONLY necessary files
+- Return COMPLETE contents for modified files
+- Use "UNCHANGED" for others
+
+## STEP 5 — ADVERSARIAL SELF-CHECK (MANDATORY)
+
+You must actively try to BREAK your own fix.
+
+Answer ALL:
+
+1. Failure Scenario:
+   Describe a concrete scenario where your fix might still fail.
+
+2. Edge Case:
+   Identify a boundary condition (e.g., retries, empty values, ordering).
+
+3. Invariant Check:
+   Verify your invariant holds under:
+   - multiple calls
+   - retries / loops
+   - state reuse
+
+4. Conclusion:
+   - If a flaw is found → REVISE your fix
+   - If no flaw → explain WHY it is safe
+
+Your answer MUST reference your actual code.
+
+# OUTPUT FORMAT (STRICT JSON)
+
+{
+  "root_cause": "<exact function + variable + causal relationship>",
+  "failure_mechanism": "<cause → mutation → propagation → observable failure>",
+  "broken_invariant": "<specific testable property that is violated>",
+  "alternative_hypothesis": "<one alternative explanation for the bug>",
+  "hypothesis_rejection": "<why primary hypothesis is correct, with code evidence>",
+  "fix_strategy": "<what change you will make and why it breaks the causal chain>",
+  "self_check": {
+    "failure_scenario": "<concrete scenario where fix might still fail>",
+    "edge_case": "<boundary condition to test>",
+    "invariant_check": "<verify invariant under multiple calls, retries, state reuse>",
+    "conclusion": "<flaw found → revise, or why it is safe>"
+  },
+  "files": {"<path>": "<complete file contents or UNCHANGED>"}
+}
+
+# RULES
+
+- All fields are REQUIRED and must be substantive
+- No generic statements — ground every claim in actual code
+- Must reference actual variables and behavior
+- Do NOT restate the task
+- Do NOT skip alternative hypothesis
+- Do NOT skip adversarial self-check
+- For files you did NOT modify, set value to "UNCHANGED"
+- Do NOT include markdown formatting (no ```python blocks) inside file values
+- File values must be raw Python source code, not markdown
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "process() checks global _initialized and appends an error to _log then returns False when _initialized is False, discarding the incoming item (_buffer is never used). The exact operation is the conditional check in process(): if not _initialized: _log.append(f\"error:not_init:{item}\") ; return False — this causes the item to be lost.",
+  "failure_mechanism": "cause → mutation/event → propagation → observable failure: process(item) is called before init() (cause) → process() evaluates the _initialized boolean (operation) and logs an error and returns False while not storing the item (mutation: no append to _buffer) → because the item is neither processed nor stored, when init() is later called there is no record of the item to act on (propagation) → observable failure: the item is missing from _log (e.g., broken_order shows error:not_init:a and no processed:a).",
+  "broken_invariant": "Invariant violated: For any item passed to process(item), eventually (after init() is called) there must be a corresponding 'processed:<item>' entry in _log. Testable property: after reset(), calling process('x') followed by init() must result in get_log() containing 'processed:x' after init completes.",
+  "alternative_hypothesis": "The bug could be that init() is supposed to process a prefilled _buffer but forgot to — i.e., the developer intended to buffer items in _buffer inside process() but accidentally never used _buffer in process() nor drained it in init(), so the missing step is in init() rather than in process().",
+  "hypothesis_rejection": "While it's possible init() should drain _buffer, the immediate code evidence shows the root operation discards items inside process() by logging an error and returning False. The presence of an unused global _buffer supports the idea of intended buffering, but the concrete causality (process() explicitly logs error and returns False) is the direct cause of loss. In other words, even if init() were supposed to drain a buffer, that buffer is never populated because process() never appends items to it — the code path in process() is the active failure. Specifically: in process(), 'if not _initialized: _log.append(f\"error:not_init:{item}\"); return False' both prevents buffering and records an error, making the loss immediate rather than a missing drain in init().",
+  "fix_strategy": "Change process() to buffer incoming items when _initialized is False (append to _buffer) instead of logging an error and returning False. In init(), after setting _initialized True and logging 'init', drain the _buffer by calling process() for each buffered item, producing 'processed:<item>' entries. This breaks the causal chain: previously an early process() caused immediate discard; now early process() stores the item and init() triggers actual processing, ensuring items are not lost regardless of arrival order. Code behavior references: modify process() to append to global _buffer when not initialized; modify init() to set _initialized True, log 'init', then iterate over buffered items and call process(item) to produce 'processed:<item>' entries and clear _buffer.",
+  "self_check": {
+    "failure_scenario": "If init() is never called and the program proceeds to shutdown(), buffered items will remain unprocessed because buffering defers processing until init(). Example sequence: reset(); process('x') ; shutdown(). In this fix 'x' remains in _buffer and will not appear as 'processed:x' in _log. This is a deliberate preservation of the original init-contract (process must run after init); if the intended API required processing before shutdown even without init(), additional logic is needed (e.g., process buffer at shutdown), but current fix preserves the explicit init lifecycle while preventing loss when init() does occur later.",
+    "edge_case": "Repeated calls: If process('a') and process('b') are called before init(), they are buffered in order ['a','b']. When init() is called, init() sets _initialized True and drains the buffer in FIFO order calling process('a') and process('b'), resulting in 'processed:a' then 'processed:b' in _log. Also, if init() is called multiple times, init() appends 'init' each time (preserving original behavior). If process() is called after init(), it goes directly to 'processed:<item>'. Empty values: process('') will buffer an empty string and later be processed producing 'processed:'.",
+    "invariant_check": "Verify invariant under multiple calls, retries, and state reuse using the modified code: - multiple calls: reset(); process('a'); init(); process('b'); shutdown() => _log will be ['init','processed:a','processed:b','shutdown'] (init logged once then both processed). - retries/loops: If process('x') is called multiple times before init(), all occurrences are buffered and processed in order after init(). - state reuse: reset() clears _buffer and sets _initialized False, so no residual state is carried between runs. The code uses a local copy of _buffer when draining to avoid mutation-during-iteration issues and clears _buffer after draining, ensuring consistent behavior across calls.",
+    "conclusion": "No fatal flaw found for the stated goal: the fix ensures that items passed to process() before init() are retained and processed after init(), thereby restoring the invariant. The remaining identified limitation is that if init() never occurs and the system shuts down, buffered items stay unprocessed; this preserves the explicit init lifecycle and should be addressed only if the API is intended to process items without init(), in which case the fix would be extended to also drain the buffer during shutdown. Given the current requirements, the implemented fix is safe and correct."
+  },
+  "files": {
+    "code_snippets_v2/ordering_dependency/pipeline.py": "\"\"\"Pipeline with ordering dependency: process must run after init.\"\"\"\n\n_log = []\n_initialized = False\n_buffer = []\n\n\ndef reset():\n    global _initialized\n    _log.clear()\n    _buffer.clear()\n    _initialized = False\n\n\ndef init():\n    global _initialized\n    # Mark initialized and record init event\n    _initialized = True\n    _log.append(\"init\")\n    # Drain any buffered items that arrived before init\n    # Make a copy to avoid mutation during iteration\n    buffered_items = list(_buffer)\n    _buffer.clear()\n    for item in buffered_items:\n        # call process for each item; now _initialized is True so they will be processed\n        process(item)\n\n\ndef process(item):\n    \"\"\"Must run AFTER init. Fixed: buffer items arriving before init instead of logging error and dropping them.\"\"\"\n    global _buffer\n    if not _initialized:\n        # Previously: log error and return False (lost item).\n        # Now: buffer the item for later processing when init() is called.\n        _buffer.append(item)\n        return True\n    _log.append(f\"processed:{item}\")\n    return True\n\n\ndef shutdown():\n    _log.append(\"shutdown\")\n    return list(_log)\n\n\ndef get_log():\n    return list(_log)\n\n\ndef run_steps(steps):\n    results = []\n    for fn, args in steps:\n        results.append(fn(*args))\n    return results\n\n\ndef correct_order():\n    \"\"\"init -> process(a) -> process(b) -> shutdown. Correct.\"\"\"\n    reset()\n    run_steps([\n        (init, ()),\n        (process, (\"a\",)),\n        (process, (\"b\",)),\n        (shutdown, ()),\n    ])\n    return get_log()\n\n\ndef broken_order():\n    \"\"\"process(a) runs BEFORE init. BUG: item a is lost.\"\"\"\n    reset()\n    run_steps([\n        (process, (\"a\",)),\n        (init, ()),\n        (process, (\"b\",)),\n        (shutdown, ()),\n    ])\n    return get_log()\n"
+  }
+}

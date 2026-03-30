@@ -1,0 +1,92 @@
+=== CALL 000097 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: partial_rollback_a
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:04:03.844756
+LATENCY_MS: 26533
+
+--- PROMPT ---
+Refactor this order system for clarity. Return the updated code.
+
+## Codebase (1 file)
+
+### FILE 1/1: code_snippets_v2/partial_rollback_a/order.py ###
+```python
+"""Order fulfillment with inventory and wallet."""
+
+
+class Inventory:
+    def __init__(self, stock):
+        self.stock = stock
+        self.reserved = 0
+
+    def reserve(self, qty):
+        if qty > self.stock - self.reserved:
+            raise ValueError("insufficient stock")
+        self.reserved += qty
+
+    def release(self, qty):
+        self.reserved -= qty
+
+    def available(self):
+        return self.stock - self.reserved
+
+
+class Wallet:
+    def __init__(self, balance):
+        self.balance = balance
+
+    def charge(self, amount):
+        if amount > self.balance:
+            raise ValueError("insufficient funds")
+        self.balance -= amount
+
+
+def place_order(inventory, wallet, qty, price):
+    """Reserve inventory, then charge wallet. Release on failure."""
+    inventory.reserve(qty)
+    try:
+        wallet.charge(qty * price)
+    except ValueError:
+        raise  # BUG: re-raises without releasing inventory reservation
+    return {"status": "confirmed", "qty": qty, "total": qty * price}
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/partial_rollback_a/order.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "In place_order (function in code_snippets_v2/partial_rollback_a/order.py) the exception handling block catches wallet.charge failures but re-raises the exception without calling inventory.release(qty). The causal relationship is: inventory.reserve(qty) increments Inventory.reserved, then wallet.charge(...) raises ValueError, and place_order immediately re-raises the ValueError without releasing the earlier reservation.",
+  "failure_mechanism": "Concrete scenario: Inventory.stock = 10, Inventory.reserved = 0. place_order(inventory, wallet_with_balance_0, qty=3, price=100) calls inventory.reserve(3) -> Inventory.reserved becomes 3. wallet.charge(300) raises ValueError('insufficient funds'). place_order re-raises that ValueError and returns control to caller, but never calls inventory.release(3). As a result Inventory.reserved remains 3 and Inventory.available() returns 7 instead of the original 10, leaking reserved stock.",
+  "broken_invariant": "After a failed order attempt (where wallet.charge raises), Inventory.reserved must equal its value before place_order was called (equivalently Inventory.available() must equal its pre-call value). The current code can leave Inventory.reserved increased by qty when charging fails.",
+  "fix_strategy": "Ensure the reservation is released whenever charging fails by calling inventory.release(qty) in the exception path before re-raising. The change was applied inside place_order: after inventory.reserve(qty) we try wallet.charge(...); on any exception we call inventory.release(qty) and then re-raise. This guarantees the Inventory.reserved counter is restored on failure and preserves the intended invariant.",
+  "files": {
+    "code_snippets_v2/partial_rollback_a/order.py": " \"\"\"Order fulfillment with inventory and wallet.\n\nThis module ensures inventory reservations are always released if charging fails.\n\"\"\"\n\n\nclass Inventory:\n    def __init__(self, stock):\n        self.stock = stock\n        self.reserved = 0\n\n    def reserve(self, qty):\n        if qty > self.stock - self.reserved:\n            raise ValueError(\"insufficient stock\")\n        self.reserved += qty\n\n    def release(self, qty):\n        self.reserved -= qty\n\n    def available(self):\n        return self.stock - self.reserved\n\n\nclass Wallet:\n    def __init__(self, balance):\n        self.balance = balance\n\n    def charge(self, amount):\n        if amount > self.balance:\n            raise ValueError(\"insufficient funds\")\n        self.balance -= amount\n\n\ndef place_order(inventory, wallet, qty, price):\n    \"\"\"Reserve inventory, then charge wallet. Release on failure.\n\n    The reservation is always released if charging fails to avoid leaking\n    reserved stock.\n    \"\"\"\n    inventory.reserve(qty)\n    try:\n        wallet.charge(qty * price)\n    except Exception:\n        # Release the earlier reservation before propagating the error.\n        inventory.release(qty)\n        raise\n    return {\"status\": \"confirmed\", \"qty\": qty, \"total\": qty * price}\n"
+  }
+}

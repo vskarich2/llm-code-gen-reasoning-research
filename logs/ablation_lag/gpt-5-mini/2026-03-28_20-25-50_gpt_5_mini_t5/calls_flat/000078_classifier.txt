@@ -1,0 +1,189 @@
+=== CALL 000078 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: use_before_set_b
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:53:10.837284
+LATENCY_MS: 23573
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In code_snippets_v2/use_before_set_b/loader.py the function load() uses the expression `if source and len(source) > 0:` and only assigns to the module state variables `_status` and `_data` inside that branch. As a result, when `source` is empty/None (or when `len(source)` raises because the source is a non-sized iterable like a generator), `_status` is not updated and `_data` is not cleared. The bug is therefore in loader.load: it both relies on `len(source)` (which can raise) and fails to set `_status` for empty inputs, leaving stale values in `_status`/_data.
+
+## Failure Mechanism
+Concrete scenario: pipeline.run_pipeline(iter(())) or run_pipeline(some_generator) calls load(source). In load, the test `if source and len(source) > 0:` attempts to evaluate `len(source)` on a generator (no __len__), which raises TypeError and propagates out of load to pipeline.run_pipeline, causing the pipeline to crash. Alternatively, if source is a sized empty list `[]`, the `if` branch is false and load returns without setting `_status` or clearing `_data`, so `_status` retains the previous 'loaded' value and stale `_data` is returned — violating the contract that status must reflect THIS call's outcome.
+
+## Broken Invariant
+After run_pipeline(source) completes, get_status() must reflect the outcome of that call: it must be exactly 'loaded' when the provided source yields one or more items, and exactly 'empty' when the provided source yields zero items or is None. This is a specific, testable invariant: for any sequence/iterable source, calling run_pipeline(source) must produce a response where response['status'] == ('loaded' if len(list(source))>0 else 'empty').
+
+## Fix Strategy
+I changed loader.load so it no longer calls len(source) directly and always updates both `_data` and `_status` for every call. The function now: (1) converts source safely to a list via `list(source)` when source is not None (this accepts generators/iterators without calling len on them), (2) sets `_data` to that list (or `[]` for None), and (3) sets `_status` to 'loaded' if the resulting list is non-empty, otherwise to 'empty'. This prevents the TypeError from len() on non-sized iterables, clears stale `_data`, and guarantees the status reflects the current call.
+
+
+
+# Task Description
+Pipeline crashes on empty data source. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Data loader with status tracking."""
+
+_status = "idle"
+_data = None
+
+
+def reset():
+    global _status, _data
+    _status = "idle"
+    _data = None
+
+
+def load(source):
+    """Load data from source. Always sets status to reflect this call's outcome.
+
+    This implementation avoids calling len(source) on the original input (which
+    can raise for generators/iterators) by converting the input to a list when
+    present. It also ensures `_data` is cleared and `_status` updated for empty
+    or None sources so previous state cannot leak.
+    """
+    global _status, _data
+
+    if source is None:
+        _data = []
+        _status = "empty"
+        return _data
+
+    # Convert to a list to support generators/iterators safely
+    try:
+        collected = list(source)
+    except TypeError:
+        # If source is not iterable, treat it as empty
+        collected = []
+
+    _data = [x for x in collected]
+    if len(_data) > 0:
+        _status = "loaded"
+    else:
+        _status = "empty"
+
+    return _data
+
+
+def get_status():
+    return _status
+
+
+def get_data():
+    return _data
+
+
+def validate_format(data):
+    """Distractor: checks data format, unrelated to bug."""
+    if data is None:
+        return False
+    return isinstance(data, list)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If load stopped relying on len() and always updated _status/_data (as proposed), the crash on generators and the stale-state leak for empty sources would not occur.
+Evidence: original problematic test "if source and len(source) > 0:" (per reasoning) can raise TypeError for generators or skip assignments for falsy empties; produced code always assigns _data and _status (handles source is None, uses collected = list(source) and sets _status to "loaded" or "empty"); variables involved are _status and _data and operations are list(source) conversion + unconditional assignments.
+Judgment: The developer's reasoning correctly identifies the function (loader.load), the exact failing expression, and traces how a TypeError or a falsy-empty path leads to a crash or stale state; the provided fix implements the described mitigation and aligns with the invariant, though catching TypeError to treat non-iterables as empty could mask some misuse.

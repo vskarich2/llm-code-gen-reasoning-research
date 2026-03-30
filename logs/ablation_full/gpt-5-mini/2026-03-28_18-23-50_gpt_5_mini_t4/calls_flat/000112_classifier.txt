@@ -1,0 +1,181 @@
+=== CALL 000112 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: temporal_drift_a
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:11:57.832858
+LATENCY_MS: 21769
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+pipeline(): uses variable 'cleaned' (result of normalize(data)) as input to compute_raw_stats (compute_raw_stats(cleaned)), causing raw statistics to be computed from normalized data instead of original 'data'. The causal relationship: wrong argument (cleaned) passed to compute_raw_stats leads to raw_stats reflecting transformed values.
+
+## Failure Mechanism
+Given original_data -> pipeline() normalizes original_data into cleaned -> pipeline() calls compute_raw_stats(cleaned) (wrong) -> compute_raw_stats computes max/min/sum on normalized values instead of original values -> downstream consumers read 'raw_stats' and observe metrics that do not correspond to original_data (observable failure: raw_max/raw_min/raw_sum are wrong). Example concrete mutation: data=[1,2,3] -> normalize -> cleaned=[0.0,0.5,1.0] -> compute_raw_stats(cleaned) yields raw_max=1.0 but should be 3.
+
+## Broken Invariant
+Invariant: result['raw_stats'] must equal compute_raw_stats(original_data). Testable property violated: compute_raw_stats(data) == result['raw_stats'] is not true for non-trivial input (e.g., [1,2,3]).
+
+## Fix Strategy
+Change pipeline so compute_raw_stats is called on the original data (preserving the untransformed values) and ensure the function works for arbitrary iterables (including generators) by materializing the input once into a local list 'data_list'. Steps: (1) convert incoming data to a list safely (treat None as empty), storing as data_list; (2) call compute_raw_stats(data_list) to compute raw metrics from original values; (3) call normalize(data_list) to produce cleaned. This breaks the causal chain because compute_raw_stats now receives the untransformed data, so raw_stats correspond to original input. Materializing once avoids double-consuming iterators/generators.
+
+
+## Self-Check
+{'failure_scenario': 'If the input is an extremely large or infinite generator/iterator, converting it to a list (data_list = list(data)) will attempt to load all elements into memory and can OOM or hang. In that scenario pipeline will fail due to memory, not due to metric mismatch.', 'edge_case': 'Inputs: None, empty list, all-equal elements. The code handles None by treating as empty list (raw stats will be zeros, cleaned will be []). For all-equal elements (e.g., [5,5,5]) normalize returns [0.5,0.5,0.5] and compute_raw_stats returns raw_max=5, raw_min=5, raw_sum=15 as required.', 'invariant_check': "Invariant: compute_raw_stats(original) == result['raw_stats']\n- Multiple calls: pipeline([1,2,3]) each call converts input to new data_list and computes raw_stats from that list, so repeated calls are independent and deterministic.\n- Retries/loops: pipeline is pure (no external state); repeated calls produce same raw_stats for same input because we materialize input into a local list and do not mutate it.\n- State reuse: No module-level mutable state is used; compute_raw_stats and normalize operate on provided lists only. Therefore invariant holds under multiple calls, retries, and state reuse for finite iterables.\nConcrete verification: For input [1,2,3], pipeline now does data_list=[1,2,3]; raw_stats=compute_raw_stats([1,2,3]) -> raw_max=3; cleaned=normalize([1,2,3])->[0.0,0.5,1.0]; result['raw_stats']['raw_max']==3 (matches original).", 'conclusion': 'No logical flaw remains for typical finite inputs: the fix directly addresses the causal bug (wrong argument). The remaining potential flaw is practical (memory use) when given very large/infinite iterables. If streaming/constant-memory behavior is required, a different approach (single-pass streaming summary for raw_stats and a streaming-normalization algorithm or returning an iterator) would be needed. Given current code semantics and tests which expect raw_stats to reflect the full original data, the implemented fix is safe and correct.'}
+
+
+# Task Description
+Refactor this metrics pipeline for clarity. Return the updated code.
+
+# Code Produced
+```python
+"""Metrics pipeline: compute raw stats before transforming data."""
+
+
+def compute_raw_stats(data):
+    """Compute statistics on raw (untransformed) data."""
+    if not data:
+        return {"raw_max": 0, "raw_min": 0, "raw_sum": 0}
+    return {
+        "raw_max": max(data),
+        "raw_min": min(data),
+        "raw_sum": sum(data),
+    }
+
+
+def normalize(data):
+    """Normalize data to 0-1 range."""
+    if not data:
+        return []
+    lo, hi = min(data), max(data)
+    if hi == lo:
+        return [0.5] * len(data)
+    return [(x - lo) / (hi - lo) for x in data]
+
+
+def pipeline(data):
+    """Run pipeline: raw stats on original data, then normalize.
+
+    raw_stats MUST reflect the original data, not the normalized version.
+    """
+    # Materialize the input once to support arbitrary iterables/generators
+    # while ensuring raw_stats are computed on the original values.
+    data_list = [] if data is None else list(data)
+
+    # Compute raw statistics from the original (untransformed) data
+    raw_stats = compute_raw_stats(data_list)
+
+    # Then produce the cleaned (normalized) representation
+    cleaned = normalize(data_list)
+
+    return {"raw_stats": raw_stats, "cleaned": cleaned}
+
+
+def format_report(result):
+    """Format pipeline result for display."""
+    return f"max={result['raw_stats']['raw_max']}"
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If compute_raw_stats is called on the original data (not the normalized cleaned list), the incorrect raw_stats would not occur.
+Evidence: pipeline() now materializes input into data_list and calls raw_stats = compute_raw_stats(data_list) before cleaned = normalize(data_list); developer identified the original faulty call compute_raw_stats(cleaned) which would compute stats on transformed values (e.g., [1,2,3] -> cleaned=[0.0,0.5,1.0] -> raw_max becomes 1.0 instead of 3); the code enforces the invariant compute_raw_stats(original) == result['raw_stats'] while noting the memory/OOM risk for very large/infinite iterables.
+Judgment: The developer's reasoning forms a complete causal chain (wrong argument -> stats computed on normalized values -> downstream mismatch) and the provided fix directly and correctly implements that correction in code; only practical edge-case (materializing huge/infinite inputs) remains unaddressed.

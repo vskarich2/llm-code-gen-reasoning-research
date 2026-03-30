@@ -1,0 +1,160 @@
+=== CALL 000126 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: missing_branch_b
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:17:50.618708
+LATENCY_MS: 22010
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In auth.py, the dispatch table variable _ROLE_DISPATCH is missing the 'guest' key. Although guest_access() is imported from roles.py, _ROLE_DISPATCH does not map the string 'guest' to the guest_access function, so get_access cannot select the intended handler for the 'guest' role.
+
+## Failure Mechanism
+When get_access('guest') is called, it executes handler = _ROLE_DISPATCH.get(role, _default_access). Because 'guest' is not a key in _ROLE_DISPATCH, .get() returns the default _default_access function. get_access then returns _default_access(), i.e. {'read': False, 'write': False, 'delete': False}. As a result, can_read('guest') returns False, even though roles.guest_access() would have returned {'read': True, 'write': False, 'delete': False}. The missing mapping causes the code path to fall through to the no-access default instead of invoking guest_access.
+
+## Broken Invariant
+For the role 'guest', get_access(role) must return the guest_access permissions dict {'read': True, 'write': False, 'delete': False}. Currently get_access('guest') returns {'read': False, 'write': False, 'delete': False}, violating that invariant.
+
+## Fix Strategy
+Add the 'guest': guest_access entry to the _ROLE_DISPATCH table in auth.py so that get_access('guest') will retrieve and call guest_access instead of falling back to _default_access. This directly changes the dispatch lookup result for role == 'guest' (the single-line modification in _ROLE_DISPATCH), ensuring the returned dict matches roles.guest_access().
+
+
+# Task Description
+Guest users get no access. Fix the role dispatch. Return the updated code.
+
+# Code Produced
+```python
+"""Authentication and authorization dispatch."""
+
+from roles import admin_access, user_access, moderator_access, guest_access
+
+
+# Dispatch table mapping roles to access handlers
+_ROLE_DISPATCH = {
+    "admin": admin_access,
+    "user": user_access,
+    "moderator": moderator_access,
+    "guest": guest_access,
+}
+
+
+def _default_access():
+    """Default: no access for unknown roles."""
+    return {"read": False, "write": False, "delete": False}
+
+
+def get_access(role):
+    """Return the access dict for a given role."""
+    handler = _ROLE_DISPATCH.get(role, _default_access)
+    return handler()
+
+
+def can_read(role):
+    """Check if role has read access."""
+    return get_access(role).get("read", False)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If the missing 'guest' entry in _ROLE_DISPATCH were restored, get_access would call guest_access instead of _default_access and the observed loss of read access would not occur.
+Evidence: - _ROLE_DISPATCH is the dispatch dict used by get_access; - get_access uses handler = _ROLE_DISPATCH.get(role, _default_access) and then returns handler(); - _default_access() returns {'read': False, 'write': False, 'delete': False}; - can_read(role) returns get_access(role).get('read', False), so using _default_access yields False; - adding "guest": guest_access maps guest to the handler that (per reasoning) returns {'read': True, ...}.
+Judgment: The developer's reasoning correctly and completely identifies the missing dispatch entry as the root cause, traces the causal chain to the observable failure, and the patch aligns exactly with that diagnosis.

@@ -1,0 +1,105 @@
+=== CALL 000053 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: mutable_default_b
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:44:30.678905
+LATENCY_MS: 12788
+
+--- PROMPT ---
+Workers skip valid tasks on second batch. Fix. Return the updated code.
+
+## Codebase (2 files)
+
+### FILE 1/2: code_snippets_v2/mutable_default_b/queue.py ###
+```python
+"""Task queue module."""
+
+
+def create_task(name, priority=1):
+    """Create a task dict."""
+    return {"name": name, "priority": priority, "status": "pending"}
+
+
+def enqueue(task, queue=None):
+    """Add task to queue. Returns the queue."""
+    if queue is None:
+        queue = []
+    queue.append(task)
+    return queue
+
+
+def dequeue(queue):
+    """Remove and return the first task, or None."""
+    if queue:
+        return queue.pop(0)
+    return None
+```
+
+### FILE 2/2: code_snippets_v2/mutable_default_b/worker.py ###
+```python
+"""Worker that processes task batches."""
+
+from queue import create_task
+
+
+def process_batch(tasks, seen=set()):
+    """Process a batch of tasks, skipping already-seen ones.
+
+    Invariant: each call to process_batch with a fresh batch must
+    process ALL tasks in that batch, regardless of prior calls.
+    """
+    # BUG: seen set persists across calls — valid tasks skipped as duplicates
+    results = []
+    for task in tasks:
+        task_id = task["name"]
+        if task_id in seen:
+            continue
+        seen.add(task_id)
+        results.append({"name": task["name"], "result": "processed"})
+    return results
+
+
+def summarize(results):
+    """Summarize processing results (distractor)."""
+    return f"{len(results)} tasks processed"
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/mutable_default_b/queue.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/mutable_default_b/worker.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "In worker.py, the function process_batch defines the parameter seen with a mutable default value seen=set(). Because default argument values are evaluated once at function definition time, the same set object is reused across multiple calls to process_batch, causing state to persist between invocations.",
+  "failure_mechanism": "On the first call process_batch([{\"name\": \"A\"}, {\"name\": \"B\"}]) the code adds 'A' and 'B' to the default seen set and returns both as processed. On a subsequent call process_batch([{\"name\": \"A\"}, {\"name\": \"C\"}]) the persistent seen set already contains 'A', so the code skips 'A' (if task_id in seen: continue) and returns only 'C' as processed. Thus valid tasks present in the new batch are omitted because their names were recorded in the previously persisted seen set.",
+  "broken_invariant": "When called without an explicit seen argument (i.e., using the default), process_batch(tasks) must return a results list containing one processed entry for every element in the provided tasks list (i.e., it must process all tasks in that batch regardless of prior calls). Currently, repeated calls with overlapping task names can cause missing processed entries.",
+  "fix_strategy": "Change the default for seen to None and create a fresh set inside the function when seen is None. This makes each invocation that doesn't supply a seen argument use a new, per-call set, preventing cross-call persistence. Concretely, replaced the signature seen=set() with seen=None and added: if seen is None: seen = set(). This ensures prior calls cannot cause tasks in a later call to be skipped.",
+  "files": {
+    "code_snippets_v2/mutable_default_b/queue.py": "UNCHANGED",
+    "code_snippets_v2/mutable_default_b/worker.py": "\"\"\"Worker that processes task batches.\"\"\"\n\nfrom queue import create_task\n\n\ndef process_batch(tasks, seen=None):\n    \"\"\"Process a batch of tasks, skipping already-seen ones.\n\n    Invariant: each call to process_batch with a fresh batch must\n    process ALL tasks in that batch, regardless of prior calls.\n    \"\"\"\n    if seen is None:\n        seen = set()\n    results = []\n    for task in tasks:\n        task_id = task[\"name\"]\n        if task_id in seen:\n            continue\n        seen.add(task_id)\n        results.append({\"name\": task[\"name\"], \"result\": \"processed\"})\n    return results\n\n\ndef summarize(results):\n    \"\"\"Summarize processing results (distractor).\"\"\"\n    return f\"{len(results)} tasks processed\"\n"
+  }
+}

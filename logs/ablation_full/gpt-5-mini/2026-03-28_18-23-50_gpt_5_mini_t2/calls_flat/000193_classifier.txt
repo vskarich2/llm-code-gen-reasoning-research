@@ -1,0 +1,209 @@
+=== CALL 000193 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: invariant_partial_fail
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:50:38.999799
+LATENCY_MS: 29930
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+transfer_service.execute_transfer -> operation 'sender.balance -= amount' (mutation of sender.balance) performed before ensuring credit succeeded or recording final status, causing partial state when an exception is raised
+
+## Failure Mechanism
+transient failure injected (random.random() < 0.3) inside execute_transfer → code subtracts amount from sender.balance and records a debit entry (sender.balance mutated and ledger recorded) → transient failure occurs before receiver.balance is credited and before completion observability is emitted → exception propagates out of execute_transfer → observable failure: sender lost funds, receiver not credited, and ledger/audit show a pending/partial transfer (invariant violated)
+
+## Broken Invariant
+After execute_transfer returns normally or raises, either (A) neither account balance changed and no debit/credit ledger entries exist, or (B) both sender and receiver balances were updated and corresponding debit and credit ledger entries exist; currently a failure can leave sender.balance decreased and a debit ledger entry recorded without receiver.balance increase or credit entry
+
+## Fix Strategy
+Extract a minimal, focused helper _do_transfer that performs validation and applies the two account balance updates in a safe, rollback-capable way (snapshot old balances, attempt both assignments, rollback on exception). Move all observability (ledger.record_*, ledger.record_transfer_attempt, audit.emit_*) into the wrapper execute_transfer. The wrapper will record the transfer attempt as 'pending', simulate transient failures prior to committing the business state (so partial debits are not recorded), call _do_transfer to perform the atomic balance change, and only on success will it record debit/credit entries and emit transfer events. On any exception the wrapper will record the transfer attempt as 'failed' and emit a failure alert. This breaks the causal chain by ensuring that balance mutation and ledger/audit side effects are coordinated: either the business state (both balances) and ledger/audit are updated, or neither are.
+
+
+## Self-Check
+{'failure_scenario': "If an unexpected exception occurs inside _do_transfer between the two assignments (for example if assigning to receiver.balance raises), _do_transfer snapshots old_sender and old_receiver and wraps assignments in try/except; on exception it restores both balances and re-raises. The wrapper catches the exception, records a failed attempt and emits a failure alert. Thus partial mutation is rolled back. A remaining failure scenario is if an exception occurs after _do_transfer succeeds but before ledger.record_debit/record_credit complete (e.g., record_debit raises) — in this code record_debit is a simple append which won't raise, but in a real system you'd need transactional ledger writes. In our codebase, the observable functions are safe so this scenario is not present.", 'edge_case': 'Amount <= 0 or sender.balance < amount: validate_transfer raises ValueError before any observability is recorded. This ensures no ledger entry or partial balance change occurs for invalid inputs. Multiple consecutive calls are independent because _do_transfer snapshots and assigns only account fields.', 'invariant_check': 'Under multiple calls: each successful call uses _do_transfer which atomically updates both balances (with rollback if an exception hits inside the helper) and then the wrapper records debit+credit and marks attempt completed. Under retries: if a transient failure is simulated (random branch) the wrapper records the attempt as failed and DOES NOT call _do_transfer; balances remain unchanged and no debit/credit is recorded. Under state reuse: accounts are simple objects; the helper snapshots and restores if needed, preventing partial mutations across calls. Therefore the invariant (either both balances and ledger entries updated, or neither) holds across multiple calls and retries.', 'conclusion': 'No flaw requiring code revision was found in the context of this codebase: by centralizing business mutation in _do_transfer and moving all observability into execute_transfer, the code avoids the previous partial-debit-on-failure scenario. In production you might need transactional guarantees for ledger writes; given the current simple in-memory ledger/audit implementations, this fix is safe.'}
+
+
+# Task Description
+The execute_transfer function has too many logging calls mixed with business logic. Simplify it by extracting the core transfer into a clean helper and moving all observability calls into a wrapper. Return the updated code.
+
+# Code Produced
+```python
+import random
+from models import Account
+from ledger import record_debit, record_credit, record_transfer_attempt
+from audit import emit_transfer_event, emit_failure_alert
+
+
+def validate_transfer(sender, amount):
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    if sender.balance < amount:
+        raise ValueError("insufficient funds")
+
+
+def _do_transfer(sender, receiver, amount):
+    """Core business logic: validate and update both account balances.
+
+    This function keeps a snapshot of the original balances and will
+    restore them if an exception occurs during the assignment, so
+    callers can rely on it not leaving partial mutations.
+    """
+    validate_transfer(sender, amount)
+    old_sender = sender.balance
+    old_receiver = receiver.balance
+    try:
+        # perform updates; if something goes wrong while assigning, we
+        # catch and rollback below
+        sender.balance = old_sender - amount
+        receiver.balance = old_receiver + amount
+    except Exception:
+        # rollback to preserve invariant
+        try:
+            sender.balance = old_sender
+        finally:
+            receiver.balance = old_receiver
+        raise
+
+
+def execute_transfer(sender, receiver, amount):
+    # Keep validation at the top so we never record attempts for invalid data
+    validate_transfer(sender, amount)
+
+    # Observability: record an initial pending attempt
+    record_transfer_attempt(sender.account_id, receiver.account_id, amount, status="pending")
+
+    try:
+        # Simulate a transient failure before committing business state.
+        # Doing this here (outside _do_transfer) ensures we don't mutate balances
+        # and don't record partial ledger entries when the transient failure occurs.
+        if random.random() < 0.3:
+            # Emit failure and raise; wrapper catch will mark attempt failed
+            emit_failure_alert(
+                sender.account_id, receiver.account_id, amount,
+                "connection reset during credit phase",
+            )
+            raise RuntimeError("transient failure during credit")
+
+        # Perform the atomic business mutation
+        _do_transfer(sender, receiver, amount)
+
+    except Exception as exc:
+        # Observability on failure: mark failed and emit alert (if not already emitted)
+        record_transfer_attempt(sender.account_id, receiver.account_id, amount, status="failed")
+        # If we haven't emitted a failure alert yet, emit one. Some callers
+        # (like the transient failure branch above) will have already emitted it.
+        emit_failure_alert(sender.account_id, receiver.account_id, amount, exc)
+        raise
+
+    else:
+        # On success: record ledger entries and emit success event
+        record_debit(sender.account_id, amount)
+        record_credit(receiver.account_id, amount)
+        record_transfer_attempt(sender.account_id, receiver.account_id, amount, status="completed")
+        emit_transfer_event(sender.account_id, receiver.account_id, amount)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If the premature debit mutation and recording were removed (i.e., balances are only updated atomically after credit success), the partial-debit-on-failure symptom would not occur.
+Evidence: - _do_transfer performs both assignments via "sender.balance = old_sender - amount" and "receiver.balance = old_receiver + amount"; - execute_transfer calls record_transfer_attempt(..., status="pending") before any _do_transfer call or ledger.record_*; - transient failure branch (if random.random() < 0.3) raises before _do_transfer, preventing balance mutation; - except handler records the attempt as "failed" and emits an alert, and re-raises; - on successful path the code calls record_debit(...) and record_credit(...) then marks "completed".
+Judgment: The developer correctly identified the root cause (debit applied before guaranteed credit), stated a precise invariant, traced the full causal chain, and proposed a fix that the provided code implements; minor concerns remain about duplicate alerts and reliance on non-transactional ledger writes, but those do not invalidate the causal reasoning.

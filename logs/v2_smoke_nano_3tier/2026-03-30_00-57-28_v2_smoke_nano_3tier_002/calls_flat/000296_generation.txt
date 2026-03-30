@@ -1,0 +1,224 @@
+=== CALL 000296 ===
+MODEL: gpt-4.1-nano
+PHASE: generation
+CASE_ID: hidden_dep_multihop
+CONDITION: leg_reduction_lean_v2
+TRIAL: 1
+RUN_ID: v2_smoke_nano_3tier_002
+TRACE_ID: 1bf0c537ae3243118242c32fc8e618a9
+TIMESTAMP: 2026-03-30T01:46:31.527633
+LATENCY_MS: 3732
+
+--- PROMPT ---
+There are too many small cache helper functions doing similar things. Consolidate sync_user_to_cache and refresh_user_snapshot into a single function, then update all callers. Return the updated code.
+
+## Codebase (4 files)
+
+### FILE 1/4: code_snippets_v2/hidden_dep_multihop/cache_writer.py ###
+```python
+_store = {}
+
+
+def cache_put(key, value):
+    _store[key] = value
+
+
+def cache_delete(key):
+    _store.pop(key, None)
+
+
+def cache_put_if_absent(key, value):
+    if key not in _store:
+        _store[key] = value
+
+
+def cache_clear_prefix(prefix):
+    to_remove = [k for k in _store if k.startswith(prefix)]
+    for k in to_remove:
+        del _store[k]
+
+
+def refresh_user_snapshot(user):
+    cache_put_if_absent(f"user:{user['id']}", user["name"])
+
+
+def sync_user_to_cache(user):
+    cache_put(f"user:{user['id']}", user["name"])
+```
+
+### FILE 2/4: code_snippets_v2/hidden_dep_multihop/cache_reader.py ###
+```python
+from cache_writer import _store
+
+
+def get_display_name(user_id):
+    return _store.get(f"user:{user_id}")
+
+
+def is_user_cached(user_id):
+    return f"user:{user_id}" in _store
+
+
+def format_user_label(user_id):
+    name = get_display_name(user_id)
+    return f"@{name}" if name else "@Unknown"
+
+
+def get_cache_stats():
+    return {"size": len(_store), "keys": list(_store.keys())[:10]}
+```
+
+### FILE 3/4: code_snippets_v2/hidden_dep_multihop/user_repo.py ###
+```python
+class UserDB:
+    def __init__(self):
+        self._rows = {}
+
+    def insert(self, user):
+        self._rows[user["id"]] = user
+
+    def delete(self, user_id):
+        self._rows.pop(user_id, None)
+
+    def find(self, user_id):
+        return self._rows.get(user_id)
+
+    def update_name(self, user_id, new_name):
+        if user_id in self._rows:
+            self._rows[user_id]["name"] = new_name
+
+
+db = UserDB()
+
+
+def persist_user(user):
+    db.insert(user)
+
+
+def remove_user(user_id):
+    db.delete(user_id)
+
+
+def sync_user_to_db(user):
+    persist_user(user)
+
+
+def lookup_user(user_id):
+    return db.find(user_id)
+```
+
+### FILE 4/4: code_snippets_v2/hidden_dep_multihop/user_service.py ###
+```python
+from user_repo import persist_user, remove_user, sync_user_to_db, lookup_user
+from cache_writer import cache_delete, refresh_user_snapshot, sync_user_to_cache
+
+
+def save_user(user):
+    persist_user(user)
+    refresh_user_snapshot(user)
+
+
+def delete_user(user_id):
+    remove_user(user_id)
+    cache_delete(f"user:{user_id}")
+
+
+def rename_user(user_id, new_name):
+    from user_repo import db
+    db.update_name(user_id, new_name)
+    updated = lookup_user(user_id)
+    if updated:
+        refresh_user_snapshot(updated)
+
+
+def bulk_warm_cache(users):
+    for u in users:
+        refresh_user_snapshot(u)
+
+
+def migrate_legacy_user(legacy_record):
+    converted = {"id": legacy_record["uid"], "name": legacy_record["full_name"]}
+    sync_user_to_db(converted)
+```
+
+Fix the bug by identifying the mechanism and making a concrete, correct code change.
+
+Return a SINGLE valid JSON object.
+
+## 1. Root cause
+
+State the bug mechanism precisely:
+- name the function / variable
+- explain the causal issue (not just symptoms)
+
+## 2. Commitments
+
+Write 1–2 explicit commitments your fix must satisfy.
+
+Each must follow:
+
+<scope> must <action>
+
+Examples:
+- "create_config must return a copy of DEFAULTS"
+- "update_product must invalidate cache after write"
+
+Rules:
+- MUST be local and checkable
+- NO vague statements
+
+## 3. Fix
+
+Describe the exact code change in 1–2 sentences.
+Explain briefly why it satisfies the commitments.
+
+## 4. Quick check
+
+If the fix could still fail, say how in one sentence.
+Otherwise write: SAFE
+
+## 5. Code
+
+Return JSON:
+
+{
+  "root_cause": "...",
+  "code_commitments": ["..."],
+  "fix_strategy": "...",
+  "risk_check": "...",
+  "files": {
+    ""code_snippets_v2/hidden_dep_multihop/cache_writer.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/hidden_dep_multihop/cache_reader.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/hidden_dep_multihop/user_repo.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/hidden_dep_multihop/user_service.py": "<complete file contents or UNCHANGED>""
+  }
+}
+
+RULES:
+- All fields REQUIRED
+- "code_commitments": 1–2 items
+- "files": must include ALL files
+- Use "UNCHANGED" where appropriate
+- Full file contents for modified files
+- NO markdown
+- ONLY JSON output
+
+--- RESPONSE ---
+{
+  "root_cause": "The functions sync_user_to_cache and refresh_user_snapshot perform similar cache update operations but are separate, leading to potential inconsistency and code duplication. The bug arises because refresh_user_snapshot only calls cache_put_if_absent, which does not update existing cache entries, whereas sync_user_to_cache always updates, causing inconsistent cache states when both are used.",
+  "code_commitments": [
+    "Consolidate cache update logic into a single function that updates or creates cache entries",
+    "All callers must use the new unified function to ensure consistent cache state"
+  ],
+  "fix_strategy": "Create a new function update_user_cache that performs a cache put operation to update or insert user data, replacing both sync_user_to_cache and refresh_user_snapshot. Update all callers to use this new function, ensuring consistent cache updates.",
+  "risk_check": "SAFE",
+  "files": {
+    "code_snippets_v2/hidden_dep_multihop/cache_writer.py": "UNCHANGED",
+    "code_snippets_v2/hidden_dep_multihop/cache_reader.py": "UNCHANGED",
+    "code_snippets_v2/hidden_dep_multihop/user_repo.py": "UNCHANGED",
+    "code_snippets_v2/hidden_dep_multihop/user_service.py": "{
+  \"save_user\": \"def save_user(user):\\n    persist_user(user)\\n    update_user_cache(user)\",
+  \"delete_user\": \"def delete_user(user_id):\\n    remove_user(user_id)\\n    cache_delete(f\"user:{user_id}\")\",
+  \"rename_user\": \"def rename_user(user_id, new_name):\\n    from user_repo import db\\n    db.update_name(user_id, new_name)\\n    updated = lookup_user(user_id)\\n    if updated:\\n        update_user_cache(updated)\",
+  \"bulk_warm_cache\": \"def bulk_warm_cache(users):\\n    for u in users:\\n        update_user_cache(u)\",
+  \"migrate_legacy_user\": \"def migrate_legacy_user(legacy_record):\\n    converted = {\"id\": legacy_record[\"uid\"], \"name\": legacy_record[\"full_name\"]}\\n    sync_user_to_db(converted)\""
+}"
+  }
+}

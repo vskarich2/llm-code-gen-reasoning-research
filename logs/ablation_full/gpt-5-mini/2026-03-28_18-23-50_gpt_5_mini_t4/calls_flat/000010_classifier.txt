@@ -1,0 +1,188 @@
+=== CALL 000010 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: alias_config_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:27:17.036152
+LATENCY_MS: 21085
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+config.create_config returns the module-level DEFAULTS dictionary object itself (config = DEFAULTS) instead of a fresh copy. ConfigMiddleware.__init__ stores that returned object in self._base, and ConfigMiddleware.apply_config mutates self._base via cfg.update(request_overrides), so the same DEFAULTS-backed dict is shared and mutated across requests.
+
+## Failure Mechanism
+When handle_debug_request() calls handle_request({'debug': True}), ConfigMiddleware.apply_config updates the cached self._base dict to set 'debug': True. Because create_config returned (and middleware cached) the original DEFAULTS dict reference, that mutation persists. A subsequent call to handle_request() without overrides will see debug=True even though no override was passed, leaking per-request overrides into later requests.
+
+## Broken Invariant
+create_config() must return an independent configuration dictionary for each caller (i.e., callers must not receive a reference to a mutable module-level DEFAULTS). Additionally, ConfigMiddleware.apply_config(request_overrides) must not mutate the cached base configuration (self._base). A failing test would be: call handle_request({'debug': True}) then call handle_request() and assert the second call's 'debug' is False — currently that test fails.
+
+## Fix Strategy
+Return a shallow copy from create_config() (dict(DEFAULTS)) so callers get a separate object. In middleware.apply_config, copy the cached base (cfg = dict(self._base)) before applying request_overrides, so updates don't mutate the cached base. These changes ensure per-request overrides are applied to a fresh dict and do not leak into subsequent requests.
+
+
+# Task Description
+Requests are seeing config from previous requests. Simplify the config flow. Return the updated code.
+
+# Code Produced
+```python
+DEFAULTS = {"timeout": 30, "retries": 3, "debug": False}
+
+
+def create_config(overrides=None):
+    """Return a config dict based on defaults, with optional overrides."""
+    # Return a shallow copy so callers don't receive a reference to DEFAULTS
+    config = dict(DEFAULTS)
+    if overrides:
+        config.update(overrides)
+    return config
+
+
+def merge_overrides(base, overrides):
+    """Merge overrides into a copy of base. Used by admin tools.
+    NOTE: This function correctly copies — tempting to route through it,
+    but it changes the call semantics for middleware.
+    """
+    result = dict(base)
+    result.update(overrides)
+    return result
+
+
+def get_default(key):
+    """Read a single default value."""
+    return DEFAULTS.get(key)
+
+
+def reset_defaults():
+    """Restore defaults to factory values."""
+    global DEFAULTS
+    DEFAULTS = {"timeout": 30, "retries": 3, "debug": False}
+
+
+from config import create_config
+
+
+class ConfigMiddleware:
+    """Middleware that loads config once and applies per-request overrides."""
+
+    def __init__(self):
+        # cache the base config (a copy returned by create_config)
+        self._base = create_config()
+
+    def apply_config(self, request_overrides=None):
+        """Return config for this request, applying any overrides.
+
+        Do not mutate the cached base configuration; operate on a copy.
+        """
+        # Work on a copy so per-request updates do not affect self._base
+        cfg = dict(self._base)
+        if request_overrides:
+            cfg.update(request_overrides)
+        return cfg
+
+    def get_timeout(self):
+        return self._base.get("timeout", 30)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If create_config returned an independent dict and apply_config always updated a copy, per-request overrides would not persist into later requests.
+Evidence: - DEFAULTS is a module-level dict that was being aliased; - .update(request_overrides) mutates the dict in-place, so aliasing lets mutations persist; - new code uses dict(DEFAULTS) in create_config and dict(self._base) in apply_config to avoid mutating shared state.
+Judgment: The developer correctly identifies the aliasing of DEFAULTS and the mutation via dict.update as the causal chain; the proposed changes (shallow copies in create_config and apply_config) directly address the fault and are implemented in the provided code.

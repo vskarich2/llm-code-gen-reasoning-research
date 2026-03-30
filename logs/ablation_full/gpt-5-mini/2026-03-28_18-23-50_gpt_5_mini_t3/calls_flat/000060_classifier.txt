@@ -1,0 +1,187 @@
+=== CALL 000060 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: mutable_default_c
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:46:03.814528
+LATENCY_MS: 62278
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+with_history (scheduler.py) uses the module-level variable _shared_log as the default value for the parameter 'history' (operation: default parameter binding), causing every decorated function to capture and append into the same list.
+
+## Failure Mechanism
+decorator default → during function definition the default parameter 'history' is bound to the module-level list _shared_log → both schedule_one and schedule_batch are decorated with with_history and therefore close over the same list object → when schedule_one is called it appends entries into that shared list → schedule_batch.get_history() (and schedule_one.get_history()) return the combined entries from both functions → observable failure: histories are combined and per-function history invariant is violated (get_all_stats reports counts that include calls from other decorated functions).
+
+## Broken Invariant
+Each decorated function must have an independent history list: for any two decorated functions f and g, f.get_history() must contain only entries for f and not entries produced by g. Currently schedule_one.get_history() and schedule_batch.get_history() can contain entries from both functions.
+
+## Fix Strategy
+Change with_history to avoid using _shared_log as a mutable default. Accept only the function argument on decoration (keep signature compatible when used as @with_history) and create a fresh list inside the decorator when no explicit history is supplied. Concretely: replace the default parameter history=_shared_log with history=None, then inside with_history set history = [] if history is None. This ensures each decorated function closes over its own list instance, breaking the causal chain: previously shared list → now per-decorator list, so appends affect only that function's history.
+
+
+## Self-Check
+{'failure_scenario': 'If someone intentionally passes the same list object to multiple decorations by calling the decorator programmatically like with_history(func, history=shared_list) (note: Python decorator syntax @with_history does not provide a way to pass a second positional param), then histories would still be shared by design. However, the common use-case @with_history (no args) will create independent lists, which fixes the reported bug. This scenario is a deliberate sharing by the caller, not a regression introduced by the fix.', 'edge_case': 'Decorating many functions in a loop: each call to @with_history will invoke with_history once and because the code uses history=None then history = [] inside the call, each wrapper gets its own list. Also check empty call patterns: calling schedule_batch([]) or schedule_one with empty/None args still appends a record with args_count matching len(args) (0 or relevant), so history entries remain well-formed.', 'invariant_check': "Under the new code (see scheduler.py below):\n- multiple calls: calling schedule_one() three times will append three entries into schedule_one's closure 'history' list; schedule_batch.get_history() remains unchanged, so len(schedule_one.get_history())==3 and len(schedule_batch.get_history())==0 if batch wasn't called. This satisfies the invariant.\n- retries / loops: repeated decoration or multiple calls do not mutate any module-level shared list; each wrapper maintains its own 'history' closure list, so retries only affect that function's history.\n- state reuse: importing scheduler multiple times in the same process doesn't happen (single import), but the per-wrapper list lives for the lifetime of the wrapper; clearing via wrapper.clear_history() only clears that wrapper's list because clear_history calls history.clear() on the closure list object. Therefore state reuse across different wrappers is prevented.\nAll these behaviors follow from the change: history is created per-decorator call inside with_history when history is None.", 'conclusion': 'No flaw found in the common use-case: switching the default to None and creating a new list when needed ensures each decorated function receives an independent history list, restoring the broken invariant. The only way histories would be shared now is if the caller intentionally provides the same list object to multiple decorations (explicit sharing), which is different from the prior bug where sharing happened implicitly. Thread-safety (concurrent append/clear) is not addressed by this change but is outside the scope of fixing the shared-history bug.'}
+
+
+# Task Description
+Scheduler history is shared across jobs. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Scheduler with decorator that tracks call history."""
+
+from worker import process, batch_process
+
+
+def with_history(func, history=None):
+    """Decorator that records call history for a function.
+
+    Invariant: each decorated function must have its OWN
+    independent history list.
+    """
+    # Create a fresh history list for each decorated function when
+    # no explicit history is provided. This avoids sharing a module-
+    # level mutable default across multiple wrappers.
+    if history is None:
+        history = []
+
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        history.append({"func": func.__name__, "args_count": len(args)})
+        return result
+
+    def get_history():
+        return list(history)
+
+    def clear_history():
+        history.clear()
+
+    wrapper.get_history = get_history
+    wrapper.clear_history = clear_history
+    return wrapper
+
+
+@with_history
+def schedule_one(task):
+    """Schedule and process a single task."""
+    return process(task)
+
+
+@with_history
+def schedule_batch(tasks):
+    """Schedule and process a batch of tasks."""
+    return batch_process(tasks)
+
+
+def get_all_stats():
+    """Get combined stats (distractor)."""
+    return {
+        "one_calls": len(schedule_one.get_history()),
+        "batch_calls": len(schedule_batch.get_history()),
+    }
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If the module-level shared default is removed and each decorator call creates its own list (history=None → history = []), the merged histories failure disappears; only intentionally passing the same list would reintroduce sharing.
+Evidence: with_history signature now uses history=None; the code does "if history is None: history = []" creating a fresh closure list; wrapper appends with history.append({...}) so each decorated function mutates its closure; schedule_one and schedule_batch are both decorated with @with_history so they close over separate lists under the fix; get_history returns list(history) (a copy) and clear_history calls history.clear(); original bug was caused by a module-level _shared_log default causing both wrappers to reference the same list.
+Judgment: The developer's reasoning correctly identifies the root cause, traces the full causal chain to the observable invariant violation, and prescribes a fix that the submitted code implements; the only remaining caveat—intentional sharing by callers and thread-safety—is acknowledged and outside the stated fix.

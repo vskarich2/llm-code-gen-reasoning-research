@@ -1,0 +1,403 @@
+=== CALL 000205 ===
+MODEL: gpt-5-mini
+PHASE: classification
+CASE_ID: wrong_condition_c
+CONDITION: baseline_v2
+TRIAL: 1
+RUN_ID: v2_smoke_nano_3tier_002
+TRACE_ID: a922f165eed64f1999c198073cc915f5
+TIMESTAMP: 2026-03-30T01:30:59.162985
+LATENCY_MS: 17195
+
+--- PROMPT ---
+````markdown
+You are a STRICT reasoning–code alignment auditor.
+
+Your job is to evaluate whether a developer’s stated reasoning (or implied intent) is CONSISTENT with the code they produced.
+
+You are NOT evaluating whether the code is correct.
+You are NOT evaluating whether the code passes tests.
+You are ONLY evaluating whether the code IMPLEMENTS the stated reasoning.
+
+Be skeptical. Do NOT reward vague reasoning. Do NOT assume intent that is not stated.
+
+---------------------------------------------------------------------
+# Inputs
+
+## Developer Reasoning (may be partial or missing fields)
+
+Root Cause:
+In limiter.py, the should_allow function's return statement has incorrect operator precedence. The expression 'not expired and under_limit or exempt' is parsed as '((not expired) and under_limit) or exempt', which allows expired tokens for exempt users because 'exempt' is evaluated after the 'and'. This causes expired tokens to be permitted for exempt clients, contrary to the intended logic.
+
+Fix Strategy:
+Modify the return statement in limiter.py's should_allow function to explicitly group the conditions with parentheses: 'return (not expired) and (under_limit or exempt)'. This ensures that the 'not expired' condition applies to both 'under_limit' and 'exempt', preventing expired tokens from being allowed even for exempt users.
+
+
+
+## Task
+Expired tokens still allowed for exempt users. Fix. Return the updated code.
+
+## Code Produced
+```python
+"""Core rate limiter logic."""
+
+from policy import is_expired, is_under_limit, is_exempt
+
+def should_allow(client_id, count, limit, timestamp, now,
+                 window_seconds, exempt_list):
+    """Decide whether to allow a request.
+
+    Allow if:
+      - token is not expired AND (under limit OR exempt)
+
+    Exempt clients bypass the rate limit even if over it,
+    but expired tokens are always rejected.
+    """
+    expired = is_expired(timestamp, now, window_seconds)
+    under_limit = is_under_limit(count, limit)
+    exempt = is_exempt(client_id, exempt_list)
+
+    # Corrected operator precedence with parentheses
+    return (not expired) and (under_limit or exempt)
+
+
+'''Rate limiting middleware for request processing.'''
+
+from limiter import should_allow
+
+
+# Default configuration
+DEFAULT_WINDOW = 60  # seconds
+DEFAULT_LIMIT = 100
+EXEMPT_CLIENTS = {"internal-service", "health-checker"}
+
+
+def process_request(request, client_states):
+    """Process a request through the rate limiter.
+
+    Args:
+        request: dict with 'client_id' and 'timestamp'
+        client_states: dict mapping client_id -> {count, first_seen}
+
+    Returns:
+        dict with 'allowed' and 'reason'
+    """
+    client_id = request["client_id"]
+    now = request["timestamp"]
+
+    state = client_states.get(client_id, {"count": 0, "first_seen": now})
+
+    allowed = should_allow(
+        client_id=client_id,
+        count=state["count"],
+        limit=DEFAULT_LIMIT,
+        timestamp=state["first_seen"],
+        now=now,
+        window_seconds=DEFAULT_WINDOW,
+        exempt_list=EXEMPT_CLIENTS,
+    )
+
+    if allowed:
+        state["count"] = state.get("count", 0) + 1
+        client_states[client_id] = state
+        return {"allowed": True, "reason": "ok"}
+
+    return {"allowed": False, "reason": "rate_limited"}
+
+
+"""Rate limiting policy definitions."""
+
+
+def is_expired(timestamp, now, window_seconds):
+    """Check if a timestamp is outside the current window."""
+    return (now - timestamp) > windo
+````
+
+
+
+## Ground Truth (for calibration only)
+
+Bug type: WRONG_CONDITION
+Bug location: Boolean reads correctly but precedence is wrong
+
+Invariant: boundary condition must be handled correctly
+
+
+
+---
+
+# Core Principle
+
+You are evaluating **Reasoning → Code Consistency**.
+
+The question is:
+
+"Does the code satisfy the obligations implied by the reasoning?"
+
+NOT:
+"Is the reasoning correct?"
+NOT:
+"Does the code work?"
+
+---
+
+# STEP 1 — Extract Mechanism (from reasoning only)
+
+Extract the claimed root cause.
+
+Rules:
+
+* Use ONLY what is explicitly stated or directly implied
+* Do NOT invent missing reasoning
+* Prefer concrete references (functions, variables, operations)
+
+---
+
+# STEP 2 — Extract Commitments
+
+EXPLICIT COMMITMENT RULE:
+
+If explicit commitments are already present:
+
+* Use them directly
+* Do NOT rewrite or weaken them
+* Only normalize formatting
+
+If NOT present:
+
+* Extract commitments from reasoning
+* Do NOT invent new constraints
+* Only use explicitly stated or directly implied obligations
+
+A valid commitment MUST be:
+
+* LOCAL (specific function / variable / operation)
+* CHECKABLE (can verify in code)
+* IMPLIED by reasoning
+
+If no valid commitments exist → commitments_extracted = WRONG
+
+---
+
+# STEP 2.5 — Normalize Commitments
+
+All commitments MUST follow:
+
+<scope> must <action>
+
+Rules:
+
+* Preserve meaning exactly
+* Do NOT add or infer new details
+* Split compound statements
+* Make negation explicit ("must not")
+* Remove redundancy
+
+---
+
+# STEP 2.6 — Canonical Commitment Matching (CRITICAL)
+
+You MUST compare extracted commitments against canonical bug-family commitments.
+
+These represent NECESSARY conditions for a correct fix.
+
+A commitment is considered CORRECT if it semantically matches ANY canonical commitment.
+
+Do NOT require exact wording — use semantic equivalence.
+
+---
+
+# Canonical Commitment Patterns by Bug Family
+
+## ALIASING
+
+* returned objects must not share mutable references with global defaults
+* functions must return a new object instance instead of a shared reference
+* mutations must not affect the original source object
+
+## PARTIAL_STATE_UPDATE
+
+* all dependent fields must be updated when the source changes
+* derived fields must be recomputed from updated values
+* no stale dependent state may persist
+
+## STALE_CACHE
+
+* cache must be invalidated or updated after writes
+* reads must not return stale cached values
+* cache and source of truth must remain consistent
+
+## MUTABLE_DEFAULT
+
+* default mutable arguments must not be shared across calls
+* new state must be created per invocation
+* no implicit accumulation across calls
+
+## SIDE_EFFECT_ORDER
+
+* side effects must occur at correct granularity (per item vs batch)
+* updates must align with iteration order
+* outputs must reflect each operation
+
+## USE_BEFORE_SET
+
+* variables must be initialized before all reads
+* all control paths must define required variables
+* edge cases must not leave variables undefined
+
+## RETRY_DUPLICATION
+
+* retry logic must not duplicate successful operations
+* loop must terminate after success
+* operations must be idempotent or guarded
+
+## PARTIAL_ROLLBACK
+
+* failed operations must revert prior state
+* rollback must restore invariants
+* no partial state may persist
+
+## TEMPORAL_DRIFT
+
+* computations must use correct stage of data
+* raw metrics computed before transformation
+* transformations must not overwrite needed data
+
+## MISSING_BRANCH
+
+* all valid input cases must be handled explicitly
+* no valid case may fall through
+* dispatch must cover all roles/types
+
+---
+
+# STEP 3 — Check Commitment Satisfaction
+
+For each normalized commitment:
+
+* SATISFIED → clearly implemented
+* PARTIAL → partially implemented
+* VIOLATED → not implemented or contradicted
+
+Ground all judgments in code.
+
+---
+
+# STEP 4 — Evaluation Dimensions
+
+Use ONLY: CORRECT, PARTIAL, WRONG
+
+Strict rules:
+
+CORRECT = all required elements present
+PARTIAL = some but not all
+WRONG = none or incorrect
+
+VAGUENESS RULE:
+If commitment is not checkable → WRONG
+
+ANTI-INFLATION RULE:
+If reasoning applies to multiple bug types → not CORRECT
+
+---
+
+## 1. mechanism_identified
+
+Required:
+
+* correct mechanism
+* concrete code anchor
+* causal relation
+
+---
+
+## 2. commitments_extracted
+
+Required:
+
+* at least one valid commitment
+* local and checkable
+* maps to canonical pattern
+
+---
+
+## 3. commitments_satisfied
+
+Required:
+
+* canonical commitments implemented
+* no contradictions
+* no missing core obligation
+
+---
+
+## 4. reasoning_code_alignment
+
+Required:
+
+* code matches fix strategy
+* correct location modified
+* no contradiction
+
+---
+
+## 5. failure_type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+---
+
+# Counterfactual Check
+
+"If commitments were satisfied, would bug be fixed?"
+
+---
+
+# Evidence Requirement
+
+Must reference:
+
+* variables
+* functions
+* operations
+
+---
+
+# Confidence
+
+HIGH / MEDIUM / LOW
+
+---
+
+# Output Format (STRICT — follow EXACTLY)
+
+Line 1 MUST be exactly 5 semicolon-separated tokens:
+  <mechanism_identified>;<commitments_extracted>;<commitments_satisfied>;<reasoning_code_alignment>;<failure_type>
+
+The first 4 tokens MUST each be one of: CORRECT, PARTIAL, or WRONG.
+The 5th token MUST be a failure_type from the list above.
+
+Example line 1: CORRECT;CORRECT;PARTIAL;CORRECT;ALIASING
+Example line 1: WRONG;WRONG;WRONG;WRONG;STALE_CACHE
+
+Line 2: HIGH, MEDIUM, or LOW
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet phrases>
+Line 5: Judgment: <two sentences>
+
+---
+
+After line 5 you may add:
+
+---DEBUG---
+
+No extra text before the 5 lines.
+
+```
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If should_allow returns (not expired) and (under_limit or exempt), expired tokens would no longer be permitted for exempt clients.
+Evidence: should_allow computes expired/under_limit/exempt; return statement is "(not expired) and (under_limit or exempt)"; reasoning described original precedence bug with "not expired and under_limit or exempt"; limiter.py shows the corrected grouped expression; policy.is_expired contains an unrelated "windo" typo.
+Judgment: The submitted code precisely implements the developer's stated fix in limiter.py's should_allow by applying parentheses so that "not expired" gates both under_limit and exempt. However, an unrelated bug (undefined name "windo" in is_expired) exists in the policy code and may prevent the program from running even though the logical fix is correctly applied.

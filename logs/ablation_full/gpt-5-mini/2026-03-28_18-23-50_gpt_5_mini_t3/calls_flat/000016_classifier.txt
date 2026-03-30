@@ -1,0 +1,181 @@
+=== CALL 000016 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: partial_update_a
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:30:03.473925
+LATENCY_MS: 20768
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+update_profile: when handling key == 'name' the code sets user['name'] but does not update user['display_name'], so the write to user['name'] is not followed by a corresponding write to user['display_name']
+
+## Failure Mechanism
+Cause: changes contains a new name (e.g. changes = {'name': 'Alice'}) → Mutation: update_profile assigns user['name'] = 'Alice' but leaves user['display_name'] unchanged → Propagation: any later code that reads user['display_name'] will see the old value while user['name'] is the new value → Observable failure: invariant display_name == name is violated (e.g. user['name']=='Alice' but user['display_name']=='OldName'), leading to incorrect UI labels or assertion/test failures.
+
+## Broken Invariant
+After update_profile returns, the specific testable property user['display_name'] == user['name'] may be False (they must always be equal).
+
+## Fix Strategy
+After applying all allowed changes, explicitly synchronize the two fields so display_name always equals name. Implementation details: accept changes to 'name' and 'display_name' (but final state must satisfy the invariant). After updating fields from the changes dict, do a deterministic sync: if user has a non-None 'name' use it to set 'display_name'; otherwise if a non-None 'display_name' exists use it to set 'name'; otherwise ensure both keys exist and are None. This breaks the causal chain because any assignment to user['name'] during the update will be followed by updating user['display_name'] before returning, preventing the stale-display_name propagation.
+
+
+## Self-Check
+{'failure_scenario': "Concurrent modification: another thread/process writes to user['display_name'] after update_profile returns; that can still create a mismatch, but this is a concurrency issue outside the function's control. Within single-threaded use, a failure scenario could be a user dict that lacks both 'name' and 'display_name' initially and changes does not provide either key. The fix handles this by ensuring both keys exist (set to None) so the invariant holds (both None).", 'edge_case': "Boundary conditions: (1) changes contains only 'display_name' but no 'name' — code will set user['display_name'] then, during sync, set user['name'] = user['display_name'], preserving the invariant. (2) changes is empty — code will leave existing fields but still enforce sync (if name exists it will set display_name=name). (3) values are falsy ('' or None): if name is set to None explicitly, display_name will also become None; if set to empty string, both become empty string. These are handled deterministically.", 'invariant_check': "Multiple calls: Each call applies changes then enforces user['display_name'] == user['name'], so repeated calls keep them equal. Retries/loops: the function is idempotent for the same changes (applying same 'name' value will result in same final state). State reuse: if a user object is reused, the function will always re-enforce equality on each invocation. For example, after update_profile(user, {'name':'A'}), both fields are 'A'; calling update_profile(user, {'email':'x'}) leaves both as 'A' because the final sync keeps display_name == name. The code explicitly checks presence of 'name' and 'display_name' and sets defaults, preventing KeyError when keys are missing.", 'conclusion': 'No flaw requiring code revision was found within the single-threaded, single-process model of this module. The implemented change deterministically enforces the invariant at the end of update_profile. The remaining possible class of failures involves concurrent mutations by external code, which must be addressed at a higher level (e.g., by locking or by designing a single source of truth).'}
+
+
+# Task Description
+Refactor this profile module for clarity. Return the updated code.
+
+# Code Produced
+```python
+ """User profile management."""
+
+
+def update_profile(user, changes):
+    """Update user profile fields from changes dict.
+
+    Invariant: display_name must always equal name.
+    """
+    # Apply allowed partial updates. We accept 'name', 'display_name', 'email', 'age'.
+    # We do not trust the order of keys in `changes`; final synchronization will
+    # ensure display_name == name.
+    for key, value in changes.items():
+        if key == "name":
+            user["name"] = value
+        elif key == "display_name":
+            # Allow updating display_name as an input, but final sync will decide the canonical value.
+            user["display_name"] = value
+        elif key == "email":
+            user["email"] = value
+        elif key == "age":
+            user["age"] = value
+
+    # Enforce invariant: display_name must equal name.
+    # Preference: if 'name' exists (and can be None or empty), use it as canonical.
+    if "name" in user and user["name"] is not None:
+        user["display_name"] = user["name"]
+    elif "display_name" in user and user["display_name"] is not None:
+        # No name present but display_name exists: make name match display_name.
+        user["name"] = user["display_name"]
+    else:
+        # Ensure both keys exist so callers can rely on their presence.
+        user.setdefault("name", None)
+        user.setdefault("display_name", None)
+
+    return user
+
+
+def create_user(name, email):
+    """Create a new user profile with synced display_name."""
+    return {
+        "name": name,
+        "display_name": name,
+        "email": email,
+        "age": None,
+    }
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;PARTIAL;PARTIAL;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If update_profile always wrote display_name whenever it updated name (or otherwise synchronized deterministically within the function), the single-threaded display_name/name mismatch would not occur.
+Evidence: update_profile loop sets user["name"] when key=="name" but does not set user["display_name"]; final sync uses if "name" in user and user["name"] is not None which skips when name is explicitly set to None; the elif copies a non-None user["display_name"] back into user["name"], undoing an explicit name=None; thus changes={'name': None} with existing display_name='Old' yields name='Old' not None; create_user does initialize name and display_name equally.
+Judgment: The developer correctly pinpoints the function, variables, and causal chain and proposes a sync-based fix that addresses the core mechanism, but the implementation and self-check are inconsistent: the code fails the claimed handling of explicit None (it can silently revert a deliberate name=None), so the fix is only partial and needs to treat presence in changes (or explicit-None intent) correctly.

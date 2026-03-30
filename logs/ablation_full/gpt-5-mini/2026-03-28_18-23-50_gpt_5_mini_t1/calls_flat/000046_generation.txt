@@ -1,0 +1,245 @@
+=== CALL 000046 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: lazy_init_c
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:39:36.016868
+LATENCY_MS: 22619
+
+--- PROMPT ---
+Config reset doesn't propagate through client to handler. Fix. Return the updated code.
+
+## Codebase (3 files)
+
+### FILE 1/3: code_snippets_v2/lazy_init_c/config.py ###
+```python
+"""Configuration module."""
+
+_config = None
+
+
+def _load_config():
+    """Load default config."""
+    return {"api_key": "default-key", "base_url": "https://api.example.com"}
+
+
+def get_config():
+    """Lazy-load config."""
+    global _config
+    if _config is None:
+        _config = _load_config()
+    return _config
+
+
+def reset_config():
+    """Reset config for testing or reload."""
+    global _config
+    _config = None
+
+
+def set_config(key, value):
+    """Override a single config value."""
+    cfg = get_config()
+    cfg[key] = value
+```
+
+### FILE 2/3: code_snippets_v2/lazy_init_c/client.py ###
+```python
+"""API client that reads config at import time."""
+
+from config import get_config
+
+# BUG: captures config dict reference at import time.
+# After reset_config(), _config in config.py becomes a NEW dict,
+# but _client_cfg still points to the OLD one.
+_client_cfg = get_config()
+
+
+def get_api_key():
+    """Return the API key the client uses."""
+    return _client_cfg["api_key"]
+
+
+def get_base_url():
+    """Return the base URL the client uses."""
+    return _client_cfg["base_url"]
+
+
+def build_headers():
+    """Build request headers (distractor)."""
+    return {"Authorization": f"Bearer {get_api_key()}"}
+```
+
+### FILE 3/3: code_snippets_v2/lazy_init_c/handler.py ###
+```python
+"""Request handler that uses client."""
+
+from client import get_api_key, get_base_url
+
+
+def make_request(endpoint):
+    """Build a request dict using client config.
+
+    Invariant: must reflect current config, not stale import-time snapshot.
+    """
+    return {
+        "url": get_base_url() + "/" + endpoint,
+        "api_key": get_api_key(),
+    }
+
+
+def health_check():
+    """Health check endpoint (distractor)."""
+    return {"status": "ok", "base_url": get_base_url()}
+
+
+def format_endpoint(base, path):
+    """URL formatter (distractor)."""
+    return base.rstrip("/") + "/" + path.lstrip("/")
+```
+
+You are implementing a STRICT reasoning + code generation procedure designed to REDUCE reasoning-execution mismatch.
+
+This is NOT a formatting task. This is a TWO-PASS reasoning process with adversarial verification.
+
+You MUST follow the procedure exactly.
+
+Return a SINGLE valid JSON object. No text outside JSON. No markdown fences.
+
+# GOAL
+
+Fix the bug AND ensure your reasoning is causally correct and robust to failure.
+
+You are required to:
+- identify the correct mechanism
+- challenge your own hypothesis
+- verify your fix against failure scenarios
+
+# PROCEDURE (MANDATORY)
+
+## STEP 1 — DIAGNOSE (PRIMARY HYPOTHESIS)
+
+Identify:
+
+- root_cause:
+  Name the exact function + variable + operation causing the bug.
+  Must describe a causal relationship (not just "missing X").
+
+- failure_mechanism:
+  Give a concrete scenario:
+  cause → mutation/event → propagation → observable failure
+
+- broken_invariant:
+  A specific, testable property that is violated.
+
+## STEP 2 — ALTERNATIVE HYPOTHESIS (CRITICAL)
+
+Propose ONE alternative explanation for the bug.
+
+- What else could plausibly be the cause?
+- Why might your primary hypothesis be wrong?
+
+Then explicitly reject it:
+
+- Why is your original diagnosis more correct?
+- What evidence in the code supports this?
+
+This step is REQUIRED. Do not skip.
+
+## STEP 3 — PLAN FIX
+
+Describe:
+
+- fix_strategy:
+  What exact change you will make
+  Why it breaks the causal chain
+
+Must reference actual code behavior.
+
+## STEP 4 — CODE
+
+Implement the fix.
+
+Rules:
+- Modify ONLY necessary files
+- Return COMPLETE contents for modified files
+- Use "UNCHANGED" for others
+
+## STEP 5 — ADVERSARIAL SELF-CHECK (MANDATORY)
+
+You must actively try to BREAK your own fix.
+
+Answer ALL:
+
+1. Failure Scenario:
+   Describe a concrete scenario where your fix might still fail.
+
+2. Edge Case:
+   Identify a boundary condition (e.g., retries, empty values, ordering).
+
+3. Invariant Check:
+   Verify your invariant holds under:
+   - multiple calls
+   - retries / loops
+   - state reuse
+
+4. Conclusion:
+   - If a flaw is found → REVISE your fix
+   - If no flaw → explain WHY it is safe
+
+Your answer MUST reference your actual code.
+
+# OUTPUT FORMAT (STRICT JSON)
+
+{
+  "root_cause": "<exact function + variable + causal relationship>",
+  "failure_mechanism": "<cause → mutation → propagation → observable failure>",
+  "broken_invariant": "<specific testable property that is violated>",
+  "alternative_hypothesis": "<one alternative explanation for the bug>",
+  "hypothesis_rejection": "<why primary hypothesis is correct, with code evidence>",
+  "fix_strategy": "<what change you will make and why it breaks the causal chain>",
+  "self_check": {
+    "failure_scenario": "<concrete scenario where fix might still fail>",
+    "edge_case": "<boundary condition to test>",
+    "invariant_check": "<verify invariant under multiple calls, retries, state reuse>",
+    "conclusion": "<flaw found → revise, or why it is safe>"
+  },
+  "files": {"<path>": "<complete file contents or UNCHANGED>"}
+}
+
+# RULES
+
+- All fields are REQUIRED and must be substantive
+- No generic statements — ground every claim in actual code
+- Must reference actual variables and behavior
+- Do NOT restate the task
+- Do NOT skip alternative hypothesis
+- Do NOT skip adversarial self-check
+- For files you did NOT modify, set value to "UNCHANGED"
+- Do NOT include markdown formatting (no ```python blocks) inside file values
+- File values must be raw Python source code, not markdown
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "client.py top-level assignment '_client_cfg = get_config()' (operation: import-time call to get_config() that stores a reference to the config dict), which causes client functions to read from a stale dict reference instead of querying config.get_config() each time.",
+  "failure_mechanism": "reset_config() → in config.py sets global _config = None and subsequent get_config() creates a NEW dict → client.py still holds a reference in _client_cfg to the OLD dict returned earlier (no mutation of that dict occurs) → get_api_key()/get_base_url() return values from the OLD dict → handler.make_request() and other callers observe stale api_key/base_url (observable failure: requests use old base_url/api_key after reset_config()).",
+  "broken_invariant": "get_api_key() and get_base_url() must reflect the current configuration after any reset_config() or set_config() calls; currently they return values from a previously captured dict when reset_config() has been called (testable: call reset_config(); set_config('api_key','X'); get_api_key() should return 'X' but returns old value).",
+  "alternative_hypothesis": "The bug could be caused by set_config() mutating a copy or returning a new dict internally so callers never see updates (i.e., perhaps get_config returns a copy or set_config replaces _config with a new dict rather than mutating it). This could make clients holding earlier references see stale state.",
+  "hypothesis_rejection": "The code for set_config() shows it calls cfg = get_config(); cfg[key] = value which mutates the dict returned by get_config(). The actual problematic operation is the top-level snapshot in client.py: '_client_cfg = get_config()' (see client.py). reset_config() explicitly sets _config = None which causes a new dict to be created on the next get_config() call; because client.py holds the old dict reference in _client_cfg, it will not see the new dict. Thus the import-time capture is the direct causal mechanism; evidence: client.py's single line '_client_cfg = get_config()' and config.py's reset_config() implementation contrast to show replacement of the global storage rather than in-place mutation always.",
+  "fix_strategy": "Remove the import-time snapshot in client.py and read the current config via get_config() inside accessor functions (get_api_key, get_base_url, build_headers). This ensures each call queries config.get_config() and therefore sees the latest dict (including after reset_config() creates a new dict). This breaks the causal chain because we no longer depend on a potentially stale reference captured at import time.",
+  "self_check": {
+    "failure_scenario": "Concurrent code calls reset_config() between calls in a multi-threaded environment where one thread calls get_api_key() and another thread calls reset_config() and then set_config(): if callers expect atomicity across multiple reads (e.g., calling get_base_url() then get_api_key() expecting both from same snapshot) they may observe a mixed state because each accessor re-reads config separately. That is, cross-accessor consistency across multiple keys within a single logical operation could be broken.",
+    "edge_case": "If someone replaces config._config with a non-dict object directly (not via provided API), the accessors which assume a mapping with ['api_key'] and ['base_url'] will raise exceptions. Also calling get_api_key() before config._config has been initialized will trigger get_config() to create the default dict, which is expected behavior but should be noted.",
+    "invariant_check": "Under the modified client.py: (1) multiple calls: calling reset_config(); set_config('api_key','A'); get_api_key() returns 'A' because get_api_key() calls get_config()['api_key'] each time. (2) retries/loops: repeated calls to get_api_key() will each call get_config() and return the latest value, so loops that modify config between iterations will observe updates. (3) state reuse: after reset_config(), a new dict is created on the next get_config(); client functions will read from that new dict (no stale pointer). Therefore the invariant 'accessors reflect the current config' holds. Example sequences verified against code: reset_config() -> get_api_key() triggers get_config() -> _load_config() -> default-key if no set; reset_config() -> set_config('api_key','X') -> get_api_key() returns 'X'.",
+    "conclusion": "No flaw in respect to stale-snapshot problem: the change makes get_api_key()/get_base_url() reflect the current config; however this design does not provide atomic multi-field snapshots across multiple accessor calls — if that is required, a further revision (e.g., adding an explicit snapshotting API or returning a frozen view) would be necessary. For the stated bug (stale config after reset_config()) the fix is safe because each accessor now queries get_config() at call time and always sees the live _config produced by config.get_config()."
+  },
+  "files": {
+    "code_snippets_v2/lazy_init_c/config.py": "UNCHANGED",
+    "code_snippets_v2/lazy_init_c/client.py": "\"\"\"API client that reads config at call time.\"\"\"\n\nfrom config import get_config\n\n# Fixed: do NOT capture the config dict at import time.\n# Read the current config via get_config() inside each accessor so\n# reset_config() (which replaces the module-level _config) is respected.\n\n\ndef get_api_key():\n    \"\"\"Return the API key the client uses (reads current config).\"\"\"\n    return get_config()[\"api_key\"]\n\n\ndef get_base_url():\n    \"\"\"Return the base URL the client uses (reads current config).\"\"\"\n    return get_config()[\"base_url\"]\n\n\ndef build_headers():\n    \"\"\"Build request headers (distractor).\"\"\"\n    return {\"Authorization\": f\"Bearer {get_api_key()}\"}\n",
+    "code_snippets_v2/lazy_init_c/handler.py": "UNCHANGED"
+  }
+}

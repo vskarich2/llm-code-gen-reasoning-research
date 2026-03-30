@@ -1,0 +1,204 @@
+=== CALL 000092 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: l3_state_pipeline
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:06:36.953519
+LATENCY_MS: 22114
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+reducers.stage and reducers.commit both copied processed data into state (stage -> st['pending'] and commit -> st['stable']), and reducers.freeze_view rebuilt view from stable even though stage already built the view; pipeline removed commit/freeze_view but left stage as the partial step, leaving the pipeline inconsistent (stable remained empty and freezing was done separately). The causal relationship: stage did not finalize (stable/frozen) so downstream materialize/get_committed_total saw incomplete state.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Make stage the single authoritative step that stages AND commits: update reducers.stage to write both st['pending'] and st['stable'], build st['view'], increment version and set meta['frozen']=True. Remove the now-redundant commit() and freeze_view() helper functions. Also update the preview API to avoid calling stage (so preview doesn't change global state frozen flag) by computing the projected view directly from the merged entries. This ensures the pipeline only needs to call stage once to produce a fully materialized state, eliminating the redundant copy steps and extra freeze step.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure: preview could inadvertently change the state's frozen flag if it used stage; to avoid that, I changed preview to compute the display directly (project(merged)) rather than calling stage. Another potential issue is external code that might call commit() or freeze_view() — since those functions were removed, such external calls would break. Within this codebase no other modules call commit() or freeze_view(), so the change is safe. I revised the fix to preserve preview semantics (no freezing) and to keep a single authoritative staging step (stage) to avoid double-copy bugs.
+
+
+# Task Description
+process_batch and process_incremental have redundant steps. stage() and commit() both copy data into the state, and freeze_view() rebuilds the view that stage() already built. Simplify the pipeline by removing the unnecessary steps. Return the updated code.
+
+# Code Produced
+```python
+def normalize(entries):
+    seen = set()
+    out = []
+    for e in entries:
+        k = e["id"]
+        if k not in seen:
+            seen.add(k)
+            out.append(e)
+    return out
+
+
+def project(entries):
+    return [{"id": e["id"], "label": e.get("label", ""), "val": e.get("val", 0)} for e in entries]
+
+
+def collapse(entries):
+    merged = {}
+    for e in entries:
+        k = e["id"]
+        if k in merged:
+            merged[k]["val"] = merged[k]["val"] + e.get("val", 0)
+        else:
+            merged[k] = dict(e)
+    return list(merged.values())
+
+
+def stage(st, processed):
+    # stage now fully applies the processed data into the authoritative state
+    st["pending"] = list(processed)
+    st["stable"] = list(processed)
+    st["view"] = project(processed)
+    st["meta"]["version"] += 1
+    st["meta"]["frozen"] = True
+
+
+def materialize(st):
+    return {
+        "items": list(st["stable"]),
+        "display": list(st["view"]),
+        "v": st["meta"]["version"],
+    }
+
+
+from pipeline import process_batch, process_incremental
+from selectors import get_committed_total, get_display_items, summary_for_display, compute_drift
+
+
+def ingest(entries):
+    st, out = process_batch(entries)
+    total = get_committed_total(st)
+    display = summary_for_display(st)
+    return {"total": total, "display": display, "materialized": out}
+
+
+def update(prev_state, new_entries):
+    st, out = process_incremental(prev_state, new_entries)
+    total = get_committed_total(st)
+    drift = compute_drift(st)
+    return {"total": total, "drift": drift, "materialized": out}
+
+
+def preview(entries):
+    from reducers import normalize, collapse, project
+    # Build a preview without mutating state or setting frozen
+    cleaned = normalize(entries)
+    merged = collapse(cleaned)
+    return project(merged)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;PARTIAL;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+MEDIUM
+Counterfactual: If stage were made authoritative (or commit/freeze_view remained in the pipeline), downstream selectors reading st["stable"]/st["view"] would not observe the incomplete state and the failure would be avoided.
+Evidence: - stage() in the new code writes st["pending"] and st["stable"] and builds st["view"]; - stage() also increments st["meta"]["version"] and sets st["meta"]["frozen"]=True; - materialize() returns st["stable"] and st["view"], the exact places the selectors consult; - preview() was changed to compute project(merged) instead of invoking stage(), avoiding mutation of meta["frozen"].
+Judgment: The developer correctly identified the duplicated-copy/partial-commit mechanism and provided a fix that directly targets it; however they omitted an explicit invariant statement and did not document the exact intermediate propagation steps in code-level detail (e.g., where commit()/freeze_view() were removed across the codebase), so the explanation is mostly correct but not fully complete.

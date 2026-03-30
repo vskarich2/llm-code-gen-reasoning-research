@@ -1,0 +1,182 @@
+=== CALL 000014 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: partial_update_a
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:28:32.126473
+LATENCY_MS: 16180
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In update_profile (function update_profile in code_snippets_v2/partial_update_a/profile.py) the code assigns user['name'] = value when processing the 'name' key but does not update user['display_name']. The original file even contains the comment '# BUG: display_name must be synced with name but is not updated', which indicates the missing assignment to display_name is the causal problem.
+
+## Failure Mechanism
+Given a user dict like {'name': 'Alice', 'display_name': 'Alice', 'email': 'a@example.com'}, calling update_profile(user, {'name': 'Bob'}) will set user['name'] = 'Bob' but will leave user['display_name'] == 'Alice'. This produces a concrete state where name and display_name diverge, e.g. user becomes {'name': 'Bob', 'display_name': 'Alice', 'email': 'a@example.com'}, breaking any code that relies on these fields being equal.
+
+## Broken Invariant
+Invariant: For every user profile dict managed by this module, user['display_name'] == user['name']. Example testable assertion: after any call to create_user(...) or update_profile(user, changes), assert user['display_name'] == user['name']. The existing update_profile implementation can produce cases where this equality does not hold.
+
+## Fix Strategy
+I ensure all name updates also set display_name by introducing a helper _set_name(user, name) that assigns both user['name'] and user['display_name'] to the same value. update_profile now uses _set_name when the 'name' key is present. I also make attempts to set 'display_name' via changes explicit by rejecting 'display_name' in the changes dict (raising ValueError) to preserve the invariant and make misuse visible. Unknown fields raise KeyError to make unexpected input explicit. These changes directly address the failure mechanism by synchronizing both fields whenever name is changed and preventing direct/accidental modification of display_name.
+
+
+# Task Description
+Refactor this profile module for clarity. Return the updated code.
+
+# Code Produced
+```python
+'''User profile management.'''
+
+from typing import Any, Dict, Optional
+
+
+def _set_name(user: Dict[str, Any], name: str) -> None:
+    """Set the user's canonical name and keep display_name in sync.
+
+    This enforces the invariant that display_name always equals name.
+    """
+    user["name"] = name
+    user["display_name"] = name
+
+
+def update_profile(user: Dict[str, Any], changes: Dict[str, Any]) -> Dict[str, Any]:
+    """Update user profile fields from changes dict.
+
+    Invariant: display_name must always equal name. To preserve that,
+    callers must update the 'name' field; direct updates to 'display_name'
+    are rejected.
+
+    Supported keys in changes: 'name', 'email', 'age'. Unknown keys raise
+    KeyError to make unexpected input explicit.
+    """
+    if "display_name" in changes:
+        # display_name is derived from name; do not allow direct edits
+        raise ValueError("'display_name' is derived from 'name'; set 'name' instead")
+
+    for key, value in changes.items():
+        if key == "name":
+            _set_name(user, value)
+        elif key == "email":
+            user["email"] = value
+        elif key == "age":
+            user["age"] = value
+        else:
+            # Reject unknown fields to avoid silent failures
+            raise KeyError(f"Unknown profile field: {key}")
+
+    return user
+
+
+def create_user(name: str, email: str) -> Dict[str, Optional[Any]]:
+    """Create a new user profile with synced display_name."""
+    return {
+        "name": name,
+        "display_name": name,
+        "email": email,
+        "age": None,
+    }
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If update_profile also updated user['display_name'] (or used a helper that did), the name/display_name divergence would not occur and the observed failures would be prevented.
+Evidence: original bug comment indicates update_profile set user['name'] without syncing user['display_name']; new _set_name(user, name) sets both user["name"] and user["display_name"]; update_profile now calls _set_name for 'name' and expressly rejects 'display_name' in changes; create_user initializes "display_name" equal to "name".
+Judgment: The developer's reasoning is precise and forms a complete causal chain from the missing assignment to the invariant violation; the proposed fix and the produced code directly implement that fix and prevent the same partial-state update.

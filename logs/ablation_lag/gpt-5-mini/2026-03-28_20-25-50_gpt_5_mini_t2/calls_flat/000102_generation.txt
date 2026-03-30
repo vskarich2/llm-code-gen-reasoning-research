@@ -1,0 +1,149 @@
+=== CALL 000102 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: partial_rollback_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:02:14.107551
+LATENCY_MS: 35637
+
+--- PROMPT ---
+Inventory stuck as reserved after payment failure. Fix. Return the updated code.
+
+## Codebase (2 files)
+
+### FILE 1/2: code_snippets_v2/partial_rollback_b/inventory.py ###
+```python
+"""Inventory management with reservation tracking."""
+
+_stock = {}
+_reserved = {}
+
+
+def reset():
+    global _stock, _reserved
+    _stock = {}
+    _reserved = {}
+
+
+def add_product(product_id, quantity):
+    _stock[product_id] = _stock.get(product_id, 0) + quantity
+    _reserved.setdefault(product_id, 0)
+
+
+def reserve(product_id, qty):
+    avail = _stock.get(product_id, 0) - _reserved.get(product_id, 0)
+    if qty > avail:
+        raise ValueError(f"insufficient stock for {product_id}")
+    _reserved[product_id] = _reserved.get(product_id, 0) + qty
+
+
+def release(product_id, qty):
+    _reserved[product_id] = _reserved.get(product_id, 0) - qty
+
+
+def available(product_id):
+    return _stock.get(product_id, 0) - _reserved.get(product_id, 0)
+
+
+def get_reserved(product_id):
+    return _reserved.get(product_id, 0)
+```
+
+### FILE 2/2: code_snippets_v2/partial_rollback_b/order_service.py ###
+```python
+"""Order service coordinating inventory and payment."""
+
+from inventory import reserve, release
+
+_notifications = []
+_gateway_fail = False
+
+
+def reset():
+    global _notifications, _gateway_fail, _stock, _reserved
+    _notifications = []
+    _gateway_fail = False
+    _stock = {}
+    _reserved = {}
+
+
+def set_gateway_fail(fail):
+    """Configure gateway to simulate payment failure."""
+    global _gateway_fail
+    _gateway_fail = fail
+
+
+def _process_payment(amount):
+    """Simulate payment gateway."""
+    if _gateway_fail:
+        raise ValueError("payment declined")
+    return {"paid": amount}
+
+
+def place_order(product_id, qty, price):
+    """Place an order: reserve inventory, process payment, notify.
+
+    If payment fails, inventory reservation should be rolled back.
+    """
+    reserve(product_id, qty)
+    try:
+        result = _process_payment(qty * price)
+    except ValueError:
+        raise  # BUG: re-raises without releasing inventory reservation
+    _notifications.append({"product": product_id, "qty": qty})
+    return {"status": "confirmed", "payment": result}
+
+
+def get_notifications():
+    return list(_notifications)
+```
+
+You are fixing a bug using a structured reasoning process.
+
+Follow this procedure exactly. Return a SINGLE valid JSON object.
+
+## STEP 1 — Diagnose
+
+Identify the root cause: name the exact function, variable, and causal relationship.
+
+## STEP 2 — Plan fix
+
+Describe the concrete code change and why it addresses the mechanism.
+
+## STEP 3 — Risk check (CRITICAL)
+
+Before finalizing your code, answer:
+
+What is the most likely way this fix could still fail?
+
+If that failure is real, REVISE your fix before writing the final code.
+If it is not real, explain concisely why the fix is safe.
+
+## STEP 4 — Return fixed code
+
+Return your response as JSON with this exact schema:
+
+{"root_cause": "<exact function + variable + causal relationship>", "fix_strategy": "<what change and why it breaks the bug mechanism>", "risk_check": "<most likely failure mode of your fix, and whether you revised>", "files": {""code_snippets_v2/partial_rollback_b/inventory.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/partial_rollback_b/order_service.py": "<complete file contents or UNCHANGED>""}}
+
+RULES:
+- All four fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file.
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "order_service.place_order: missing release(product_id, qty) in the except path when _process_payment raises, causing _reserved (inventory) to remain incremented and reservations to be stuck",
+  "fix_strategy": "In order_service.place_order, catch any exception from _process_payment, call release(product_id, qty) to roll back the prior reserve, and then re-raise the original exception. Also make inventory.release defensive by ensuring reserved counts never go negative and removing the key when reservation reaches zero. This ensures a failed payment always undoes the inventory reservation and prevents negative reservation state.",
+  "risk_check": "Most likely remaining failure mode is concurrent access / race conditions: if multiple threads/processes call reserve/release simultaneously, these simple in-memory operations are not atomic and reservations could still get out of sync. Another possible failure is if release itself raises an unexpected error; the code now catches and swallows release errors when trying to roll back so the original payment exception is not masked. I considered making a broader concurrency-safe change (locks or transactional handling), but that is outside the scope of the minimal fix requested. Given these constraints, the change is safe: it reliably releases reservations on payment failure and guards against negative reserved values. I did revise the implementation to both call release on any payment exception and harden inventory.release against negatives.",
+  "files": {
+    "code_snippets_v2/partial_rollback_b/inventory.py": "\"\"\"Inventory management with reservation tracking.\"\"\"\n\n_stock = {}\n_reserved = {}\n\n\ndef reset():\n    global _stock, _reserved\n    _stock = {}\n    _reserved = {}\n\n\ndef add_product(product_id, quantity):\n    _stock[product_id] = _stock.get(product_id, 0) + quantity\n    _reserved.setdefault(product_id, 0)\n\n\ndef reserve(product_id, qty):\n    avail = _stock.get(product_id, 0) - _reserved.get(product_id, 0)\n    if qty > avail:\n        raise ValueError(f\"insufficient stock for {product_id}\")\n    _reserved[product_id] = _reserved.get(product_id, 0) + qty\n\n\ndef release(product_id, qty):\n    current = _reserved.get(product_id, 0)\n    new = current - qty\n    if new <= 0:\n        # Ensure we don't keep negative reservations\n        if product_id in _reserved:\n            del _reserved[product_id]\n    else:\n        _reserved[product_id] = new\n\n\ndef available(product_id):\n    return _stock.get(product_id, 0) - _reserved.get(product_id, 0)\n\n\ndef get_reserved(product_id):\n    return _reserved.get(product_id, 0)\n",
+    "code_snippets_v2/partial_rollback_b/order_service.py": "\"\"\"Order service coordinating inventory and payment.\"\"\"\n\nfrom inventory import reserve, release\n\n_notifications = []\n_gateway_fail = False\n\n\ndef reset():\n    global _notifications, _gateway_fail\n    _notifications = []\n    _gateway_fail = False\n\n\ndef set_gateway_fail(fail):\n    \"\"\"Configure gateway to simulate payment failure.\"\"\"\n    global _gateway_fail\n    _gateway_fail = fail\n\n\ndef _process_payment(amount):\n    \"\"\"Simulate payment gateway.\"\"\"\n    if _gateway_fail:\n        raise ValueError(\"payment declined\")\n    return {\"paid\": amount}\n\n\ndef place_order(product_id, qty, price):\n    \"\"\"Place an order: reserve inventory, process payment, notify.\n\n    If payment fails, inventory reservation should be rolled back.\n    \"\"\"\n    reserve(product_id, qty)\n    try:\n        result = _process_payment(qty * price)\n    except Exception:\n        # Ensure reservation is released if payment processing fails for any reason.\n        try:\n            release(product_id, qty)\n        except Exception:\n            # Swallow release errors to avoid masking the original payment error\n            pass\n        raise\n    _notifications.append({\"product\": product_id, \"qty\": qty})\n    return {\"status\": \"confirmed\", \"payment\": result}\n\n\ndef get_notifications():\n    return list(_notifications)\n"
+  }
+}

@@ -147,13 +147,6 @@ def llm_classify(
     model = eval_model or _get_eval_model()
 
     try:
-        from call_logger import set_call_context
-
-        set_call_context(
-            phase="classifier",
-            case_id=case.get("id", "?"),
-            condition=case.get("_condition", "?"),
-        )
         raw = call_model(prompt, model=model, raw=True)
         dims = _parse_classify_dims(raw)
 
@@ -233,6 +226,79 @@ def evaluate_output(case: dict, parsed: dict, eval_model: str | None = None) -> 
     result = exec_evaluate(case, code)
     exec_pass = result["pass"]
     result["code_correct"] = exec_pass
+
+    # Step 1.5: Dual execution — module-based comparison (side-channel only)
+    # NEVER affects canonical results. Only logs discrepancies.
+    try:
+        from module_exec import run_module_execution, compare_results as _compare_dual
+        from exec_eval import _CASE_TESTS, _load_v2_test
+        test_fn = _CASE_TESTS.get(case.get("id")) or _load_v2_test(case)
+        if test_fn is not None:
+            mod_result = run_module_execution(case, code, test_fn)
+            dual_comparison = _compare_dual(exec_pass, mod_result)
+            result["dual_execution"] = dual_comparison
+
+            # Classify disagreement
+            from disagreement_classifier import classify_disagreement
+            concat_for_classify = {
+                "pass": exec_pass,
+                "error": "; ".join(result.get("reasons", [])[:2]),
+                "traceback": "",
+                "stdout": "",
+                "tests_run": result.get("execution", {}).get("total_tests", 0),
+                "tests_passed": result.get("execution", {}).get("passed_tests", 0),
+            }
+            module_for_classify = {
+                "pass": mod_result.test_passed if mod_result.test_ran else False,
+                "error": mod_result.error_message,
+                "traceback": mod_result.error_traceback,
+                "stdout": "",
+                "tests_run": 1 if mod_result.test_ran else 0,
+                "tests_passed": 1 if mod_result.test_passed else 0,
+            }
+            disagreement = classify_disagreement(concat_for_classify, module_for_classify)
+
+            # Compute formal assembly_confirmed using structural signals
+            from disagreement_classifier import compute_assembly_confirmed
+            asm_rewrites = result.get("execution", {}).get("assembly_sources", {})
+            # Extract rewrites from the assembly result if available
+            # These are stored in execution metadata by exec_eval
+            rewrites_list = None
+            qualified_list = None
+            exec_meta = result.get("execution", {})
+            if isinstance(exec_meta.get("assembly_sources"), dict):
+                rewrites_list = exec_meta["assembly_sources"].get("rewrites_applied")
+                qualified_list = exec_meta["assembly_sources"].get("qualified_imports_resolved")
+
+            confirmed = compute_assembly_confirmed(
+                disagreement, concat_for_classify, module_for_classify,
+                assembly_rewrites=rewrites_list,
+                qualified_imports_resolved=qualified_list,
+            )
+            disagreement.assembly_confirmed = confirmed
+
+            result["dual_execution"]["disagreement_type"] = disagreement.type
+            result["dual_execution"]["disagreement_subtype"] = disagreement.subtype
+            result["dual_execution"]["disagreement_confidence"] = disagreement.confidence
+            result["dual_execution"]["disagreement_evidence"] = disagreement.evidence
+            result["dual_execution"]["assembly_confirmed"] = confirmed
+            result["dual_execution"]["assembly_suspect"] = (
+                not exec_pass and (mod_result.test_passed if mod_result.test_ran else False)
+            )
+
+            if not dual_comparison["agreement"]:
+                _log.info(
+                    "DUAL EXEC MISMATCH: %s — type=%s subtype=%s confirmed=%s concat=%s module=%s",
+                    case.get("id", "?"),
+                    disagreement.type,
+                    disagreement.subtype,
+                    confirmed,
+                    exec_pass,
+                    mod_result.test_passed,
+                )
+    except Exception as e:
+        # Dual execution must NEVER crash the canonical pipeline
+        _log.debug("Dual execution skipped: %s", e)
 
     # Step 2: LLM reasoning classifier — structured, multi-dimensional
     classify = llm_classify(

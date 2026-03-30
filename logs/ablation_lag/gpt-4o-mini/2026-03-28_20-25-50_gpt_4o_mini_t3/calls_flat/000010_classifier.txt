@@ -1,0 +1,150 @@
+=== CALL 000010 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: alias_config_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:28:02.955007
+LATENCY_MS: 19845
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+The bug is in the `apply_config` method of the `ConfigMiddleware` class, specifically the line `cfg.update(request_overrides)`. This line mutates the cached reference of `_base`, which leads to shared state across requests.
+
+## Failure Mechanism
+When multiple requests are processed, if one request applies overrides, it alters the cached configuration for all subsequent requests. For example, if the first request sets `debug` to `True`, all following requests will see `debug` as `True`, even if they do not intend to enable debug mode.
+
+## Broken Invariant
+The configuration for each request should be independent and should not retain state from previous requests. Each request should receive a fresh configuration based on defaults and any specific overrides.
+
+## Fix Strategy
+The code change creates a copy of the base configuration in the `apply_config` method by using `cfg = dict(self._base)`. This ensures that each request operates on a separate instance of the configuration, preventing unintended side effects from shared state.
+
+
+
+# Task Description
+Requests are seeing config from previous requests. Simplify the config flow. Return the updated code.
+
+# Code Produced
+```python
+from config import create_config
+
+
+class ConfigMiddleware:
+    """Middleware that loads config once and applies per-request overrides."""
+
+    def __init__(self):
+        self._base = create_config()  # cached at init time
+
+    def apply_config(self, request_overrides=None):
+        """Return config for this request, applying any overrides."""
+        cfg = dict(self._base)  # Create a copy to avoid mutating the cached reference
+        if request_overrides:
+            cfg.update(request_overrides)  # Now mutates the copy, not the cached reference
+        return cfg
+
+    def get_timeout(self):
+        return self._base.get("timeout", 30)
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;PARTIAL;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If apply_config stopped mutating the cached self._base (e.g., by copying it first), subsequent requests would not observe previous requests' top-level overrides.
+Evidence: before fix: cfg variable aliased self._base and cfg.update(...) would mutate the cached dict; after fix: cfg = dict(self._base) makes a shallow copy so cfg.update(...) mutates the copy; dict() is shallow so nested mutable values in self._base would still be shared if present.
+Judgment: The developer correctly identifies the aliasing bug, traces the mutation→propagation→observable-failure chain, and the code implements the intended mitigation for top-level keys; however the reasoning and fix omit the shallow-copy caveat — nested mutable configuration would still allow cross-request sharing, so a deep copy or immutable config should be considered.

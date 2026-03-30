@@ -166,7 +166,8 @@ def test_mutation_swap_cache_breaks_hidden_dep():
     The invariant test saves user Alice then re-saves as Bob.
     cache_put_if_absent won't overwrite → Bob is lost, cache still shows Alice.
     """
-    from exec_eval import load_module_from_code, _strip_local_imports, _load_v2_test
+    from exec_eval import load_module_from_code, _load_v2_test
+from code_assembly import assemble_code
 
     cases = _load_cases()
     case = [c for c in cases if c["id"] == "hidden_dep_multihop"][0]
@@ -178,8 +179,8 @@ def test_mutation_swap_cache_breaks_hidden_dep():
         'def sync_user_to_cache(user):\n    cache_put(f"user:{user[\'id\']}", user["name"])',
         'def sync_user_to_cache(user):\n    cache_put_if_absent(f"user:{user[\'id\']}", user["name"])',
     )
-    cleaned = _strip_local_imports(mutated)
-    mod = load_module_from_code(cleaned, "mut_hidden_dep")
+    asm = assemble_code(mutated, case)
+    mod = load_module_from_code(asm.code, "mut_hidden_dep")
     passed, reasons = test_fn(mod)
     assert not passed, f"put_if_absent should break re-save overwrite: {reasons}"
 

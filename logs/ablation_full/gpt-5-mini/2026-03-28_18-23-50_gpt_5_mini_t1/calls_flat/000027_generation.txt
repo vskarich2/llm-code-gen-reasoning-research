@@ -1,0 +1,197 @@
+=== CALL 000027 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: stale_cache_a
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:33:13.118509
+LATENCY_MS: 27302
+
+--- PROMPT ---
+Refactor this product catalog for clarity. Return the updated code.
+
+## Codebase (1 file)
+
+### FILE 1/1: code_snippets_v2/stale_cache_a/catalog.py ###
+```python
+"""Product catalog with caching."""
+
+_db = {}
+_cache = {}
+
+
+def add_product(product_id, name, price):
+    """Add a product to the database."""
+    _db[product_id] = {"name": name, "price": price}
+
+
+def get_product(product_id):
+    """Get product by ID, using cache for repeated lookups."""
+    if product_id in _cache:
+        return _cache[product_id]
+    product = _db.get(product_id)
+    if product is not None:
+        _cache[product_id] = dict(product)
+    return _cache.get(product_id)
+
+
+def update_product(product_id, **fields):
+    """Update product fields in the database.
+
+    Invariant: get_product() must return current data after update.
+    """
+    if product_id not in _db:
+        return False
+    _db[product_id].update(fields)
+    # BUG: cache not invalidated — get_product returns stale data
+    return True
+
+
+def reset():
+    """Clear all data."""
+    _db.clear()
+    _cache.clear()
+```
+
+You are implementing a STRICT reasoning + code generation procedure designed to REDUCE reasoning-execution mismatch.
+
+This is NOT a formatting task. This is a TWO-PASS reasoning process with adversarial verification.
+
+You MUST follow the procedure exactly.
+
+Return a SINGLE valid JSON object. No text outside JSON. No markdown fences.
+
+# GOAL
+
+Fix the bug AND ensure your reasoning is causally correct and robust to failure.
+
+You are required to:
+- identify the correct mechanism
+- challenge your own hypothesis
+- verify your fix against failure scenarios
+
+# PROCEDURE (MANDATORY)
+
+## STEP 1 — DIAGNOSE (PRIMARY HYPOTHESIS)
+
+Identify:
+
+- root_cause:
+  Name the exact function + variable + operation causing the bug.
+  Must describe a causal relationship (not just "missing X").
+
+- failure_mechanism:
+  Give a concrete scenario:
+  cause → mutation/event → propagation → observable failure
+
+- broken_invariant:
+  A specific, testable property that is violated.
+
+## STEP 2 — ALTERNATIVE HYPOTHESIS (CRITICAL)
+
+Propose ONE alternative explanation for the bug.
+
+- What else could plausibly be the cause?
+- Why might your primary hypothesis be wrong?
+
+Then explicitly reject it:
+
+- Why is your original diagnosis more correct?
+- What evidence in the code supports this?
+
+This step is REQUIRED. Do not skip.
+
+## STEP 3 — PLAN FIX
+
+Describe:
+
+- fix_strategy:
+  What exact change you will make
+  Why it breaks the causal chain
+
+Must reference actual code behavior.
+
+## STEP 4 — CODE
+
+Implement the fix.
+
+Rules:
+- Modify ONLY necessary files
+- Return COMPLETE contents for modified files
+- Use "UNCHANGED" for others
+
+## STEP 5 — ADVERSARIAL SELF-CHECK (MANDATORY)
+
+You must actively try to BREAK your own fix.
+
+Answer ALL:
+
+1. Failure Scenario:
+   Describe a concrete scenario where your fix might still fail.
+
+2. Edge Case:
+   Identify a boundary condition (e.g., retries, empty values, ordering).
+
+3. Invariant Check:
+   Verify your invariant holds under:
+   - multiple calls
+   - retries / loops
+   - state reuse
+
+4. Conclusion:
+   - If a flaw is found → REVISE your fix
+   - If no flaw → explain WHY it is safe
+
+Your answer MUST reference your actual code.
+
+# OUTPUT FORMAT (STRICT JSON)
+
+{
+  "root_cause": "<exact function + variable + causal relationship>",
+  "failure_mechanism": "<cause → mutation → propagation → observable failure>",
+  "broken_invariant": "<specific testable property that is violated>",
+  "alternative_hypothesis": "<one alternative explanation for the bug>",
+  "hypothesis_rejection": "<why primary hypothesis is correct, with code evidence>",
+  "fix_strategy": "<what change you will make and why it breaks the causal chain>",
+  "self_check": {
+    "failure_scenario": "<concrete scenario where fix might still fail>",
+    "edge_case": "<boundary condition to test>",
+    "invariant_check": "<verify invariant under multiple calls, retries, state reuse>",
+    "conclusion": "<flaw found → revise, or why it is safe>"
+  },
+  "files": {"<path>": "<complete file contents or UNCHANGED>"}
+}
+
+# RULES
+
+- All fields are REQUIRED and must be substantive
+- No generic statements — ground every claim in actual code
+- Must reference actual variables and behavior
+- Do NOT restate the task
+- Do NOT skip alternative hypothesis
+- Do NOT skip adversarial self-check
+- For files you did NOT modify, set value to "UNCHANGED"
+- Do NOT include markdown formatting (no ```python blocks) inside file values
+- File values must be raw Python source code, not markdown
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "update_product function: after performing _db[product_id].update(fields) the code does not modify _cache (missing invalidation/update), causing get_product to continue returning the stale dict stored in _cache.",
+  "failure_mechanism": "Call sequence: add_product(product_id, ...) → get_product(product_id) caches a snapshot dict in _cache[product_id] → update_product(product_id, some_field=new_value) performs _db[product_id].update(fields) (mutation of the DB dict) but does not change _cache → subsequent get_product(product_id) finds product_id in _cache and returns the old cached dict (no refresh) → observable failure: callers see stale product data (e.g., old price) even though _db holds the updated value.",
+  "broken_invariant": "Invariant: After a successful update_product(product_id, **fields) call, get_product(product_id) returns the updated product data from _db. Testable property: for any product_id existing in _db, after update_product(product_id, price=new_price) then get_product(product_id)['price'] == new_price.",
+  "alternative_hypothesis": "The bug could be caused by get_product returning the actual cached dict object (not a copy), allowing external callers to mutate the returned dict and indirectly corrupt cache or DB states; therefore observed inconsistencies might be due to caller-side mutations rather than missing cache invalidation.",
+  "hypothesis_rejection": "Although returning the cached dict object can cause aliasing problems, the code already stores a copy of the DB dict into _cache (line _cache[product_id] = dict(product)), so external mutation of DB via returned dict is only possible when callers mutate the cached object returned by get_product. However, the primary failure reported is that get_product continues to return old data after update_product runs. That directly points to the fact update_product updates _db but does not update or invalidate _cache (see update_product: _db[product_id].update(fields) followed by # BUG: cache not invalidated). The code evidence: get_product first checks 'if product_id in _cache: return _cache[product_id]' which will return stale data if _cache wasn't modified. Therefore missing cache invalidation/update in update_product is the more direct causal explanation than aliasing by callers.",
+  "fix_strategy": "When update_product modifies the persistent store (_db), immediately update the cached snapshot for that product_id to reflect the new DB state (set _cache[product_id] = dict(_db[product_id])) so subsequent get_product calls will observe current data. Additionally, make get_product return a shallow copy of the cached snapshot (return dict(_cache[product_id]) ) so callers cannot mutate the stored cache object and accidentally cause divergence. This breaks the causal chain: update_product now mutates _db and then synchronizes _cache, so get_product cannot return stale data; returning copies prevents external mutation of cache.",
+  "self_check": {
+    "failure_scenario": "If multiple threads/processes concurrently call update_product and get_product without synchronization, a race could occur: thread A calls update_product and sets _db then sets _cache; thread B reads _cache between _db update and _cache update and sees inconsistent state. Because this module has no concurrency primitives, concurrent access can still cause briefly inconsistent reads.",
+    "edge_case": "Caller mutates the dict returned by get_product. Previous code returned the cached dict object; mutated dict would alter the cached snapshot and possibly create inconsistency with _db. With the fix, get_product returns a fresh shallow copy (dict(_cache[product_id])), so caller mutation does not change _cache or _db. Another edge: update_product called with fields that remove keys; dict.update() won't remove keys. If the caller expects delete-by-setting None, that will still leave keys present. This behavior is preserved but noted.",
+    "invariant_check": "Multiple calls: sequence add_product('p1', 'name', 10) → get_product('p1') returns {'name':'name','price':10} (returned copy) → update_product('p1', price=20) sets _db['p1']['price']=20 then sets _cache['p1']=dict(_db['p1']) → get_product('p1') returns a fresh copy of _cache['p1'] with price 20. Retries/loops: repeated update_product calls will update both _db and _cache each time, so repeated get_product calls will observe the last update. State reuse across multiple operations: because get_product returns copies, callers cannot change internal cache state; _cache only changes when add_product/update_product/cache-fill occurs. Thus the invariant (get_product reflects latest DB after update_product) holds under these scenarios in single-threaded usage.",
+    "conclusion": "No flaw found for single-threaded usage: updating _cache inside update_product and returning copies from get_product enforces the invariant in normal usage and prevents external mutation of cached snapshots. The remaining potential flaw is concurrent access: without locks, a brief window between updating _db and updating _cache could yield inconsistent reads. If concurrency is a requirement, the module should be extended to use locking or atomic swap of whole product store; given current constraints and visible code, the implemented fix is correct and robust for typical single-threaded use."
+  },
+  "files": {
+    "code_snippets_v2/stale_cache_a/catalog.py": " \"\"\"Product catalog with caching.\n\nThis module provides simple in-memory product storage with a read cache.\nFixes:\n- update_product now synchronizes the cache after updating the DB so cached snapshots are not stale.\n- get_product returns a shallow copy of the cached snapshot to avoid caller-side mutation of internal cache objects.\n\"\"\"\n\n_db = {}\n_cache = {}\n\n\ndef add_product(product_id, name, price):\n    \"\"\"Add a product to the database and populate cache for immediate consistency.\"\"\"\n    _db[product_id] = {\"name\": name, \"price\": price}\n    # Keep cache consistent with DB on add so immediate reads see the same snapshot\n    _cache[product_id] = dict(_db[product_id])\n\n\ndef get_product(product_id):\n    \"\"\"Get product by ID, using cache for repeated lookups.\n\n    Returns a shallow copy of the cached snapshot (or None) so callers cannot mutate\n    the internal cached object.\n    \"\"\"\n    if product_id in _cache:\n        # return a copy to avoid external mutation of the cached dict\n        return dict(_cache[product_id])\n    product = _db.get(product_id)\n    if product is not None:\n        # cache a snapshot copy of the DB entry\n        _cache[product_id] = dict(product)\n        return dict(_cache[product_id])\n    return None\n\n\ndef update_product(product_id, **fields):\n    \"\"\"Update product fields in the database.\n\n    Invariant: get_product() must return current data after update.\n    This function now updates the cache snapshot after modifying the DB so the\n    invariant holds in single-threaded usage.\n    Returns True when an existing product is updated, False if product_id not found.\n    \"\"\"\n    if product_id not in _db:\n        return False\n    # mutate the DB record\n    _db[product_id].update(fields)\n    # Synchronize cache to reflect the updated DB snapshot (prevents stale reads)\n    _cache[product_id] = dict(_db[product_id])\n    return True\n\n\ndef reset():\n    \"\"\"Clear all data.\"\"\"\n    _db.clear()\n    _cache.clear()\n"
+  }
+}

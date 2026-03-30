@@ -6,7 +6,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from parse import parse_model_response
-from exec_eval import extract_code, _strip_local_imports
+from exec_eval import extract_code
+from code_assembly import assemble
 
 
 def test_parse_json_valid():
@@ -56,7 +57,9 @@ def test_strip_imports_multiline():
         "from state import make_state\n"
         "x = 1\n"
     )
-    cleaned = _strip_local_imports(code)
+    # Route through canonical assembly path
+    _case = {"code_files": ["cache_writer.py", "state.py"], "code_files_contents": {"cache_writer.py": "", "state.py": ""}, "failure_mode": "TEST", "reference_fix": {}}
+    cleaned = assemble(code, _case).code
     assert "import json" in cleaned
     assert "import random" in cleaned
     assert "from cache_writer" not in cleaned

@@ -1,0 +1,234 @@
+=== CALL 000231 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: false_fix_deadlock
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:09:20.811526
+LATENCY_MS: 25775
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+The function make_transfer_b_to_a_steps() locks resource B first, then A, which is the opposite order of make_transfer_a_to_b_steps() that locks A first, leading to potential deadlock when concurrent transfers interleave and both acquire their first lock before attempting the second, causing circular wait.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Implement a consistent lock acquisition order for both transfer functions by always acquiring resource A first, then resource B. This change ensures that no matter the transfer direction, locks are always acquired in the same order, preventing circular wait conditions that lead to deadlocks.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+The most likely failure mode is that if the code is modified to acquire locks in a different order elsewhere, deadlocks could still occur. However, within this code, enforcing a consistent lock order eliminates the deadlock scenario. Since the fix only reorders lock acquisition to A then B in both functions, and no other code changes are made, the fix is safe and should prevent deadlocks under any interleaving. No further revision is necessary.
+
+
+# Task Description
+Concurrent transfers deadlock. Fix the locking so transfers never deadlock under any interleaving.
+
+# Code Produced
+```python
+"""Resource transfers with lock-ordering deadlock, simulated via steps."""
+
+_locks = {}
+_state = {"A": 100, "B": 100}
+
+
+def reset():
+    _locks.clear()
+    _state["A"] = 100
+    _state["B"] = 100
+
+
+def acquire(resource):
+    """Simulate lock. Raises RuntimeError if already held (deadlock)."""
+    if _locks.get(resource):
+        raise RuntimeError(f"deadlock: {resource} already locked")
+    _locks[resource] = True
+
+
+def release(resource):
+    _locks[resource] = False
+
+
+def get_state():
+    return dict(_state)
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def make_transfer_a_to_b_steps(amount):
+    """Transfer A→B: lock A first, then B."""
+
+    def step_lock_a():
+        acquire("A")
+        return "locked_A"
+
+    def step_lock_b_and_transfer():
+        acquire("B")
+        _state["A"] -= amount
+        _state["B"] += amount
+        release("B")
+        release("A")
+        return "transferred_a_to_b"
+
+    return step_lock_a, step_lock_b_and_transfer
+
+
+def make_transfer_b_to_a_steps(amount):
+    """Transfer B→A: fixed to lock A first, then B."""
+
+    def step_lock_a():
+        acquire("A")
+        return "locked_A"
+
+    def step_lock_b_and_transfer():
+        acquire("B")
+        _state["B"] -= amount
+        _state["A"] += amount
+        release("B")
+        release("A")
+        return "transferred_b_to_a"
+
+    return step_lock_b, step_lock_a_and_transfer
+
+
+def sequential_transfers():
+    """A→B then B→A. Sequential: works fine."""
+    reset()
+    lock_ab, do_ab = make_transfer_a_to_b_steps(10)
+    lock_ba, do_ba = make_transfer_b_to_a_steps(10)
+    run_steps([
+        (lock_ab, ()), (do_ab, ()),
+        (lock_ba, ()), (do_ba, ()),
+    ])
+    return get_state()
+
+
+def interleaved_transfers():
+    """A→B and B→A interleaved: DEADLOCK."""
+    reset()
+    lock_ab, do_ab = make_transfer_a_to_b_steps(10)
+    lock_ba, do_ba = make_transfer_b_to_a_steps(10)
+    try:
+        run_steps([
+            (lock_ab, ()),   # A→B locks A
+            (lock_ba, ()),   # B→A locks B
+            (do_ab, ()),     # A→B tries to lock B — DEADLOCK
+            (do_ba, ()),     # never reached
+        ])
+        return get_state()
+    except RuntimeError as e:
+        return {"error": str(e)}
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;WRONG;CORRECT;CORRECT;WRONG;TEMPORAL_ORDERING
+HIGH
+Counterfactual: If the lock-order mismatch (acquiring B before A in one transfer) were removed, the circular-wait deadlock would be eliminated — although the provided code introduces a separate NameError that would still cause failure.
+Evidence: make_transfer_a_to_b_steps acquires "A" then "B"; make_transfer_b_to_a_steps defines step_lock_a (acquires "A") and step_lock_b_and_transfer (acquires "B") so intent matches the reasoning; however make_transfer_b_to_a_steps returns undefined names (return step_lock_b, step_lock_a_and_transfer) causing a NameError; acquire(resource) raises RuntimeError on re-acquire (the simulated deadlock detection); interleaved_transfers arranges steps to demonstrate the original deadlock scenario.
+Judgment: The developer correctly identified the deadlock mechanism (inconsistent lock acquisition order) and proposed the right fix (consistent ordering), but they failed to state the violated invariant and the produced code contradicts the fix by returning wrong function names (a coding error), so the reasoning-to-code alignment is broken.

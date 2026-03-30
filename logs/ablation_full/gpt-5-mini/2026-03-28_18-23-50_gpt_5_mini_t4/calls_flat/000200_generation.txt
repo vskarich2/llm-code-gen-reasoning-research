@@ -1,0 +1,286 @@
+=== CALL 000200 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: hidden_dep_multihop
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:53:44.435026
+LATENCY_MS: 50930
+
+--- PROMPT ---
+There are too many small cache helper functions doing similar things. Consolidate sync_user_to_cache and refresh_user_snapshot into a single function, then update all callers. Return the updated code.
+
+## Codebase (4 files)
+
+### FILE 1/4: code_snippets_v2/hidden_dep_multihop/cache_writer.py ###
+```python
+_store = {}
+
+
+def cache_put(key, value):
+    _store[key] = value
+
+
+def cache_delete(key):
+    _store.pop(key, None)
+
+
+def cache_put_if_absent(key, value):
+    if key not in _store:
+        _store[key] = value
+
+
+def cache_clear_prefix(prefix):
+    to_remove = [k for k in _store if k.startswith(prefix)]
+    for k in to_remove:
+        del _store[k]
+
+
+def refresh_user_snapshot(user):
+    cache_put_if_absent(f"user:{user['id']}", user["name"])
+
+
+def sync_user_to_cache(user):
+    cache_put(f"user:{user['id']}", user["name"])
+```
+
+### FILE 2/4: code_snippets_v2/hidden_dep_multihop/cache_reader.py ###
+```python
+from cache_writer import _store
+
+
+def get_display_name(user_id):
+    return _store.get(f"user:{user_id}")
+
+
+def is_user_cached(user_id):
+    return f"user:{user_id}" in _store
+
+
+def format_user_label(user_id):
+    name = get_display_name(user_id)
+    return f"@{name}" if name else "@Unknown"
+
+
+def get_cache_stats():
+    return {"size": len(_store), "keys": list(_store.keys())[:10]}
+```
+
+### FILE 3/4: code_snippets_v2/hidden_dep_multihop/user_repo.py ###
+```python
+class UserDB:
+    def __init__(self):
+        self._rows = {}
+
+    def insert(self, user):
+        self._rows[user["id"]] = user
+
+    def delete(self, user_id):
+        self._rows.pop(user_id, None)
+
+    def find(self, user_id):
+        return self._rows.get(user_id)
+
+    def update_name(self, user_id, new_name):
+        if user_id in self._rows:
+            self._rows[user_id]["name"] = new_name
+
+
+db = UserDB()
+
+
+def persist_user(user):
+    db.insert(user)
+
+
+def remove_user(user_id):
+    db.delete(user_id)
+
+
+def sync_user_to_db(user):
+    persist_user(user)
+
+
+def lookup_user(user_id):
+    return db.find(user_id)
+```
+
+### FILE 4/4: code_snippets_v2/hidden_dep_multihop/user_service.py ###
+```python
+from user_repo import persist_user, remove_user, sync_user_to_db, lookup_user
+from cache_writer import cache_delete, refresh_user_snapshot, sync_user_to_cache
+
+
+def save_user(user):
+    persist_user(user)
+    refresh_user_snapshot(user)
+
+
+def delete_user(user_id):
+    remove_user(user_id)
+    cache_delete(f"user:{user_id}")
+
+
+def rename_user(user_id, new_name):
+    from user_repo import db
+    db.update_name(user_id, new_name)
+    updated = lookup_user(user_id)
+    if updated:
+        refresh_user_snapshot(updated)
+
+
+def bulk_warm_cache(users):
+    for u in users:
+        refresh_user_snapshot(u)
+
+
+def migrate_legacy_user(legacy_record):
+    converted = {"id": legacy_record["uid"], "name": legacy_record["full_name"]}
+    sync_user_to_db(converted)
+```
+
+You are implementing a STRICT reasoning + code generation procedure designed to REDUCE reasoning-execution mismatch.
+
+This is NOT a formatting task. This is a TWO-PASS reasoning process with adversarial verification.
+
+You MUST follow the procedure exactly.
+
+Return a SINGLE valid JSON object. No text outside JSON. No markdown fences.
+
+# GOAL
+
+Fix the bug AND ensure your reasoning is causally correct and robust to failure.
+
+You are required to:
+- identify the correct mechanism
+- challenge your own hypothesis
+- verify your fix against failure scenarios
+
+# PROCEDURE (MANDATORY)
+
+## STEP 1 — DIAGNOSE (PRIMARY HYPOTHESIS)
+
+Identify:
+
+- root_cause:
+  Name the exact function + variable + operation causing the bug.
+  Must describe a causal relationship (not just "missing X").
+
+- failure_mechanism:
+  Give a concrete scenario:
+  cause → mutation/event → propagation → observable failure
+
+- broken_invariant:
+  A specific, testable property that is violated.
+
+## STEP 2 — ALTERNATIVE HYPOTHESIS (CRITICAL)
+
+Propose ONE alternative explanation for the bug.
+
+- What else could plausibly be the cause?
+- Why might your primary hypothesis be wrong?
+
+Then explicitly reject it:
+
+- Why is your original diagnosis more correct?
+- What evidence in the code supports this?
+
+This step is REQUIRED. Do not skip.
+
+## STEP 3 — PLAN FIX
+
+Describe:
+
+- fix_strategy:
+  What exact change you will make
+  Why it breaks the causal chain
+
+Must reference actual code behavior.
+
+## STEP 4 — CODE
+
+Implement the fix.
+
+Rules:
+- Modify ONLY necessary files
+- Return COMPLETE contents for modified files
+- Use "UNCHANGED" for others
+
+## STEP 5 — ADVERSARIAL SELF-CHECK (MANDATORY)
+
+You must actively try to BREAK your own fix.
+
+Answer ALL:
+
+1. Failure Scenario:
+   Describe a concrete scenario where your fix might still fail.
+
+2. Edge Case:
+   Identify a boundary condition (e.g., retries, empty values, ordering).
+
+3. Invariant Check:
+   Verify your invariant holds under:
+   - multiple calls
+   - retries / loops
+   - state reuse
+
+4. Conclusion:
+   - If a flaw is found → REVISE your fix
+   - If no flaw → explain WHY it is safe
+
+Your answer MUST reference your actual code.
+
+# OUTPUT FORMAT (STRICT JSON)
+
+{
+  "root_cause": "<exact function + variable + causal relationship>",
+  "failure_mechanism": "<cause → mutation → propagation → observable failure>",
+  "broken_invariant": "<specific testable property that is violated>",
+  "alternative_hypothesis": "<one alternative explanation for the bug>",
+  "hypothesis_rejection": "<why primary hypothesis is correct, with code evidence>",
+  "fix_strategy": "<what change you will make and why it breaks the causal chain>",
+  "self_check": {
+    "failure_scenario": "<concrete scenario where fix might still fail>",
+    "edge_case": "<boundary condition to test>",
+    "invariant_check": "<verify invariant under multiple calls, retries, state reuse>",
+    "conclusion": "<flaw found → revise, or why it is safe>"
+  },
+  "files": {"<path>": "<complete file contents or UNCHANGED>"}
+}
+
+# RULES
+
+- All fields are REQUIRED and must be substantive
+- No generic statements — ground every claim in actual code
+- Must reference actual variables and behavior
+- Do NOT restate the task
+- Do NOT skip alternative hypothesis
+- Do NOT skip adversarial self-check
+- For files you did NOT modify, set value to "UNCHANGED"
+- Do NOT include markdown formatting (no ```python blocks) inside file values
+- File values must be raw Python source code, not markdown
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "cache_writer.refresh_user_snapshot uses cache_put_if_absent on _store (operation: cache_put_if_absent -> _store[f\"user:{user['id']}\"] not overwritten), causing updates to be ignored when a cached entry already exists.",
+  "failure_mechanism": "rename_user(user_id, new_name) → user_repo.db.update_name mutates DB row → lookup_user returns updated user object → refresh_user_snapshot(user) calls cache_put_if_absent which checks _store and DOES NOT overwrite existing entry → _store keeps the old display name → cache_reader.get_display_name(user_id) returns stale name → callers observe stale display name after a rename.",
+  "broken_invariant": "After updating a user's name in the DB via rename_user(user_id, new_name), the cache must reflect the new name: cache_reader.get_display_name(user_id) == new_name. This property is violated because refresh_user_snapshot uses a put-if-absent behavior.",
+  "alternative_hypothesis": "The bug could be caused by user_repo.update_name failing to mutate the stored user object (e.g., returning a new object not referenced by the cache key) or lookup_user returning an outdated object reference.",
+  "hypothesis_rejection": "user_repo.update_name directly mutates the _rows dict entry (self._rows[user_id][\"name\"] = new_name) if the id exists; lookup_user returns db.find(user_id) which reads the same dict entry. The code path shows the DB object is updated in place, so the cache put-if-absent behavior is the only place that can prevent the new name from reaching _store. Additionally, the presence of cache_put_if_absent in refresh_user_snapshot is concrete evidence: that exact operation is what ignores updates if a key already exists.",
+  "fix_strategy": "Replace the two small helpers (refresh_user_snapshot and sync_user_to_cache) with a single consolidated function sync_user_to_cache(user, force=False) in cache_writer.py. The consolidated function will call cache_put(user_key, name) when force=True, and cache_put_if_absent(...) when force=False. Update all callers: replace calls to refresh_user_snapshot with sync_user_to_cache; keep default behavior (force=False) for save_user and bulk_warm_cache to preserve warm-only semantics, but use force=True in rename_user so cache is overwritten after a DB rename. This breaks the causal chain by ensuring rename_user will explicitly overwrite the existing cached name instead of being ignored by the put-if-absent operation.",
+  "self_check": {
+    "failure_scenario": "If other code outside this codebase imports the old function name refresh_user_snapshot (by name) or expects the previous semantics at import time, they will fail because refresh_user_snapshot was removed. Within this codebase, since all callers were updated, this scenario does not occur. Another failure scenario: a user object without 'id' or 'name' keys passed to sync_user_to_cache will raise KeyError as before.",
+    "edge_case": "Boundary condition: user['name'] could be an empty string or None. The consolidated function will store that value unchanged. If the intended invariant is that only truthy names should be cached, additional validation would be required. Also, repeated calls to sync_user_to_cache(user, force=False) when a key exists leaves cache unchanged; repeated calls with force=True will always overwrite.",
+    "invariant_check": "1) Multiple calls: After rename_user calls sync_user_to_cache(updated, force=True), subsequent cache_reader.get_display_name(user_id) returns the new name because cache_put writes _store[f'user:{id}'] = new_name. 2) Retries/loops: If an operation retries calling sync_user_to_cache(..., force=True) multiple times, the last write sets the final value; no inconsistent intermediate state is introduced beyond the store assignment semantics. 3) State reuse: The code continues to use the same _store dict; default non-force calls (for warm cache) remain put-if-absent so warm-only behavior is preserved, and explicit updates (rename) explicitly overwrite. These behaviors preserve the intended semantics and ensure the broken invariant (cache reflects DB name after rename) holds.",
+    "conclusion": "No flaw requiring revision was found in the provided codebase: consolidating the two functions into sync_user_to_cache(user, force=False) and updating callers fixes the stale-cache bug by allowing rename_user to force an overwrite. The change preserves previous warm-only behavior for save_user and bulk_warm_cache while making rename_user semantically correct. Remaining risks are external callers expecting the old function name or malformed user objects; those are out of scope and were present before this change."
+  },
+  "files": {
+    "code_snippets_v2/hidden_dep_multihop/cache_writer.py": "_store = {}\n\n\ndef cache_put(key, value):\n    _store[key] = value\n\n\ndef cache_delete(key):\n    _store.pop(key, None)\n\n\ndef cache_put_if_absent(key, value):\n    if key not in _store:\n        _store[key] = value\n\n\ndef cache_clear_prefix(prefix):\n    to_remove = [k for k in _store if k.startswith(prefix)]\n    for k in to_remove:\n        del _store[k]\n\n\ndef sync_user_to_cache(user, force=False):\n    \"\"\"\n    Consolidated cache helper for user display names.\n\n    If force is True, overwrite any existing cached value.\n    If force is False, only populate the cache if the key is absent (warm-only).\n\n    user: dict with keys 'id' and 'name'. Behavior mirrors prior helpers:\n      - previous sync_user_to_cache(user) => force=True\n      - previous refresh_user_snapshot(user) => put-if-absent (force=False)\n    \"\"\"\n    key = f\"user:{user['id']}\"\n    if force:\n        cache_put(key, user[\"name\"])\n    else:\n        cache_put_if_absent(key, user[\"name\"])\n",
+    "code_snippets_v2/hidden_dep_multihop/cache_reader.py": "UNCHANGED",
+    "code_snippets_v2/hidden_dep_multihop/user_repo.py": "UNCHANGED",
+    "code_snippets_v2/hidden_dep_multihop/user_service.py": "from user_repo import persist_user, remove_user, sync_user_to_db, lookup_user\nfrom cache_writer import cache_delete, sync_user_to_cache\n\n\ndef save_user(user):\n    persist_user(user)\n    # Warm cache only if absent (preserve previous refresh_user_snapshot behavior)\n    sync_user_to_cache(user)\n\n\ndef delete_user(user_id):\n    remove_user(user_id)\n    cache_delete(f\"user:{user_id}\")\n\n\ndef rename_user(user_id, new_name):\n    from user_repo import db\n    db.update_name(user_id, new_name)\n    updated = lookup_user(user_id)\n    if updated:\n        # After a rename we must overwrite the cached name to avoid stale data\n        sync_user_to_cache(updated, force=True)\n\n\ndef bulk_warm_cache(users):\n    for u in users:\n        # Warm cache only if absent\n        sync_user_to_cache(u)\n\n\ndef migrate_legacy_user(legacy_record):\n    converted = {\"id\": legacy_record[\"uid\"], \"name\": legacy_record[\"full_name\"]}\n    sync_user_to_db(converted)\n"
+  }
+}

@@ -1,0 +1,182 @@
+=== CALL 000093 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: retry_dup_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:58:45.688841
+LATENCY_MS: 30547
+
+--- PROMPT ---
+Messages appearing 3-4 times. Fix the retry logic. Return the updated code.
+
+## Codebase (3 files)
+
+### FILE 1/3: code_snippets_v2/retry_dup_c/store.py ###
+```python
+"""Message store with deduplication support."""
+
+_messages = []
+_notifications = []
+
+
+def reset():
+    global _messages, _notifications
+    _messages = []
+    _notifications = []
+
+
+def append(msg):
+    """Store a message."""
+    _messages.append(msg)
+
+
+def notify(msg):
+    """Record a notification for the message."""
+    _notifications.append({"msg": msg, "notified": True})
+
+
+def get_messages():
+    return list(_messages)
+
+
+def get_notifications():
+    return list(_notifications)
+
+
+def message_count():
+    return len(_messages)
+
+
+def deduplicate():
+    """Remove duplicate messages. Useful for batch cleanup."""
+    global _messages
+    seen = set()
+    unique = []
+    for m in _messages:
+        key = m if isinstance(m, str) else str(m)
+        if key not in seen:
+            seen.add(key)
+            unique.append(m)
+    _messages = unique
+```
+
+### FILE 2/3: code_snippets_v2/retry_dup_c/sender.py ###
+```python
+"""Message sender with retry logic."""
+
+from store import append, notify
+
+_attempt_count = 0
+
+
+def reset_sender():
+    global _attempt_count
+    _attempt_count = 0
+
+
+def send(msg, fail_first=False):
+    """Send a message: store it and notify."""
+    global _attempt_count
+    _attempt_count += 1
+    if fail_first and _attempt_count == 1:
+        raise ConnectionError("transient failure")
+    append(msg)
+    notify(msg)
+    return True
+
+
+def send_with_retry(msg, max_retries=2, fail_first=False):
+    """Retry send on transient errors."""
+    for attempt in range(max_retries):
+        try:
+            send(msg, fail_first=fail_first)
+            break
+        except ConnectionError:
+            continue
+    return True
+
+
+def get_attempt_count():
+    return _attempt_count
+```
+
+### FILE 3/3: code_snippets_v2/retry_dup_c/pipeline.py ###
+```python
+"""Ingestion pipeline with its own retry around sender."""
+
+from sender import send_with_retry, reset_sender
+from store import get_messages
+
+_ingest_log = []
+
+
+def reset():
+    global _ingest_log, _messages, _notifications, _attempt_count
+    _ingest_log = []
+    _messages = []
+    _notifications = []
+    _attempt_count = 0
+
+
+def ingest(msg, max_pipeline_retries=2, fail_first=False):
+    """Ingest a message with pipeline-level retry."""
+    for attempt in range(max_pipeline_retries):
+        try:
+            send_with_retry(msg, max_retries=2, fail_first=fail_first)
+            # BUG: no break — pipeline always retries, doubling sends
+        except Exception:
+            continue
+    _ingest_log.append(msg)
+    return True
+
+
+def get_ingest_log():
+    return list(_ingest_log)
+
+
+def batch_ingest(messages):
+    """Ingest multiple messages. Legitimate batch — no retry needed."""
+    for msg in messages:
+        send_with_retry(msg, max_retries=1)
+    return len(messages)
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/retry_dup_c/store.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/retry_dup_c/sender.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/retry_dup_c/pipeline.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "The bug is in pipeline.ingest: the for-loop over max_pipeline_retries calls send_with_retry(msg, ...) but does not break after a successful call. Because send_with_retry itself performs the send (and appends the message) and does not raise on success, ingest will continue the loop and call send_with_retry again. Additionally, pipeline.reset tried to clear variables _messages, _notifications, and _attempt_count that are not defined in pipeline.py (it attempted to manipulate other modules' internals) which would raise NameError and prevent proper test isolation.",
+  "failure_mechanism": "Concrete scenario: ingest(msg, max_pipeline_retries=2, fail_first=False) runs a loop with two iterations. On the first iteration send_with_retry succeeds and appends the message to store._messages. Because ingest lacks a break after success, the second iteration also calls send_with_retry and appends the same message again, producing duplicates. If fail_first=True, sender.send may raise once and succeed later, but ingest still invokes send_with_retry for each pipeline iteration, so each pipeline iteration that ultimately succeeds will append the message once — resulting in 2 copies with the default pipeline retries, and more copies if the pipeline retry count is higher. The broken pipeline.reset compounds test interference because it tries to assign to _messages/_notifications/_attempt_count in pipeline.py instead of invoking the other modules' reset functions, causing tests to not get a clean store between runs.",
+  "broken_invariant": "For any single call to ingest(msg), the store must contain exactly one appended message for that msg (i.e., store.message_count() increases by 1 and store.get_messages() contains one new entry equal to msg).",
+  "fix_strategy": "Add an explicit break in pipeline.ingest after send_with_retry returns successfully so the pipeline stops retrying once the send completed. Also fix pipeline.reset to call the store and sender reset functions (reset_store and reset_sender) and only clear pipeline-local _ingest_log, avoiding assignments to names not present in this module. These changes ensure exactly one successful send invocation per ingest call and proper test isolation by clearing other modules via their public reset APIs.",
+  "files": {
+    "code_snippets_v2/retry_dup_c/store.py": "UNCHANGED",
+    "code_snippets_v2/retry_dup_c/sender.py": "UNCHANGED",
+    "code_snippets_v2/retry_dup_c/pipeline.py": " \"\"\"Ingestion pipeline with its own retry around sender.\"\"\"\n\nfrom sender import send_with_retry, reset_sender\nfrom store import get_messages, reset as reset_store\n\n_ingest_log = []\n\n\ndef reset():\n    global _ingest_log\n    # Clear pipeline-local log and delegate resets to sender and store modules\n    _ingest_log = []\n    reset_sender()\n    reset_store()\n\n\ndef ingest(msg, max_pipeline_retries=2, fail_first=False):\n    \"\"\"Ingest a message with pipeline-level retry.\"\"\"\n    for attempt in range(max_pipeline_retries):\n        try:\n            # Call sender-level retry; stop pipeline retries once it succeeds\n            send_with_retry(msg, max_retries=2, fail_first=fail_first)\n            break\n        except Exception:\n            continue\n    _ingest_log.append(msg)\n    return True\n\n\ndef get_ingest_log():\n    return list(_ingest_log)\n\n\ndef batch_ingest(messages):\n    \"\"\"Ingest multiple messages. Legitimate batch — no retry needed.\"\"\"\n    for msg in messages:\n        send_with_retry(msg, max_retries=1)\n    return len(messages)\n"
+  }
+}

@@ -1,0 +1,190 @@
+=== CALL 000106 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: partial_rollback_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:06:36.707060
+LATENCY_MS: 28455
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In order_service.place_order the except block for process(...) re-raises the ValueError without calling release(product_id, qty) or remove_audit_entry(order_id). As a result the reserved state kept in inventory._reserved (manipulated via reserve/release) and the payment audit entries in payment._audit_log (manipulated via add_audit_entry/remove_audit_entry) are not rolled back when payment.process raises ValueError.
+
+## Failure Mechanism
+When payment._gateway_fail is True, payment.process raises ValueError("payment declined"). place_order first calls reserve(product_id, qty) which increments inventory._reserved for product_id, then add_audit_entry(...) appends an entry to payment._audit_log. Because place_order's except re-raises immediately, neither release(product_id, qty) nor remove_audit_entry(order_id) is called. Concretely: a failed call like place_order('P1', 2, 5.0) leaves inventory._reserved['P1'] increased by 2 and payment._audit_log containing the ORD-P1-2 entry even though the payment failed, corrupting both inventory availability and the audit log.
+
+## Broken Invariant
+If place_order(product_id, qty, price) raises ValueError (payment failure), then inventory.get_reserved(product_id) must be 0 for that product_id and payment.get_audit_log() must not contain any entry whose 'order_id' equals f"ORD-{product_id}-{qty}". The current code violates this: after a payment failure inventory.get_reserved(product_id) > 0 and payment.get_audit_log() contains the stale entry.
+
+## Fix Strategy
+Wrap the payment.process call in try/except and on ValueError perform compensating actions: call release(product_id, qty) to undo the earlier reserve, and call remove_audit_entry(order_id) to undo the audit entry, then re-raise the exception. Also make reset() call the inventory and payment reset functions so module-level state is cleaned consistently during tests. These changes ensure that on payment failure both the inventory reservation and the audit log entry are removed, restoring the invariant described above.
+
+
+# Task Description
+Inventory and audit corrupted after payment failure. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Order service: reserve -> reasoning_evaluator_audit -> pay -> notify."""
+
+from inventory import reserve, release, reset as inventory_reset
+from payment import (
+    process,
+    add_audit_entry,
+    remove_audit_entry,
+    get_audit_log,
+    set_gateway_fail,
+    reset as payment_reset,
+)
+
+_notifications = []
+
+
+def reset():
+    """Reset local and underlying module state."""
+    global _notifications
+    _notifications = []
+    # Reset the underlying modules' state as well
+    inventory_reset()
+    payment_reset()
+    # ensure gateway flag cleared
+    set_gateway_fail(False)
+
+
+def place_order(product_id, qty, price):
+    """Place order: reserve inventory, log reasoning_evaluator_audit, process payment, notify.
+
+    If payment fails, must release inventory AND remove reasoning_evaluator_audit entry.
+    """
+    order_id = f"ORD-{product_id}-{qty}"
+    reserve(product_id, qty)
+    add_audit_entry({"order_id": order_id, "product": product_id, "qty": qty})
+    try:
+        result = process(qty * price, order_id)
+    except ValueError:
+        # Roll back reservation and audit entry on payment failure
+        release(product_id, qty)
+        remove_audit_entry(order_id)
+        raise
+    _notifications.append({"order_id": order_id, "status": "confirmed"})
+    return {"status": "confirmed", "payment": result}
+
+
+def retry_payment(product_id, qty, price):
+    """Trap: adding retry on payment makes partial state worse."""
+    order_id = f"ORD-{product_id}-{qty}"
+    for attempt in range(3):
+        try:
+            return process(qty * price, order_id)
+        except ValueError:
+            continue
+    return None
+
+
+def get_notifications():
+    return list(_notifications)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If the missing compensating calls (release and remove_audit_entry) were executed when payment.process raised ValueError, the leftover inventory reservation and stale audit entry would not occur.
+Evidence: place_order calls reserve(product_id, qty) (mutates inventory._reserved); it then calls add_audit_entry({...}) (mutates payment._audit_log); process(qty * price, order_id) can raise ValueError and previously was re-raised without calling release(...) or remove_audit_entry(...), leaving both module-level states mutated.
+Judgment: The developer correctly identifies the concrete functions and state (inventory._reserved, payment._audit_log), provides a complete causal chain to the observable corruption, and the submitted code implements the compensating rollback and reset changes that address the failure.

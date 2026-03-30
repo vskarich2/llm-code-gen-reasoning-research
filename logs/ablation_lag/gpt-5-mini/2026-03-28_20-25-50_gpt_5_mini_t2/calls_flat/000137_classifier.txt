@@ -1,0 +1,191 @@
+=== CALL 000137 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: wrong_condition_b
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:14:03.088361
+LATENCY_MS: 21628
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In policy.is_allowed (policy.py), the local boolean variables rate_ok and quota_ok are combined using the logical operator 'or' (return rate_ok or quota_ok). This causes is_allowed to return True when either the per-minute check (rate_ok) OR the daily quota check (quota_ok) passes, instead of requiring both to pass.
+
+## Failure Mechanism
+RateLimiter.try_request calls is_allowed(self._minute_count, self.rate_limit, self._daily_count, self.daily_quota). Example: with rate_limit=100 and self._minute_count == 100, check_rate returns False (requests_per_minute < rate_limit is False). If self._daily_count is still below daily_quota, check_quota returns True. Because is_allowed returns rate_ok OR quota_ok, the function returns True and try_request increments self._minute_count and self._daily_count, allowing the request despite the per-minute limit being reached. Repeating this lets many requests bypass the per-minute constraint until the daily quota is reached.
+
+## Broken Invariant
+is_allowed(requests_per_minute, rate_limit, daily_total, daily_quota) must return True if and only if both requests_per_minute < rate_limit AND daily_total < daily_quota. For example, when requests_per_minute == rate_limit and daily_total < daily_quota, is_allowed(...) must return False; currently it returns True.
+
+## Fix Strategy
+Change the final boolean combination from 'or' to 'and' so that both rate_ok and quota_ok must be True for the request to be allowed. This directly fixes the logical condition used by try_request, preventing an allowed result when either check fails. The only code change is updating the return expression in policy.is_allowed from 'rate_ok or quota_ok' to 'rate_ok and quota_ok'.
+
+
+
+# Task Description
+Rate limiter allows too many requests. Fix the policy. Return the updated code.
+
+# Code Produced
+```python
+"""Rate limiter using policy checks."""
+
+from policy import is_allowed
+
+
+class RateLimiter:
+    """Tracks request counts and enforces rate + quota policies."""
+
+    def __init__(self, rate_limit=100, daily_quota=10000):
+        self.rate_limit = rate_limit
+        self.daily_quota = daily_quota
+        self._minute_count = 0
+        self._daily_count = 0
+
+    def try_request(self):
+        """Attempt a request. Returns True if allowed, False if blocked."""
+        allowed = is_allowed(
+            self._minute_count, self.rate_limit,
+            self._daily_count, self.daily_quota,
+        )
+        if allowed:
+            self._minute_count += 1
+            self._daily_count += 1
+        return allowed
+
+    def reset_minute(self):
+        """Reset the per-minute counter (called each minute)."""
+        self._minute_count = 0
+
+    def get_stats(self):
+        """Return current counters."""
+        return {
+            "minute": self._minute_count,
+            "daily": self._daily_count,
+        }
+
+
+"""Rate and quota policy checks."""
+
+
+def check_rate(requests_per_minute, rate_limit):
+    """Return True if rate is within acceptable bounds."""
+    return requests_per_minute < rate_limit
+
+
+def check_quota(daily_total, daily_quota):
+    """Return True if daily quota is not exceeded."""
+    return daily_total < daily_quota
+
+
+def is_allowed(requests_per_minute, rate_limit, daily_total, daily_quota):
+    """Check if a request is allowed under BOTH rate and quota policies.
+
+    A request should only be allowed if it passes rate AND quota checks.
+    """
+    rate_ok = check_rate(requests_per_minute, rate_limit)
+    quota_ok = check_quota(daily_total, daily_quota)
+    return rate_ok and quota_ok
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If the incorrect 'or' were removed (replaced by 'and'), the per-minute limit could not be bypassed and the observed excess requests would stop.
+Evidence: policy.is_allowed combines rate_ok and quota_ok; RateLimiter.try_request calls is_allowed(self._minute_count, self.rate_limit, self._daily_count, self.daily_quota); when self._minute_count == rate_limit check_rate returns False but check_quota can be True, so 'or' makes allowed True and try_request increments _minute_count/_daily_count (bypassing per-minute limit); the submitted fix changes return to rate_ok and quota_ok preventing that path; note: the code both imports is_allowed from policy and then defines a local is_allowed (shadowing the import), a minor inconsistency but the local definition implements the described fix.
+Judgment: The developer's reasoning forms a valid causal chain from the faulty 'or' to the observable failure and the invariant is precisely stated; the fix maps directly to the cause. The code implements the logical change, though the import+local-definition oddity is a small mismatch to clean up.

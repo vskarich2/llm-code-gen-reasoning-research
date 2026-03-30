@@ -1,0 +1,182 @@
+=== CALL 000111 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: temporal_drift_a
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:10:14.522888
+LATENCY_MS: 20391
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+pipeline() uses variable 'cleaned' (the normalized data) as the argument to compute_raw_stats(), so compute_raw_stats(cleaned) computes statistics on normalized values instead of the original 'data'. This causes raw_stats to reflect post-transform values rather than the original input.
+
+## Failure Mechanism
+Input data (cause) → pipeline() normalizes data first (mutation: data transformed into 0-1 range stored in 'cleaned') → compute_raw_stats() is called with 'cleaned' (propagation: statistics computed on transformed values) → observable failure: raw_stats values (raw_max/raw_min/raw_sum) do not match the statistics of the original input as required (misleading report and downstream consumers get wrong metrics).
+
+## Broken Invariant
+Invariant: result['raw_stats'] must equal the min, max, and sum of the original input 'data'. Currently compute_raw_stats(cleaned) can produce raw_max/raw_min/raw_sum that differ from compute_raw_stats(data). This can be tested by passing e.g. data=[10,20,30] and observing raw_max==1 instead of 30.
+
+## Fix Strategy
+Change pipeline() to (1) materialize the incoming data into a list to avoid generator/exhaustion issues, (2) compute raw_stats on that materialized original list before any transformation, and (3) then run normalize() on the same original list. This ensures compute_raw_stats receives the original values and breaks the causal chain where normalization mutated the value set seen by compute_raw_stats.
+
+
+## Self-Check
+{'failure_scenario': "If 'data' is not an iterable (e.g., an integer passed by mistake), calling list(data) will raise TypeError. This scenario would cause pipeline() to error. The original code would also likely fail in that case, but the explicit materialization surfaces the error earlier. Another potential issue: extremely large or infinite generators will be fully materialized into memory by list(data), causing memory exhaustion.", 'edge_case': 'Empty input: data=None or data=[] or an empty generator. The code converts None to [], compute_raw_stats([]) returns zeros and normalize([]) returns []. Constant values: if data has all identical values, normalize will return [0.5]*len(data) and raw_stats must still report the original identical min==max and sum should be original value*len(data).', 'invariant_check': "Multiple calls: pipeline() is pure and stateless; calling pipeline([1,2,3]) repeatedly will compute raw_stats on the original values each time. Retries/loops: because pipeline now materializes data into a fresh list local to the call (data_list = list(...)), there is no cross-call state reuse. Re-using an iterator across calls won't be an issue because pipeline consumes it into its own list and does not rely on external iteration state.", 'conclusion': 'No flaw found in the targeted fix for the original bug: computing raw_stats on the original data_list before normalization ensures the invariant that raw_stats reflect original input. The remaining trade-offs are: (A) memory use for very large or infinite generators because of list(materialization), and (B) raising a TypeError when a non-iterable is passed. These are acceptable given the need for correct raw statistics and consistent behavior; if streaming/low-memory behavior is required, a more complex redesign (two-pass streaming algorithm with temporary storage or an API contract requiring re-iterable inputs) would be necessary.'}
+
+
+# Task Description
+Refactor this metrics pipeline for clarity. Return the updated code.
+
+# Code Produced
+```python
+"""Metrics pipeline: compute raw stats before transforming data."""
+
+
+def compute_raw_stats(data):
+    """Compute statistics on raw (untransformed) data."""
+    if not data:
+        return {"raw_max": 0, "raw_min": 0, "raw_sum": 0}
+    return {
+        "raw_max": max(data),
+        "raw_min": min(data),
+        "raw_sum": sum(data),
+    }
+
+
+def normalize(data):
+    """Normalize data to 0-1 range."""
+    if not data:
+        return []
+    lo, hi = min(data), max(data)
+    if hi == lo:
+        return [0.5] * len(data)
+    return [(x - lo) / (hi - lo) for x in data]
+
+
+def pipeline(data):
+    """Run pipeline: raw stats on original data, then normalize.
+
+    raw_stats MUST reflect the original data, not the normalized version.
+    """
+    # Materialize input to a list so we operate on the original values
+    # and so generators won't be accidentally exhausted by the first pass.
+    if data is None:
+        data_list = []
+    else:
+        # This will raise a TypeError for non-iterables (explicit and consistent failure).
+        data_list = list(data)
+
+    # Compute raw stats on the original data_list before any transformation.
+    raw_stats = compute_raw_stats(data_list)
+    cleaned = normalize(data_list)
+    return {"raw_stats": raw_stats, "cleaned": cleaned}
+
+
+def format_report(result):
+    """Format pipeline result for display."""
+    return f"max={result['raw_stats']['raw_max']}"
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;TEMPORAL_ORDERING
+HIGH
+Counterfactual: If compute_raw_stats is invoked on the original data_list (not on cleaned), the raw_stats mismatch would not occur.
+Evidence: - pipeline() materializes input into data_list; - raw_stats = compute_raw_stats(data_list) computed before calling normalize(); - normalize() returns 0-1 values so computing stats after it would change raw_min/raw_max/raw_sum; - code no longer calls compute_raw_stats(cleaned) and thus fixes the ordering that caused the bug.
+Judgment: The developer correctly identifies a temporal-ordering bug (compute_raw_stats called after normalization) and specifies a precise, testable invariant; the suggested fix is directly implemented in the code and addresses generator exhaustion while trading memory for correctness.

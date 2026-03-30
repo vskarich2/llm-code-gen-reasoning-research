@@ -1,0 +1,209 @@
+=== CALL 000220 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: lost_update
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:44:52.157515
+LATENCY_MS: 20504
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+make_increment_steps.step_write uses captured['current'] (a previously-read snapshot of the module variable _value) to compute the new value. Because step_read stores _value into captured['current'] and step_write writes captured['current'] + 1, two increments that both perform step_read before any step_write will both write the same value, causing a lost update to _value.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Make the write step perform the increment based on the actual current _value at write time and protect the read-modify-write with a module-level threading.Lock. Concretely, add a _lock = threading.Lock() and change step_write to acquire the lock, read the current _value, set _value to current+1, release the lock, and return the new value. This breaks the bug mechanism because the write no longer blindly writes the stale captured value; each write now atomically increments the live counter.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure: other code could bypass the lock and call _set or otherwise modify _value directly, in which case the lock in the write step cannot prevent lost updates. This is not present in the current codebase: all updates go through the increment steps and _set is an internal helper. Also, if the write step itself used get() and _set without a lock, true concurrent execution of the write step could still suffer a lost update; that is why the write now uses a threading.Lock to make the read-modify-write atomic. No further revision was necessary because the lock addresses the concurrency in the model and the codebase does not mutate _value outside these helpers.
+
+
+# Task Description
+Two concurrent increments produce value=1 instead of 2 under interleaving. Fix so counter is correct under any interleaving.
+
+# Code Produced
+```python
+'''Counter with non-atomic read-modify-write, simulated via step functions.'''
+
+import threading
+
+_value = 0
+_lock = threading.Lock()
+
+
+def reset():
+    global _value
+    _value = 0
+
+
+def get():
+    return _value
+
+
+def _set(v):
+    global _value
+    _value = v
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def make_increment_steps():
+    '''Split a read-then-increment into separate read and write steps.
+
+    BUG: under interleaving, two increments both read the same value
+    and both write value+1, losing one update.
+
+    FIX: perform the actual increment at write time under a lock so each
+    write atomically reads-and-writes the current counter instead of
+    using a stale captured value.
+    '''
+    captured = {}
+
+    def step_read():
+        captured['current'] = get()
+        return ('read', captured['current'])
+
+    def step_write():
+        # Perform an atomic read-modify-write at write time.
+        with _lock:
+            current = _value
+            new_value = current + 1
+            _set(new_value)
+        return ('write', new_value)
+
+    return step_read, step_write
+
+
+def sequential_double_increment():
+    '''Two increments, sequential: expect value=2.'''
+    reset()
+    read_a, write_a = make_increment_steps()
+    read_b, write_b = make_increment_steps()
+    run_steps([(read_a, ()), (write_a, ()), (read_b, ()), (write_b, ())])
+    return get()
+
+
+def interleaved_double_increment():
+    '''Two increments, interleaved: fixed — both will be applied, result=2.'''
+    reset()
+    read_a, write_a = make_increment_steps()
+    read_b, write_b = make_increment_steps()
+    run_steps([(read_a, ()), (read_b, ()), (write_a, ()), (write_b, ())])
+    return get()
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;WRONG;CORRECT;CORRECT;CORRECT;TEMPORAL_ORDERING
+HIGH
+Counterfactual: If writes stopped using a stale captured snapshot and instead performed an atomic read-modify-write of _value, the lost-update would not occur.
+Evidence: step_read() sets captured['current'] = get() (snapshot); the reported bug is that two reads can produce the same snapshot so both writes would apply the same increment; produced step_write() uses with _lock: current = _value; new_value = current + 1; _set(new_value) (atomic RMW); interleaved_double_increment() runs (read_a, read_b, write_a, write_b) which previously produced the lost update.
+Judgment: The developer correctly identified the stale-captured read-modify-write as the causal mechanism and the lock-based atomic RMW fix directly addresses it; however they failed to state the explicit broken invariant (e.g., "each increment must increase _value exactly once") and did not analyze the semantic change that write now ignores the captured snapshot.

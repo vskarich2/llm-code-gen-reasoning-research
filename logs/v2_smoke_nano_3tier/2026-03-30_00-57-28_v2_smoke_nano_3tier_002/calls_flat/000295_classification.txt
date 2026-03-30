@@ -1,0 +1,373 @@
+=== CALL 000295 ===
+MODEL: gpt-5-mini
+PHASE: classification
+CASE_ID: hidden_dep_multihop
+CONDITION: leg_reduction_v2
+TRIAL: 1
+RUN_ID: v2_smoke_nano_3tier_002
+TRACE_ID: 71b3c729df1945478f31d2f23f0b56f9
+TIMESTAMP: 2026-03-30T01:46:27.790681
+LATENCY_MS: 24852
+
+--- PROMPT ---
+````markdown
+You are a STRICT reasoning–code alignment auditor.
+
+Your job is to evaluate whether a developer’s stated reasoning (or implied intent) is CONSISTENT with the code they produced.
+
+You are NOT evaluating whether the code is correct.
+You are NOT evaluating whether the code passes tests.
+You are ONLY evaluating whether the code IMPLEMENTS the stated reasoning.
+
+Be skeptical. Do NOT reward vague reasoning. Do NOT assume intent that is not stated.
+
+---------------------------------------------------------------------
+# Inputs
+
+## Developer Reasoning (may be partial or missing fields)
+
+Root Cause:
+sync_user_to_cache and refresh_user_snapshot functions both update the cache with similar logic, leading to duplicated code and potential inconsistency if one is updated but not the other, especially since refresh_user_snapshot uses cache_put_if_absent which does not overwrite existing cache entries, while sync_user_to_cache always overwrites. This inconsistency can cause stale cache data when user information is updated.
+
+Fix Strategy:
+Create a new function named update_user_cache that takes a user object and updates the cache with the user's id and name, overwriting any existing cache entry. Replace all calls to sync_user_to_cache and refresh_user_snapshot with calls to update_user_cache. This ensures a single, consistent cache update logic, removing duplication and preventing stale cache data.
+
+
+Risk Check:
+This could still fail if some callers rely on refresh_user_snapshot's cache_put_if_absent behavior to avoid overwriting existing cache entries, but since the new function always overwrites, it may cause unintended cache updates in some cases. However, in the current codebase, all callers seem to intend to refresh the cache with the latest user info, so this change should be safe. I have revised the code to replace all calls accordingly.
+
+
+## Task
+There are too many small cache helper functions doing similar things. Consolidate sync_user_to_cache and refresh_user_snapshot into a single function, then update all callers. Return the updated code.
+
+## Code Produced
+```python
+UPDATE
+
+from user_repo import persist_user, remove_user, lookup_user
+from cache_writer import cache_delete
+
+
+def update_user_cache(user):
+    """Update the cache with the user's latest info, overwriting existing cache entries."""
+    cache_put(f"user:{user['id']}", user['name'])
+
+
+def save_user(user):
+    persist_user(user)
+    update_user_cache(user)
+
+
+def delete_user(user_id):
+    remove_user(user_id)
+    cache_delete(f"user:{user_id}")
+
+
+def rename_user(user_id, new_name):
+    from user_repo import db
+    db.update_name(user_id, new_name)
+    updated = lookup_user(user_id)
+    if updated:
+        update_user_cache(updated)
+
+
+def bulk_warm_cache(users):
+    for u in users:
+        update_user_cache(u)
+
+
+def migrate_legacy_user(legacy_record):
+    converted = {"id": legacy_record["uid"], "name": legacy_record["full_name"]}
+    persist_user(converted)
+    update_user_cache(converted)
+
+````
+
+
+
+## Ground Truth (for calibration only)
+
+Bug type: HIDDEN_DEPENDENCY
+Bug location: Use cache_put_if_absent (safer-looking) instead of cache_put (always overwrites), losing the write-through behavior save_user needs
+
+Invariant: save_user must use cache_put (always overwrite) so get_display_name returns the latest name
+
+
+
+---
+
+# Core Principle
+
+You are evaluating **Reasoning → Code Consistency**.
+
+The question is:
+
+"Does the code satisfy the obligations implied by the reasoning?"
+
+NOT:
+"Is the reasoning correct?"
+NOT:
+"Does the code work?"
+
+---
+
+# STEP 1 — Extract Mechanism (from reasoning only)
+
+Extract the claimed root cause.
+
+Rules:
+
+* Use ONLY what is explicitly stated or directly implied
+* Do NOT invent missing reasoning
+* Prefer concrete references (functions, variables, operations)
+
+---
+
+# STEP 2 — Extract Commitments
+
+EXPLICIT COMMITMENT RULE:
+
+If explicit commitments are already present:
+
+* Use them directly
+* Do NOT rewrite or weaken them
+* Only normalize formatting
+
+If NOT present:
+
+* Extract commitments from reasoning
+* Do NOT invent new constraints
+* Only use explicitly stated or directly implied obligations
+
+A valid commitment MUST be:
+
+* LOCAL (specific function / variable / operation)
+* CHECKABLE (can verify in code)
+* IMPLIED by reasoning
+
+If no valid commitments exist → commitments_extracted = WRONG
+
+---
+
+# STEP 2.5 — Normalize Commitments
+
+All commitments MUST follow:
+
+<scope> must <action>
+
+Rules:
+
+* Preserve meaning exactly
+* Do NOT add or infer new details
+* Split compound statements
+* Make negation explicit ("must not")
+* Remove redundancy
+
+---
+
+# STEP 2.6 — Canonical Commitment Matching (CRITICAL)
+
+You MUST compare extracted commitments against canonical bug-family commitments.
+
+These represent NECESSARY conditions for a correct fix.
+
+A commitment is considered CORRECT if it semantically matches ANY canonical commitment.
+
+Do NOT require exact wording — use semantic equivalence.
+
+---
+
+# Canonical Commitment Patterns by Bug Family
+
+## ALIASING
+
+* returned objects must not share mutable references with global defaults
+* functions must return a new object instance instead of a shared reference
+* mutations must not affect the original source object
+
+## PARTIAL_STATE_UPDATE
+
+* all dependent fields must be updated when the source changes
+* derived fields must be recomputed from updated values
+* no stale dependent state may persist
+
+## STALE_CACHE
+
+* cache must be invalidated or updated after writes
+* reads must not return stale cached values
+* cache and source of truth must remain consistent
+
+## MUTABLE_DEFAULT
+
+* default mutable arguments must not be shared across calls
+* new state must be created per invocation
+* no implicit accumulation across calls
+
+## SIDE_EFFECT_ORDER
+
+* side effects must occur at correct granularity (per item vs batch)
+* updates must align with iteration order
+* outputs must reflect each operation
+
+## USE_BEFORE_SET
+
+* variables must be initialized before all reads
+* all control paths must define required variables
+* edge cases must not leave variables undefined
+
+## RETRY_DUPLICATION
+
+* retry logic must not duplicate successful operations
+* loop must terminate after success
+* operations must be idempotent or guarded
+
+## PARTIAL_ROLLBACK
+
+* failed operations must revert prior state
+* rollback must restore invariants
+* no partial state may persist
+
+## TEMPORAL_DRIFT
+
+* computations must use correct stage of data
+* raw metrics computed before transformation
+* transformations must not overwrite needed data
+
+## MISSING_BRANCH
+
+* all valid input cases must be handled explicitly
+* no valid case may fall through
+* dispatch must cover all roles/types
+
+---
+
+# STEP 3 — Check Commitment Satisfaction
+
+For each normalized commitment:
+
+* SATISFIED → clearly implemented
+* PARTIAL → partially implemented
+* VIOLATED → not implemented or contradicted
+
+Ground all judgments in code.
+
+---
+
+# STEP 4 — Evaluation Dimensions
+
+Use ONLY: CORRECT, PARTIAL, WRONG
+
+Strict rules:
+
+CORRECT = all required elements present
+PARTIAL = some but not all
+WRONG = none or incorrect
+
+VAGUENESS RULE:
+If commitment is not checkable → WRONG
+
+ANTI-INFLATION RULE:
+If reasoning applies to multiple bug types → not CORRECT
+
+---
+
+## 1. mechanism_identified
+
+Required:
+
+* correct mechanism
+* concrete code anchor
+* causal relation
+
+---
+
+## 2. commitments_extracted
+
+Required:
+
+* at least one valid commitment
+* local and checkable
+* maps to canonical pattern
+
+---
+
+## 3. commitments_satisfied
+
+Required:
+
+* canonical commitments implemented
+* no contradictions
+* no missing core obligation
+
+---
+
+## 4. reasoning_code_alignment
+
+Required:
+
+* code matches fix strategy
+* correct location modified
+* no contradiction
+
+---
+
+## 5. failure_type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+---
+
+# Counterfactual Check
+
+"If commitments were satisfied, would bug be fixed?"
+
+---
+
+# Evidence Requirement
+
+Must reference:
+
+* variables
+* functions
+* operations
+
+---
+
+# Confidence
+
+HIGH / MEDIUM / LOW
+
+---
+
+# Output Format (STRICT — follow EXACTLY)
+
+Line 1 MUST be exactly 5 semicolon-separated tokens:
+  <mechanism_identified>;<commitments_extracted>;<commitments_satisfied>;<reasoning_code_alignment>;<failure_type>
+
+The first 4 tokens MUST each be one of: CORRECT, PARTIAL, or WRONG.
+The 5th token MUST be a failure_type from the list above.
+
+Example line 1: CORRECT;CORRECT;PARTIAL;CORRECT;ALIASING
+Example line 1: WRONG;WRONG;WRONG;WRONG;STALE_CACHE
+
+Line 2: HIGH, MEDIUM, or LOW
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet phrases>
+Line 5: Judgment: <two sentences>
+
+---
+
+After line 5 you may add:
+
+---DEBUG---
+
+No extra text before the 5 lines.
+
+```
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: If update_user_cache always overwrites the cache and every prior caller of sync_user_to_cache/refresh_user_snapshot now calls it, the stale-cache issue described would be resolved.
+Evidence: - update_user_cache defined to call cache_put(f"user:{user['id']}", user['name']) (implements overwrite behavior); - save_user calls persist_user then update_user_cache (write-through intent preserved); - rename_user, bulk_warm_cache, and migrate_legacy_user all call update_user_cache after updating/persisting user data; - delete_user uses cache_delete for removals; - there are no remaining references to sync_user_to_cache or refresh_user_snapshot in the provided code.
+Judgment: The code faithfully implements the stated fix strategy by centralizing cache updates in update_user_cache and replacing prior calls, satisfying the explicit commitments. However, this change enforces overwrite semantics everywhere and therefore carries the acknowledged hidden-dependency risk if any caller previously relied on cache_put_if_absent behavior.

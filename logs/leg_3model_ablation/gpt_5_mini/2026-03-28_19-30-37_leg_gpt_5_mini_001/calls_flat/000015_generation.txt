@@ -1,0 +1,133 @@
+=== CALL 000015 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: stale_cache_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:37:44.006882
+LATENCY_MS: 41658
+
+--- PROMPT ---
+Products show old prices after updates. Fix the catalog. Return the updated code.
+
+## Codebase (2 files)
+
+### FILE 1/2: code_snippets_v2/stale_cache_b/cache.py ###
+```python
+"""Simple key-value cache."""
+
+_store = {}
+
+
+def get(key):
+    """Return cached value or None."""
+    return _store.get(key)
+
+
+def put(key, value):
+    """Store a value in the cache."""
+    _store[key] = value
+
+
+def invalidate(key):
+    """Remove a key from the cache."""
+    _store.pop(key, None)
+
+
+def clear():
+    """Clear entire cache."""
+    _store.clear()
+```
+
+### FILE 2/2: code_snippets_v2/stale_cache_b/catalog.py ###
+```python
+"""Product catalog using external cache module."""
+
+from cache import get, put, invalidate
+
+_db = {}
+
+
+def add_product(product_id, name, price):
+    """Add a product to the database."""
+    _db[product_id] = {"name": name, "price": price}
+
+
+def get_product(product_id):
+    """Get product, checking cache first."""
+    cached = get(product_id)
+    if cached is not None:
+        return cached
+    product = _db.get(product_id)
+    if product is not None:
+        put(product_id, dict(product))
+    return _db.get(product_id)
+
+
+def update_product(product_id, **fields):
+    """Update product in DB.
+
+    Invariant: subsequent get_product() must reflect the update.
+    """
+    if product_id not in _db:
+        return False
+    _db[product_id].update(fields)
+    # BUG: should call invalidate(product_id) but doesn't
+    return True
+
+
+def reset():
+    """Clear DB and cache."""
+    _db.clear()
+    from cache import clear
+    clear()
+```
+
+You are fixing a bug using a structured reasoning process.
+
+Follow this procedure exactly. Return a SINGLE valid JSON object.
+
+## STEP 1 — Diagnose
+
+Identify the root cause: name the exact function, variable, and causal relationship.
+
+## STEP 2 — Plan fix
+
+Describe the concrete code change and why it addresses the mechanism.
+
+## STEP 3 — Risk check (CRITICAL)
+
+Before finalizing your code, answer:
+
+What is the most likely way this fix could still fail?
+
+If that failure is real, REVISE your fix before writing the final code.
+If it is not real, explain concisely why the fix is safe.
+
+## STEP 4 — Return fixed code
+
+Return your response as JSON with this exact schema:
+
+{"root_cause": "<exact function + variable + causal relationship>", "fix_strategy": "<what change and why it breaks the bug mechanism>", "risk_check": "<most likely failure mode of your fix, and whether you revised>", "files": {""code_snippets_v2/stale_cache_b/cache.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/stale_cache_b/catalog.py": "<complete file contents or UNCHANGED>""}}
+
+RULES:
+- All four fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file.
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "update_product function in catalog.py updates the in-memory DB (_db) but does not call invalidate(product_id) (or otherwise update the cache), so the cached value for that product remains stale and subsequent get_product() calls can return the old price.",
+  "fix_strategy": "Ensure catalog operations that change data keep cache consistent and avoid race conditions: add a module-level reentrant lock and acquire it around get_product, add_product, update_product, and reset. In update_product, after updating _db, update the cache with the fresh product (put(product_id, dict(_db[product_id]))). Locking prevents concurrent get_product from observing an inconsistent state during update; updating the cache ensures subsequent reads return the new values.",
+  "risk_check": "Most likely remaining failure mode is concurrent access from other modules that bypass catalog and interact with the cache or _db directly; our module-level lock only serializes access within this catalog module, so external direct cache/db access could still cause inconsistency. This is a real risk, so I revised the fix to both (1) perform the cache update (put) instead of merely invalidating — reducing the window where a reader could see stale data — and (2) add a module-level RLock around read/write operations in catalog to prevent races between get/update/reset/add within this module. For multi-process deployments or code that manipulates cache/_db directly, additional inter-process synchronization or avoiding direct external access would be required. Given the constraints, the fix is safe for single-process multi-threaded use and mitigates the main race conditions; I have revised the code accordingly.",
+  "files": {
+    "code_snippets_v2/stale_cache_b/cache.py": "UNCHANGED",
+    "code_snippets_v2/stale_cache_b/catalog.py": "\"\"\"Product catalog using external cache module.\"\"\"\n\nfrom cache import get, put, invalidate, clear\nimport threading\n\n_db = {}\n_lock = threading.RLock()\n\n\ndef add_product(product_id, name, price):\n    \"\"\"Add a product to the database.\"\"\"\n    with _lock:\n        _db[product_id] = {\"name\": name, \"price\": price}\n        # keep cache consistent for immediate reads\n        put(product_id, dict(_db[product_id]))\n\n\ndef get_product(product_id):\n    \"\"\"Get product, checking cache first.\"\"\"\n    with _lock:\n        cached = get(product_id)\n        if cached is not None:\n            return cached\n        product = _db.get(product_id)\n        if product is not None:\n            put(product_id, dict(product))\n        return _db.get(product_id)\n\n\ndef update_product(product_id, **fields):\n    \"\"\"Update product in DB.\n\n    Invariant: subsequent get_product() must reflect the update.\n    \"\"\"\n    with _lock:\n        if product_id not in _db:\n            return False\n        _db[product_id].update(fields)\n        # Update the cache with the fresh product so subsequent reads see the update\n        put(product_id, dict(_db[product_id]))\n        return True\n\n\ndef reset():\n    \"\"\"Clear DB and cache.\"\"\"\n    with _lock:\n        _db.clear()\n        clear()\n"
+  }
+}

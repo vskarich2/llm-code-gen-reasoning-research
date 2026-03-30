@@ -20,10 +20,6 @@ from execution import (
     run_repair_loop,
     run_contract_gated,
     run_leg_reduction,
-    init_run_log,
-    close_run_log,
-    get_current_log_path,
-    get_log_write_stats,
 )
 from constants import ALL_CONDITIONS, VALID_CONDITIONS, COND_LABELS, RETRY_CONDITIONS
 
@@ -185,54 +181,63 @@ def preflight_verify_tests(cases: list[dict]) -> None:
 # No threads. No ThreadPoolExecutor. No shared mutable state.
 
 
-def _run_one(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
+def _run_one(case: dict, model: str, condition: str, logger) -> tuple[str, str, dict]:
     cid = case["id"]
     _log = __import__("logging").getLogger("t3.runner")
     _log.info("TASK_START case=%s cond=%s", cid, condition)
     t0 = __import__("time").monotonic()
+
+    # Start case trace — returns CaseHandle(trace_id, event_id)
+    handle = logger.start_case(cid)
+
     try:
-        result = _run_one_inner(case, model, condition)
+        result = _run_one_inner(case, model, condition, logger, handle.event_id)
         elapsed = __import__("time").monotonic() - t0
         _log.info(
             "TASK_END case=%s cond=%s elapsed=%.1fs pass=%s",
-            cid,
-            condition,
-            elapsed,
-            result[2].get("pass"),
+            cid, condition, elapsed, result[2].get("pass"),
         )
         return result
     except Exception as e:
         elapsed = __import__("time").monotonic() - t0
         _log.error("TASK_FAILED case=%s cond=%s elapsed=%.1fs error=%s", cid, condition, elapsed, e)
+        logger.fail_case(cid, f"{type(e).__name__}: {e}",
+                         condition=condition, parent_event_id=handle.event_id)
         raise
 
 
-def _run_one_inner(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
+def _run_one_inner(case: dict, model: str, condition: str, logger,
+                    case_start_eid: int) -> tuple[str, str, dict]:
     if condition == "repair_loop":
-        return run_repair_loop(case, model)
+        return run_repair_loop(case, model, logger, case_start_eid)
     if condition == "contract_gated":
-        return run_contract_gated(case, model)
+        return run_contract_gated(case, model, logger, case_start_eid)
     if condition in RETRY_CONDITIONS and condition != "repair_loop":
         from retry_harness import run_retry_harness
 
-        return run_retry_harness(case, model, condition=condition, eval_model=get_eval_model())
+        return run_retry_harness(case, model, condition=condition,
+                                 eval_model=get_eval_model(), logger=logger,
+                                 case_start_eid=case_start_eid)
     if condition == "leg_reduction":
-        return run_leg_reduction(case, model)
+        return run_leg_reduction(case, model, logger, case_start_eid)
     if condition in ("baseline_v2", "leg_reduction_v2", "leg_reduction_lean_v2"):
         from execution_v2 import run_v2
-        return run_v2(case, model, condition)
-    return run_single(case, model, condition)
+        return run_v2(case, model, condition, logger, case_start_eid)
+    return run_single(case, model, condition, logger, case_start_eid)
 
 
 def run_all(
-    cases: list[dict], model: str, conditions: list[str], quiet: bool = False,
-    skip: set | None = None,
+    cases: list[dict], model: str, conditions: list[str], logger,
+    quiet: bool = False, skip: set | None = None,
 ) -> list[dict]:
     """Run all (case, condition) pairs sequentially. No threads.
 
     Args:
+        logger: RunLogger instance. Required. Passed to every execution function.
         skip: set of (case_id, condition) tuples to skip (already completed).
     """
+    if logger is None:
+        raise RuntimeError("run_all requires an explicit logger")
     work = [(case, cond) for case in cases for cond in conditions]
     total = len(work)
     raw: dict[tuple[str, str], dict] = {}
@@ -246,7 +251,7 @@ def run_all(
             if not quiet:
                 print(f"  [{i+1:3d}/{total}] {case['id']:30s} {cond:18s} SKIPPED (already completed)")
             continue
-        cid, cn, ev = _run_one(case, model, cond)
+        cid, cn, ev = _run_one(case, model, cond, logger)
         raw[(cid, cn)] = ev
         if not quiet:
             _print_progress(i + 1, total, cid, cn, ev)
@@ -478,10 +483,14 @@ def create_run_timestamp_dir(run_dir: Path, run_id: str = "") -> Path:
 
 
 def run_ablation_mode(args):
-    """Ablation mode: single (model, trial) run with isolated output directory."""
+    """Ablation mode: single (model, trial) run with isolated output directory.
+
+    Creates a logging_core.RunLogger and passes it explicitly through the
+    entire execution stack. No global logging state.
+    """
     import os
     import subprocess as _sp
-    from execution import set_ablation_context
+    from logging_core import RunLogger
 
     # All run parameters come from config — the single source of truth
     from experiment_config import get_config as _get_config
@@ -492,7 +501,6 @@ def run_ablation_mode(args):
     run_id = _cfg.run.run_id
     model = _cfg.models.generation[0].name
 
-    # Conditions and cases come from config ONLY — never from CLI in ablation mode
     from experiment_config import get_config
 
     conditions = list(get_config().conditions.keys())
@@ -503,29 +511,23 @@ def run_ablation_mode(args):
     cases_file = get_config().cases.source
     cases = load_cases(case_id=args.case_id, cases_file=cases_file)
 
-    # Limit cases for smoke tests
     if args.max_cases and args.max_cases > 0:
         cases = cases[: args.max_cases]
 
-    # PREFLIGHT: verify every case can be evaluated BEFORE spending API calls
     preflight_verify_tests(cases)
 
     from condition_registry import validate_run
-
     validate_run(cases, conditions)
 
-    # PREFLIGHT: config sanity
     validate_experiment_config(cases, conditions, model)
 
     n_calls = len(cases) * len(conditions)
-    total_jobs = args.total_jobs if args.total_jobs > 0 else n_calls
 
     # Step 1: Create or resume output directory
     run_dir.mkdir(parents=True, exist_ok=True)
     skip = None
 
     if args.resume:
-        # Resume: reuse existing timestamp directory
         output_dir = run_dir / args.resume
         if not output_dir.exists():
             raise RuntimeError(
@@ -538,11 +540,28 @@ def run_ablation_mode(args):
         skip = load_completed_pairs(events_path)
         print(f"RESUMING: {output_dir} — {len(skip)} completed pairs found, skipping them")
     else:
-        # Fresh run: create new timestamp directory
         ts_dir = create_run_timestamp_dir(run_dir, run_id=run_id)
         output_dir = ts_dir
 
-    # Step 2: Write metadata.json (append resume info if resuming)
+    # Step 2: Create RunLogger — the ONLY logger for this run.
+    # condition=None because this runner handles multiple conditions.
+    # Condition is set per-event via the condition parameter.
+    try:
+        from experiment_config import get_config as _gc
+        _exp_name = _gc().experiment.name
+    except Exception:
+        _exp_name = None
+
+    logger = RunLogger(
+        run_dir=output_dir,
+        run_id=run_id,
+        model=model,
+        condition=None,
+        trial=trial,
+        experiment_name=_exp_name,
+    )
+
+    # Step 3: Log run.start
     try:
         git_hash = (
             _sp.check_output(["git", "rev-parse", "HEAD"], stderr=_sp.DEVNULL).decode().strip()
@@ -550,45 +569,15 @@ def run_ablation_mode(args):
     except Exception:
         git_hash = "unknown"
 
-    metadata_path = output_dir / "metadata.json"
-    if args.resume and metadata_path.exists():
-        metadata = json.loads(metadata_path.read_text())
-        metadata["resume_time"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-        metadata["resume_skipped"] = len(skip) if skip else 0
-    else:
-        metadata = {
-            "model": model,
-            "trial": trial,
-            "run_id": run_id,
-            "start_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "timestamp_dir": output_dir.name,
-            "cases_file": cases_file,
-            "conditions": conditions,
-            "total_jobs": total_jobs,
-            "command_line": sys.argv,
-            "git_hash": git_hash,
-        }
-    with open(metadata_path, "w") as f:
-        json.dump(metadata, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-
-    # Step 3: Touch events.jsonl + enforce schema version
-    events_path = output_dir / "events.jsonl"
-    events_path.touch()
-    from reasoning import enforce_schema_version
-    enforce_schema_version(str(events_path))
-
-    # Step 4: Set ablation context for event emission
-    set_ablation_context(events_path=events_path, trial=trial, run_id=run_id)
-
-    # Step 4.5: Initialize call-level logger
-    from call_logger import init_call_logger, close_call_logger
-
-    init_call_logger(output_dir)
-
-    # Step 5: Initialize run logger
-    log_path = init_run_log(model, log_dir=output_dir)
+    logger.log_event("run.start", {
+        "total_cases": len(cases),
+        "conditions": conditions,
+        "cases_file": cases_file,
+        "model": model,
+        "trial": trial,
+        "git_hash": git_hash,
+        "command_line": sys.argv,
+    }, phase="run")
 
     remaining = n_calls - (len(skip) if skip else 0)
     print(f"T3 Ablation — {len(cases)} cases x {len(conditions)} conditions = {n_calls} evals")
@@ -598,46 +587,22 @@ def run_ablation_mode(args):
     print(f"  Run dir: {run_dir}")
     print(f"  Output:  {output_dir}")
 
-    # Step 6: Run evaluations sequentially (skip completed pairs if resuming)
-    results = run_all(cases, model, conditions, quiet=args.quiet, skip=skip)
+    # Step 4: Run evaluations — logger is passed explicitly
+    results = run_all(cases, model, conditions, logger, quiet=args.quiet, skip=skip)
     print_results(results, conditions, model)
 
-    # Step 6.5: Execution sanity + result distribution guard
+    # Step 5: Execution sanity guard (warns, does not crash)
     validate_execution_sanity(results, conditions)
 
-    # Step 7: Verify log integrity
-    from execution import get_run_logger
+    # Step 6: Log run.end and finalize
+    logger.log_event("run.end", {
+        "total_cases": len(cases),
+        "total_evals": n_calls,
+    }, phase="run")
 
-    logger = get_run_logger()
-    valid, reason = logger.verify_integrity()
-    stats = logger.get_stats()
-    if valid:
-        print(
-            f"\n  Log verified: {log_path} (run_id={stats['run_id']}, {stats['attempted']} writes OK)"
-        )
-    else:
-        print(f"\n  RUN INVALID: {reason}")
-
-    close_run_log()
-
-    # Step 7.5: Close call logger and record count
-    from call_logger import close_call_logger, get_call_count
-
-    total_calls = close_call_logger()
-    print(f"  Call log: {total_calls} LLM calls logged to {output_dir}/calls/")
-
-    # Step 8: Write completion marker to metadata
-    events_written = len([line for line in open(events_path) if line.strip()])
-    metadata["end_time"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-    metadata["events_written"] = events_written
-    metadata["log_valid"] = valid
-    with open(metadata_path, "w") as f:
-        json.dump(metadata, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-
-    # Reset ablation context
-    set_ablation_context(events_path=None, trial=None, run_id=None)
+    stats = logger.finalize()
+    print(f"\n  Run complete: pass_rate={stats['pass_rate']:.1%} ({stats['total_cases']} cases)")
+    print(f"  Output: {output_dir}")
 
 
 def main():
@@ -702,8 +667,12 @@ def main():
         f"  Run: trial={config.run.trial}, run_id={config.run.run_id}, run_dir={config.run.run_dir}"
     )
 
-    # ── SINGLE EXECUTION PATH ──
-    run_ablation_mode(args)
+    # ── EXECUTION PATH ──
+    if config.execution.num_workers > 1:
+        from parallel_runner import run_parallel
+        run_parallel(args, config, config_path=args.config)
+    else:
+        run_ablation_mode(args)
 
 
 if __name__ == "__main__":

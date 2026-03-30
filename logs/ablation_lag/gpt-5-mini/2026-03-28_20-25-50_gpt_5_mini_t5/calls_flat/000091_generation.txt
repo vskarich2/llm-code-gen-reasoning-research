@@ -1,0 +1,145 @@
+=== CALL 000091 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: retry_dup_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:57:40.063847
+LATENCY_MS: 17157
+
+--- PROMPT ---
+Messages appearing twice in store. Fix the retry logic. Return the updated code.
+
+## Codebase (2 files)
+
+### FILE 1/2: code_snippets_v2/retry_dup_b/sender.py ###
+```python
+"""Message sender with retry and store integration."""
+
+from store import append, notify, get_messages, get_notifications
+
+_attempt_count = 0
+
+
+def reset():
+    global _attempt_count, _messages, _notifications
+    _attempt_count = 0
+    _messages = []
+    _notifications = []
+
+
+def send(msg, fail_first=False):
+    """Send a message: store it and notify.
+
+    If fail_first is True, raises on first call to simulate transient error.
+    """
+    global _attempt_count
+    _attempt_count += 1
+    if fail_first and _attempt_count == 1:
+        raise ConnectionError("transient failure")
+    append(msg)
+    notify(msg)
+    return True
+
+
+def send_with_retry(msg, max_retries=2, fail_first=False):
+    """Retry send on transient errors."""
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            send(msg, fail_first=fail_first)
+            # BUG: no break after success — continues loop, duplicating
+        except ConnectionError as e:
+            last_error = e
+            continue
+    return True
+
+
+def get_attempt_count():
+    return _attempt_count
+```
+
+### FILE 2/2: code_snippets_v2/retry_dup_b/store.py ###
+```python
+"""Message store with notification tracking."""
+
+_messages = []
+_notifications = []
+
+
+def reset():
+    global _messages, _notifications
+    _messages = []
+    _notifications = []
+
+
+def append(msg):
+    """Store a message."""
+    _messages.append(msg)
+
+
+def notify(msg):
+    """Record a notification for the message."""
+    _notifications.append({"msg": msg, "notified": True})
+
+
+def get_messages():
+    return list(_messages)
+
+
+def get_notifications():
+    return list(_notifications)
+
+
+def message_count():
+    return len(_messages)
+```
+
+You are fixing a bug using a structured reasoning process.
+
+Follow this procedure exactly. Return a SINGLE valid JSON object.
+
+## STEP 1 — Diagnose
+
+Identify the root cause: name the exact function, variable, and causal relationship.
+
+## STEP 2 — Plan fix
+
+Describe the concrete code change and why it addresses the mechanism.
+
+## STEP 3 — Risk check (CRITICAL)
+
+Before finalizing your code, answer:
+
+What is the most likely way this fix could still fail?
+
+If that failure is real, REVISE your fix before writing the final code.
+If it is not real, explain concisely why the fix is safe.
+
+## STEP 4 — Return fixed code
+
+Return your response as JSON with this exact schema:
+
+{"root_cause": "<exact function + variable + causal relationship>", "fix_strategy": "<what change and why it breaks the bug mechanism>", "risk_check": "<most likely failure mode of your fix, and whether you revised>", "files": {""code_snippets_v2/retry_dup_b/sender.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/retry_dup_b/store.py": "<complete file contents or UNCHANGED>""}}
+
+RULES:
+- All four fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file.
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "send_with_retry (function) + missing loop exit (no break/return after successful send) + causal relationship: when send succeeds on an intermediate retry the for-loop continues, causing append() and notify() to be called again and producing duplicate messages in the store.",
+  "fix_strategy": "Return immediately after a successful send (or break the loop). Specifically, in send_with_retry, call send(...) inside try and then return True on success. If all attempts raise ConnectionError, re-raise the last ConnectionError so callers can observe the failure. This prevents subsequent iterations from re-invoking send and duplicating stored messages.",
+  "risk_check": "Most likely remaining failure mode: send() could raise exceptions other than ConnectionError (e.g., ValueError, RuntimeError). Those exceptions will still propagate (which is acceptable if they are non-transient). Another possible issue is callers expecting send_with_retry to return False instead of raising after exhausted retries; to be safe I chose to re-raise the last ConnectionError so callers can detect persistent failure. This behavior is intentional and considered safe for retry semantics, so no revision was made.",
+  "files": {
+    "code_snippets_v2/retry_dup_b/sender.py": "\"\"\"Message sender with retry and store integration.\"\"\"\n\nfrom store import append, notify, get_messages, get_notifications\n\n_attempt_count = 0\n\n\ndef reset():\n    global _attempt_count, _messages, _notifications\n    _attempt_count = 0\n    _messages = []\n    _notifications = []\n\n\ndef send(msg, fail_first=False):\n    \"\"\"Send a message: store it and notify.\n\n    If fail_first is True, raises on first call to simulate transient error.\n    \"\"\"\n    global _attempt_count\n    _attempt_count += 1\n    if fail_first and _attempt_count == 1:\n        raise ConnectionError(\"transient failure\")\n    append(msg)\n    notify(msg)\n    return True\n\n\ndef send_with_retry(msg, max_retries=2, fail_first=False):\n    \"\"\"Retry send on transient errors.\"\"\"\n    last_error = None\n    for attempt in range(max_retries):\n        try:\n            send(msg, fail_first=fail_first)\n            # On success, return immediately to avoid duplicate sends\n            return True\n        except ConnectionError as e:\n            last_error = e\n            continue\n    # All retries exhausted\n    if last_error:\n        raise last_error\n    return False\n\n\ndef get_attempt_count():\n    return _attempt_count\n",
+    "code_snippets_v2/retry_dup_b/store.py": "UNCHANGED"
+  }
+}

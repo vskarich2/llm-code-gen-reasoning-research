@@ -1,0 +1,204 @@
+=== CALL 000170 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: silent_default_a
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:38:52.757255
+LATENCY_MS: 21739
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+is_enabled function + FLAGS dict + .get operation: is_enabled(flag_name) directly calls FLAGS.get(flag_name, False) so when callers pass camelCase (e.g. 'darkMode') but FLAGS uses snake_case ('dark_mode'), the lookup fails and .get silently returns the default False.
+
+## Failure Mechanism
+caller passes 'darkMode' → is_enabled receives 'darkMode' and does FLAGS.get('darkMode', False) → dictionary has only 'dark_mode' key, so get returns the default False → caller observes the feature as disabled even though FLAGS['dark_mode'] == True → incorrect behavior propagates to feature gating code.
+
+## Broken Invariant
+For any logical feature key X where FLAGS contains a snake_case key (e.g. 'dark_mode'), is_enabled should return the same boolean for both the snake_case and the camelCase variants: is_enabled('dark_mode') == is_enabled('darkMode'). This property is currently violated (is_enabled('dark_mode') == True, but is_enabled('darkMode') == False).
+
+## Fix Strategy
+Normalize incoming flag names to snake_case before lookup. Implement a small helper _to_snake(flag_name) that converts camelCase or PascalCase to snake_case in a predictable way, validate input types, and then perform lookup against FLAGS using the normalized key. To avoid silently masking unknown flags while keeping backward compatibility, warn (warnings.warn) when an unknown normalized key is requested and continue to return False (preserves the original return-on-missing behavior). This breaks the causal chain by ensuring that a caller passing 'darkMode' is normalized to 'dark_mode' and will correctly find FLAGS['dark_mode'].
+
+
+## Self-Check
+{'failure_scenario': 'If a caller passes a non-str value (e.g. None or an integer), _to_snake will raise a TypeError because normalization expects a string. This will cause is_enabled to raise rather than return False. This is intentional: passing non-string flag names is a usage error. The code explicitly checks and raises TypeError with a clear message.', 'edge_case': "Flags with embedded numbers or consecutive capitals (e.g. 'HTTP2Support' or 'enableX11') may convert to forms like 'http2_support' or 'enable_x11'. If FLAGS uses a different naming convention for acronyms (e.g. 'http_2_support' or 'enable_x_11'), the normalization will not match and the module will warn and return False. This is a boundary condition dependent on the project's naming choices.", 'invariant_check': "Multiple calls: _to_snake is pure and deterministic, so repeated calls with the same input produce the same normalized key; multiple is_enabled calls do not mutate FLAGS. Retries/loops: repeated calls still normalize and look up the same way, so behavior is stable. State reuse: FLAGS is unchanged by is_enabled; no state is stored per-call. The invariant (is_enabled('camelCase') == is_enabled('snake_case')) holds for typical camelCase ↔ snake_case conversions (e.g. 'darkMode' ↔ 'dark_mode').", 'conclusion': 'No critical flaw found in the chosen approach. The fix centralizes normalization in is_enabled, preserves prior missing-key semantics by returning False, and emits a warning to make silent failures visible. The remaining minor risk is naming mismatches for special casing (acronyms/numeric boundaries); that is a documentation/naming-policy issue rather than a lookup bug. If stricter behavior is desired (e.g. raising on unknown flags), the warnings.warn line can be replaced with a raise to make unknown lookups fail loudly.'}
+
+
+# Task Description
+Refactor this feature flag module for clarity. Return the updated code.
+
+# Code Produced
+```python
+import re
+import warnings
+
+"""Feature flag system with snake_case keys.
+
+This module accepts both snake_case and camelCase flag names in is_enabled by
+normalizing inputs to snake_case. Unknown flags return False (preserving the
+original behavior) but emit a warning so missing lookups are visible during
+development.
+"""
+
+FLAGS = {
+    "dark_mode": True,
+    "beta_features": False,
+    "new_dashboard": True,
+    "analytics_v2": False,
+}
+
+
+def _to_snake(name):
+    """Normalize a flag name to snake_case.
+
+    Accepts camelCase, PascalCase, or already snake_case strings and returns
+    a predictable snake_case representation. Raises TypeError for non-str
+    inputs.
+    """
+    if not isinstance(name, str):
+        raise TypeError(f"flag_name must be a str, got {type(name)!r}")
+    if not name:
+        return ""
+    # Insert underscores between lower->Upper or number->Upper transitions,
+    # then collapse sequences, finally lowercase.
+    s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
+    s2 = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1)
+    return s2.replace('-', '_').lower()
+
+
+def is_enabled(flag_name):
+    """Check if a feature flag is enabled.
+
+    Args:
+        flag_name: the flag key to look up. Can be snake_case or camelCase.
+
+    Returns:
+        True if the feature flag is enabled, False otherwise.
+
+    Behavior notes:
+    - Incoming names are normalized to snake_case before lookup (so callers can
+      use camelCase like 'darkMode' and still find 'dark_mode').
+    - If the normalized flag is not present in FLAGS, the function returns
+      False (maintaining prior behavior) but emits a UserWarning to avoid
+      silently masking configuration problems.
+    """
+    normalized = _to_snake(flag_name)
+
+    if normalized in FLAGS:
+        return FLAGS[normalized]
+
+    warnings.warn(
+        "Unknown feature flag '%s' (normalized: '%s'). Returning False." % (flag_name, normalized),
+        UserWarning,
+    )
+    return False
+
+
+def list_flags():
+    """Return all flag names (snake_case) currently configured."""
+    return list(FLAGS.keys())
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If is_enabled normalized keys (or callers used snake_case), the observed false-negative would not occur.
+Evidence: - Reasoning points to is_enabled + FLAGS.get(flag_name, False) causing misses for 'darkMode'; - FLAGS contains 'dark_mode': True so a plain .get with 'darkMode' would return the default False; - Produced code calls _to_snake(flag_name) and uses "normalized in FLAGS" then returns FLAGS[normalized] (or warnings.warn + False) which implements the normalization fix; - _to_snake raises TypeError for non-str inputs as claimed; - warnings.warn preserves original missing-key False return while surfacing the problem.
+Judgment: The developer's reasoning is accurate, complete, and grounded in the code: the causal chain (naming mismatch → failed dict lookup → false default → incorrect feature gating) is correctly identified and the proposed and implemented fix (normalize to snake_case and warn) directly addresses it; remaining concerns are correctly limited to edge-case naming conventions (acronyms/numbers).

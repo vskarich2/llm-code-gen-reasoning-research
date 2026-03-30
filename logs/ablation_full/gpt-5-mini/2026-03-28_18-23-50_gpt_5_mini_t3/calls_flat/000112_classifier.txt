@@ -1,0 +1,193 @@
+=== CALL 000112 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: temporal_drift_a
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:13:02.944936
+LATENCY_MS: 39105
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+pipeline: the variable raw_stats is computed by calling compute_raw_stats(cleaned) (operation) where 'cleaned' is the normalized version of the input rather than the original input data (causal relationship: passing the wrong variable to compute_raw_stats causes raw_stats to reflect normalized values).
+
+## Failure Mechanism
+Call pipeline(data) → pipeline first calls normalize(data) producing 'cleaned' (normalized values) → pipeline calls compute_raw_stats(cleaned) (wrong input) → compute_raw_stats computes max/min/sum over normalized values instead of original values → observable failure: the reported raw_stats (raw_max/raw_min/raw_sum) do not match statistics of the original input data (invariant violated e.g., raw_max != max(original_data)).
+
+## Broken Invariant
+raw_stats must reflect the original (untransformed) input data: for any non-empty input sequence S, pipeline(S)['raw_stats']['raw_max'] == max(S) (similarly for raw_min and raw_sum). This property is violated by the current code.
+
+## Fix Strategy
+Modify pipeline to ensure compute_raw_stats receives the original input values. Additionally, to avoid introducing a new bug when 'data' is an iterator/generator (which would be consumed by the first pass), convert the input to a stable sequence once at the start of pipeline: coerce to a list while preserving behavior for None and scalar inputs. Then compute raw_stats from that list and compute cleaned = normalize(list). This breaks the causal chain because compute_raw_stats will now receive the original values (not normalized ones), and using a converted list prevents generator-consumption ordering issues.
+
+
+## Self-Check
+{'failure_scenario': 'If pipeline simply called compute_raw_stats(data) then normalize(data) and the caller passed a generator, the generator would be consumed by the first call and normalize would produce an empty cleaned list. I addressed that by converting the input to a sequence (list) at the start. Another potential failure: if data is None or a scalar, list(data) would raise; I handle that by converting None to [] and scalars to single-element lists.', 'edge_case': 'Inputs: None, empty list, generator, tuple, or a scalar value. The code uses a helper conversion (_to_sequence) to produce a stable list for all these: None -> [], generator -> list(gen) (consumes generator once and preserves values), scalar -> [scalar]. For empty inputs, compute_raw_stats returns zeros per existing behavior; normalize returns [].', 'invariant_check': 'Under multiple calls: pipeline([]) returns raw_stats with zeros and cleaned as []; subsequent calls are independent because we do not mutate global state. Under retries/loops: each call converts the provided input to a fresh list, so no residual state is reused. Under state reuse: if the caller reuses the same generator object across calls, they must be aware generators are consumed; our code consumes it into a list in the first call, so subsequent calls using the same generator will be empty — this is unchanged in behavior compared to typical expectations. The specific invariant (raw_stats corresponds to original values) holds because we compute raw_stats from seq before normalization and seq is a stable list copy of the original values.', 'conclusion': 'No flaw remains with respect to the original bug (raw_stats reflecting normalized data). The added conversion to a sequence addresses generator-consumption issues and handles None/scalar inputs robustly. Therefore the fix is safe with respect to the described invariant and common edge cases.'}
+
+
+# Task Description
+Refactor this metrics pipeline for clarity. Return the updated code.
+
+# Code Produced
+```python
+"""Metrics pipeline: compute raw stats before transforming data."""
+
+
+def compute_raw_stats(data):
+    """Compute statistics on raw (untransformed) data."""
+    if not data:
+        return {"raw_max": 0, "raw_min": 0, "raw_sum": 0}
+    return {
+        "raw_max": max(data),
+        "raw_min": min(data),
+        "raw_sum": sum(data),
+    }
+
+
+def normalize(data):
+    """Normalize data to 0-1 range."""
+    if not data:
+        return []
+    lo, hi = min(data), max(data)
+    if hi == lo:
+        return [0.5] * len(data)
+    return [(x - lo) / (hi - lo) for x in data]
+
+
+def _to_sequence(data):
+    """Convert input to a stable sequence (list).
+
+    Preserves behavior for None and scalar inputs:
+    - None -> []
+    - iterable -> list(iterable)
+    - scalar (non-iterable) -> [scalar]
+    """
+    if data is None:
+        return []
+    try:
+        return list(data)
+    except TypeError:
+        # data is not iterable (scalar), treat as single-element sequence
+        return [data]
+
+
+def pipeline(data):
+    """Run pipeline: raw stats on original data, then normalize.
+
+    raw_stats MUST reflect the original data, not the normalized version.
+    This function converts the input to a stable list up-front to avoid
+    generator-consumption ordering issues.
+    """
+    seq = _to_sequence(data)
+    raw_stats = compute_raw_stats(seq)
+    cleaned = normalize(seq)
+    return {"raw_stats": raw_stats, "cleaned": cleaned}
+
+
+def format_report(result):
+    """Format pipeline result for display."""
+    return f"max={result['raw_stats']['raw_max']}"
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;TEMPORAL_ORDERING
+HIGH
+Counterfactual: If compute_raw_stats were given the original input (not the normalized output), the mismatching raw_stats failure would not occur.
+Evidence: - Original fault: compute_raw_stats was described as being called with cleaned (normalized) data so max/min/sum came from normalized values; - In the produced code pipeline converts input once: seq = _to_sequence(data); - Then raw_stats = compute_raw_stats(seq) and cleaned = normalize(seq) so raw_stats are computed from original values; - compute_raw_stats uses max/min/sum and normalize uses min/max, so ordering and argument choice directly determine the observable mismatch; - _to_sequence addresses generator-consumption and None/scalar handling as claimed.
+Judgment: The developer's reasoning forms a valid causal chain (wrong argument → wrong stats → invariant violation), identifies a clear testable invariant, and the submitted code implements the proposed fix and generator/None handling exactly as described.

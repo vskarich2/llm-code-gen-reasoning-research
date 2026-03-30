@@ -1,0 +1,88 @@
+=== CALL 000060 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: effect_order_a
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:45:10.971970
+LATENCY_MS: 25154
+
+--- PROMPT ---
+Refactor this event processor for clarity. Return the updated code.
+
+## Codebase (1 file)
+
+### FILE 1/1: code_snippets_v2/effect_order_a/processor.py ###
+```python
+"""Batch processor with per-item snapshots."""
+
+_counter = 0
+_snapshots = []
+
+
+def reset():
+    global _counter, _snapshots
+    _counter = 0
+    _snapshots = []
+
+
+def snapshot():
+    """Record the current counter value."""
+    _snapshots.append(_counter)
+
+
+def get_snapshots():
+    return list(_snapshots)
+
+
+def process_batch(items):
+    """Process each item: increment counter and snapshot after each."""
+    global _counter
+    for item in items:
+        _counter += item
+    # BUG: snapshot only once at end, not per-item
+    snapshot()
+    return _counter
+
+
+def verify_consistency():
+    """Each item should produce one snapshot."""
+    return len(_snapshots)
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/effect_order_a/processor.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "The bug is in process_batch: it updates the module-level counter (_counter) inside the loop but calls snapshot() only once after the loop, so the module-level list _snapshots (the variable recording per-item snapshots) is appended a single time instead of once per processed item. The causal relationship is that process_batch controls when snapshots are recorded but it invokes snapshot() at the wrong time (after the loop) causing under-recording in _snapshots.",
+  "failure_mechanism": "For example, call reset(); then process_batch([1, 2, 3]). process_batch increases _counter three times (0 -> 1 -> 3 -> 6) but snapshot() is called only once at the end, so _snapshots becomes length 1 instead of length 3. Any code that expects one snapshot per item (for instance, checking snapshot counts or replaying state per item) will observe too few snapshots and will treat the batch as if it produced fewer effects.",
+  "broken_invariant": "After processing N items, the number of recorded snapshots must equal the number of processed items. Formally: reset(); process_batch(items); verify_consistency() should return True and len(get_snapshots()) == len(items). The original code violates this because len(get_snapshots()) becomes 1 regardless of len(items) > 0.",
+  "fix_strategy": "I changed process_batch to record a snapshot immediately after each per-item counter update and introduced an explicit _processed_count to track how many items have been processed. I renamed the low-level snapshot function to record_snapshot for clarity and kept snapshot as a backward-compatible wrapper. verify_consistency now returns a boolean comparing _processed_count to len(_snapshots). This directly fixes the mechanism: snapshots are appended inside the loop once per item, and consistency is testably enforced by comparing the two counters.",
+  "files": {
+    "code_snippets_v2/effect_order_a/processor.py": " \"\"\"Batch processor with per-item snapshots.\n\nThis module maintains a running counter and records a snapshot of the counter after\neach processed item. It exposes functions to reset state, process a batch of items,\nretrieve snapshots, and verify that each processed item produced exactly one snapshot.\n\"\"\"\n\n# Module-level state\n_counter = 0\n_snapshots = []\n_processed_count = 0\n\n\ndef reset():\n    \"\"\"Reset the counter, snapshot list, and processed-item count.\"\"\"\n    global _counter, _snapshots, _processed_count\n    _counter = 0\n    _snapshots = []\n    _processed_count = 0\n\n\ndef record_snapshot():\n    \"\"\"Record the current counter value into the snapshots list.\n\n    This is the clearer, explicit name for the operation. The old name\n    snapshot() is preserved as a thin wrapper for backward compatibility.\n    \"\"\"\n    _snapshots.append(_counter)\n\n\ndef snapshot():\n    \"\"\"Backward-compatible wrapper for record_snapshot().\"\"\"\n    record_snapshot()\n\n\ndef get_snapshots():\n    \"\"\"Return a shallow copy of the snapshots recorded so far.\"\"\"\n    return list(_snapshots)\n\n\ndef process_batch(items):\n    \"\"\"Process each item by adding it to the counter and recording a snapshot.\n\n    For each item in items:\n    - increment the running counter by the item's value\n    - record a snapshot immediately after that increment\n\n    Returns the updated counter value.\n    \"\"\"\n    global _counter, _processed_count\n    for item in items:\n        _counter += item\n        # Record a snapshot for this item (one snapshot per processed item)\n        record_snapshot()\n        _processed_count += 1\n    return _counter\n\n\ndef verify_consistency():\n    \"\"\"Verify that exactly one snapshot was recorded per processed item.\n\n    Returns True when the number of snapshots equals the number of processed items,\n    otherwise False.\n    \"\"\"\n    return _processed_count == len(_snapshots)\n"
+  }
+}

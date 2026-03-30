@@ -1,0 +1,177 @@
+=== CALL 000032 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: stale_cache_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:36:05.635083
+LATENCY_MS: 25530
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+catalog.update_product: missing call to cache.invalidate(product_id) after _db[product_id].update(fields) — the cache entry for product_id remains stale because invalidate is not invoked.
+
+## Failure Mechanism
+Caller calls update_product(product_id, price=new_price) → update_product updates the in-memory DB object _db[product_id].update({...}) but does not remove the cached snapshot stored earlier by get_product (cache.put(product_id, dict(product))). Because the cache still contains the old snapshot, a subsequent get_product(product_id) returns the cached old value (cached is not None branch), so the updated price in _db is never observed by callers — observable failure: product shows old price.
+
+## Broken Invariant
+Invariant: After update_product(product_id, ...) returns True, a subsequent get_product(product_id) must return a product mapping whose fields reflect the update. This is violated: before the fix, get_product can return the pre-update cached mapping.
+
+## Fix Strategy
+Call invalidate(product_id) in update_product after updating the DB. This ensures any previously cached snapshot for that product_id is removed, breaking the causal chain: update → stale cached snapshot remains → subsequent get_product returns stale snapshot. With invalidate called, the cache will be empty for that key after update, forcing get_product to read the updated DB and re-populate the cache with the fresh values.
+
+
+## Self-Check
+{'failure_scenario': 'If update_product is called for a product_id not present in _db, the function returns False and does not call invalidate. Scenario: a caller mistakenly calls update_product for a non-existent id while there is an old cache entry for that id from a prior state; since update_product returns False, we intentionally do not invalidate in that path. That is correct behavior (no DB change), but if callers expect update_product to remove cache entries for nonexistent IDs, they may still observe stale cache. This is a policy choice. Current code keeps behavior: no cache invalidation on missing product.', 'edge_case': "Concurrent readers: if a thread calls get_product at the same time as update_product, there is a race: get_product may read cached value or DB depending on ordering. Because there is no locking, it's possible get_product returns the old cached value if it reads cache before invalidate executes. This fix does not add synchronization; it only ensures eventual consistency for subsequent calls after invalidate completes.", 'invariant_check': 'Under the code with the change (invalidate called after _db update):\n- Multiple calls: Repeated update_product(product_id, ...) will update _db and invalidate cache each time; subsequent get_product will re-populate cache with the latest DB object. Example trace: add_product -> get_product caches value -> update_product updates DB and calls invalidate -> get_product sees cache miss and caches updated snapshot -> returns updated fields. The invariant holds for multiple sequential updates.\n- Retries / loops: If update_product is retried and returns True, each successful call invalidates cache, so loops performing updates will leave cache empty until a get_product repopulates it with the latest state.\n- State reuse: reset() already clears both _db and cache by calling clear from cache; the fix does not change this behavior. After reset, no stale cache remains.\nThus the invariant (get_product reflects last successful update) is satisfied after update_product returns True and no concurrent races occur.\nConcrete code references: update_product now does _db[product_id].update(fields) followed by invalidate(product_id), ensuring get(product_id) will return None and force fresh read from _db in get_product.', 'conclusion': 'No flaw detected in the targeted causal chain: calling invalidate(product_id) immediately after updating _db breaks the chain that allowed a stale cached snapshot to be served. The remaining risks are concurrency races and the deliberate choice not to invalidate on update_product failure (product missing). Those are out of scope for the minimal fix and are documented above. Therefore the fix is safe for the stated bug.'}
+
+
+# Task Description
+Products show old prices after updates. Fix the catalog. Return the updated code.
+
+# Code Produced
+```python
+"""Product catalog using external cache module."""
+
+from cache import get, put, invalidate
+
+_db = {}
+
+
+def add_product(product_id, name, price):
+    """Add a product to the database."""
+    _db[product_id] = {"name": name, "price": price}
+
+
+def get_product(product_id):
+    """Get product, checking cache first."""
+    cached = get(product_id)
+    if cached is not None:
+        return cached
+    product = _db.get(product_id)
+    if product is not None:
+        put(product_id, dict(product))
+    return _db.get(product_id)
+
+
+def update_product(product_id, **fields):
+    """Update product in DB.
+
+    Invariant: subsequent get_product() must reflect the update.
+    """
+    if product_id not in _db:
+        return False
+    _db[product_id].update(fields)
+    # Ensure cache does not hold a stale snapshot for this product
+    invalidate(product_id)
+    return True
+
+
+def reset():
+    """Clear DB and cache."""
+    _db.clear()
+    from cache import clear
+    clear()
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;TEMPORAL_ORDERING
+HIGH
+Counterfactual: If update_product always invalidated the cache immediately after mutating _db, the stale cached reads described would not occur.
+Evidence: update_product calls _db[product_id].update(fields) which mutates the in-memory record; get_product first calls get(product_id) and returns that cached snapshot when not None; get_product caches a copy via put(product_id, dict(product)); prior to the fix update_product did not call invalidate(product_id) so a cached old snapshot could be returned; the supplied code now calls invalidate(product_id) immediately after _db update (but no locking is present).
+Judgment: The developer presents a complete, code-grounded causal chain and the proposed fix (invalidate after update) directly addresses it; remaining legitimate concerns (race between concurrent get/update and policy about invalidating on missing IDs) are noted and do not invalidate the core diagnosis.

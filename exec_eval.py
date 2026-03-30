@@ -19,9 +19,9 @@ _eval_log = logging.getLogger("t3.exec_eval")
 from parse import (
     extract_code,
     extract_all_code_blocks,
-    strip_local_imports as _strip_local_imports,
-    STDLIB_MODULES as _STDLIB_MODULES,
 )
+
+from code_assembly import CodeAssembler, AssemblyResult
 
 # ============================================================
 # MODULE LOADING
@@ -33,19 +33,18 @@ _load_counter = itertools.count(1)
 def load_module_from_code(code: str, name: str = "candidate") -> ModuleType:
     """Load a string of Python code as a module.
 
-    Strips local cross-file imports since all code is concatenated.
+    Import stripping is handled by CodeAssembler BEFORE this function.
+    This function does NOT strip imports — it receives already-assembled code.
     Thread-safe: uses itertools.count() (atomic on CPython).
     """
     mod_name = f"_t3_exec_{name}_{next(_load_counter)}"
-
-    cleaned = _strip_local_imports(code)
 
     spec = importlib.util.spec_from_loader(mod_name, loader=None)
     mod = importlib.util.module_from_spec(spec)
     mod.__dict__["__builtins__"] = __builtins__
 
     try:
-        exec(compile(cleaned, f"<{mod_name}>", "exec"), mod.__dict__)
+        exec(compile(code, f"<{mod_name}>", "exec"), mod.__dict__)
     except SyntaxError as e:
         raise SyntaxError(f"Candidate code syntax error: {e}") from e
 
@@ -697,93 +696,34 @@ def _run_mutation_tests(mod, case_id: str) -> tuple[bool, list[str]]:
 # ============================================================
 
 
-def _assemble_program(model_code: str, case: dict) -> dict:
-    """Assemble executable program from model output + original case files.
+def _assemble_program(model_code: str, case: dict) -> AssemblyResult:
+    """Assemble executable program via CodeAssembler.
 
-    For multi-file cases, ALWAYS prepends original files as base, then
-    appends model code on top (model definitions override originals).
-    No heuristic guessing about completeness.
-
-    Returns dict:
-        code: str             — assembled code ready for execution
-        assembly_used: bool   — whether original files were prepended
-        assembly_risky: bool  — whether duplicate definitions were detected
-        duplicate_defs: list  — names defined in both original and model code
-        sources: dict         — provenance: which files contributed
+    Delegates to code_assembly.py — the single source of truth for assembly.
     """
-    import re
+    asm = CodeAssembler().assemble(model_code, case)
 
-    code_contents = case.get("code_files_contents", {})
-
-    # Single-file case or no original files: no assembly
-    if not code_contents or len(code_contents) <= 1:
-        return {
-            "code": model_code,
-            "assembly_used": False,
-            "assembly_risky": False,
-            "duplicate_defs": [],
-            "sources": {"model_only": True},
-        }
-
-    # Multi-file case: ALWAYS assemble (no heuristic skip)
-    # Strategy: original files as base → model code appended on top
-    # Python executes top-to-bottom: model's definitions override originals
-
-    original_parts = []
-    original_files_used = []
-    for rel_path in case.get("code_files", []):
-        content = code_contents.get(rel_path, "")
-        if content:
-            original_parts.append(content)
-            original_files_used.append(rel_path)
-
-    original_concat = "\n\n".join(original_parts)
-    original_cleaned = _strip_local_imports(original_concat)
-    model_cleaned = _strip_local_imports(model_code)
-
-    # Detect duplicate definitions (defined in both original and model)
-    model_defs = set(re.findall(r"^(?:def|class)\s+(\w+)", model_cleaned, re.MULTILINE))
-    original_defs = set(re.findall(r"^(?:def|class)\s+(\w+)", original_cleaned, re.MULTILINE))
-    duplicates = sorted(model_defs & original_defs)
-
-    # Detect rename error: model must define the function that the fix targets.
-    # If the model renamed it instead of overriding, the original buggy version
-    # will run and the model's fix is silently ignored.
-    #
-    # We use reference_fix.function as the expected override target, but ONLY
-    # fire rename_error when that function exists in the ORIGINAL code (proving
-    # it's a real entry point that must be overridden, not a metadata error).
-    expected_func = case.get("reference_fix", {}).get("function", "")
-    rename_error = False
-    if expected_func and expected_func in original_defs and expected_func not in model_defs:
-        rename_error = True
+    if asm.rename_error:
         _eval_log.warning(
             "RENAME DETECTED: case %s expects model to define '%s' but model defines: %s. "
             "Original buggy '%s' will run instead of model's fix.",
             case.get("id", "?"),
-            expected_func,
-            sorted(model_defs),
-            expected_func,
+            asm.expected_func,
+            asm.sources.get("model_defs", []),
+            asm.expected_func,
         )
 
-    # Assemble: original base + model overlay
-    assembled = original_cleaned + "\n\n" + model_cleaned
+    if asm.rewrites_applied:
+        _eval_log.info(
+            "ASSEMBLY: %s — %d import rewrites applied",
+            case.get("id", "?"),
+            len(asm.rewrites_applied),
+        )
 
-    return {
-        "code": assembled,
-        "assembly_used": True,
-        "assembly_risky": len(duplicates) > 0,
-        "rename_error": rename_error,
-        "expected_func": expected_func,
-        "duplicate_defs": duplicates,
-        "sources": {
-            "model_only": False,
-            "original_files": original_files_used,
-            "model_defs": sorted(model_defs),
-            "original_defs": sorted(original_defs),
-            "overridden": duplicates,
-        },
-    }
+    for w in asm.warnings:
+        _eval_log.info("ASSEMBLY WARNING: %s — %s", case.get("id", "?"), w)
+
+    return asm
 
 
 def exec_evaluate(case: dict, code: str) -> dict:
@@ -816,26 +756,24 @@ def exec_evaluate(case: dict, code: str) -> dict:
 
     # Step 1.5: Multi-file assembly
     asm = _assemble_program(code, case)
-    assembled_code = asm["code"]
-    assembly_used = asm["assembly_used"]
+    assembled_code = asm.code
+    assembly_used = asm.assembly_used
 
-    if asm["assembly_risky"]:
+    if asm.assembly_risky:
         _eval_log.info(
             "ASSEMBLY: %s has duplicate defs (overridden by model): %s",
             case_id,
-            asm["duplicate_defs"],
+            asm.duplicate_defs,
         )
 
     # Step 1.6: Rename detection — model failed to override the target function.
-    # This is a MODEL failure (wrong function name), NOT an assembly/infrastructure failure.
-    # Result is included in metrics (exec_pass=False, assembly_error=False).
-    if asm.get("rename_error"):
+    if asm.rename_error:
         return _result(
             case_id,
             False,
             0.0,
             [
-                f"rename error: model does not define '{asm['expected_func']}' — "
+                f"rename error: model does not define '{asm.expected_func}' — "
                 f"original buggy function would run instead of model's fix"
             ],
             [case["failure_mode"]],
@@ -845,14 +783,13 @@ def exec_evaluate(case: dict, code: str) -> dict:
                 assembly_used=assembly_used,
                 assembly_error=False,
                 rename_error=True,
-                assembly_risky=asm.get("assembly_risky", False),
-                assembly_sources=asm.get("sources"),
+                assembly_risky=asm.assembly_risky,
+                assembly_sources=asm.sources,
             ),
             extracted_code=extracted,
         )
 
     # Step 2: Load module — runtime-based assembly validation
-    # Any NameError/ImportError here = assembly failure, NOT logic error
     assembly_error = False
     try:
         mod = load_module_from_code(assembled_code, case_id)
@@ -869,8 +806,8 @@ def exec_evaluate(case: dict, code: str) -> dict:
                 total_tests=0,
                 assembly_used=assembly_used,
                 assembly_error=False,
-                assembly_risky=asm["assembly_risky"],
-                assembly_sources=asm["sources"],
+                assembly_risky=asm.assembly_risky,
+                assembly_sources=asm.sources,
             ),
             extracted_code=extracted,
         )
@@ -887,8 +824,8 @@ def exec_evaluate(case: dict, code: str) -> dict:
                 total_tests=0,
                 assembly_used=assembly_used,
                 assembly_error=True,
-                assembly_risky=asm["assembly_risky"],
-                assembly_sources=asm["sources"],
+                assembly_risky=asm.assembly_risky,
+                assembly_sources=asm.sources,
             ),
             extracted_code=extracted,
         )
@@ -911,8 +848,8 @@ def exec_evaluate(case: dict, code: str) -> dict:
                 total_tests=0,
                 assembly_used=assembly_used,
                 assembly_error=is_unresolved,
-                assembly_risky=asm["assembly_risky"],
-                assembly_sources=asm["sources"],
+                assembly_risky=asm.assembly_risky,
+                assembly_sources=asm.sources,
             ),
             extracted_code=extracted,
         )
@@ -931,8 +868,8 @@ def exec_evaluate(case: dict, code: str) -> dict:
     # Assembly metadata for all downstream results
     _asm_kw = dict(
         assembly_used=assembly_used,
-        assembly_risky=asm["assembly_risky"],
-        assembly_sources=asm["sources"],
+        assembly_risky=asm.assembly_risky,
+        assembly_sources=asm.sources,
     )
 
     # Tests actually run from here — total_tests is measured, not assumed

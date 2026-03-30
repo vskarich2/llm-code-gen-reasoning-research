@@ -1,0 +1,179 @@
+=== CALL 000090 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: retry_dup_b
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:56:56.912991
+LATENCY_MS: 23649
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In sender.py, the function send_with_retry calls send repeatedly in a for loop (for attempt in range(max_retries)) but does not stop (no return or break) when send succeeds. Because send performs append(msg) and notify(msg), a successful send in an early iteration is followed by additional send calls that append and notify the same message again. Additionally, sender.reset attempted to reset store state by assigning to _messages and _notifications local names (global _messages/_notifications were not defined in this module) instead of calling the store's reset, so reset() did not actually clear the store.
+
+## Failure Mechanism
+Concrete scenario: call send_with_retry('hello') with default max_retries=2 and fail_first=False. On attempt 0 send('hello') succeeds and calls append('hello') and notify('hello'). Because send_with_retry does not return/break after success, the loop continues to attempt 1 and calls send('hello') a second time, producing a second append and notification. The store ends up with two identical messages and two notifications even though the caller expected exactly one successful send. Separately, calling sender.reset() attempted to create local lists named _messages/_notifications instead of invoking the store.reset() function, so the store's _messages remained unchanged and the attempt counter could be reset while stored messages persisted.
+
+## Broken Invariant
+After a successful call to send_with_retry(msg, ...), the store must contain exactly one appended message for that msg; equivalently, when send does not raise any ConnectionError the number of stored messages must increase by exactly one. Also, calling sender.reset() must clear the store's messages and notifications (i.e., store.message_count() == 0 after reset).
+
+## Fix Strategy
+Stop retrying once send succeeds by returning immediately from send_with_retry inside the try block; this prevents duplicate append/notify calls. Also fix reset() to call the store's reset() function so that the store's _messages and _notifications are actually cleared. The change ensures a single successful send produces only one append/notify and that reset clears the shared store state.
+
+
+# Task Description
+Messages appearing twice in store. Fix the retry logic. Return the updated code.
+
+# Code Produced
+```python
+"""Message sender with retry and store integration."""
+
+from store import append, notify, get_messages, get_notifications, reset as store_reset
+
+_attempt_count = 0
+
+
+def reset():
+    global _attempt_count
+    _attempt_count = 0
+    # delegate to the store's reset so stored messages/notifications are cleared
+    store_reset()
+
+
+def send(msg, fail_first=False):
+    """Send a message: store it and notify.
+
+    If fail_first is True, raises on first call to simulate transient error.
+    """
+    global _attempt_count
+    _attempt_count += 1
+    if fail_first and _attempt_count == 1:
+        raise ConnectionError("transient failure")
+    append(msg)
+    notify(msg)
+    return True
+
+
+def send_with_retry(msg, max_retries=2, fail_first=False):
+    """Retry send on transient errors."""
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            send(msg, fail_first=fail_first)
+            # on success, stop retrying to avoid duplicate append/notify
+            return True
+        except ConnectionError as e:
+            last_error = e
+            continue
+    # all attempts failed: surface the last connection error
+    if last_error:
+        raise last_error
+    return False
+
+
+def get_attempt_count():
+    return _attempt_count
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;RETRY_LOGIC_BUG
+HIGH
+Counterfactual: If send_with_retry returned immediately on the first successful send, the duplicate append/notify would not occur.
+Evidence: - send_with_retry iterates for attempt in range(max_retries) and, per the reasoning, lacked an early return/break so send() could be invoked multiple times; - send(msg) increments _attempt_count and calls append(msg) and notify(msg), which mutate the shared store; - reset() in the provided fix calls store_reset(), addressing the original mistaken local assignment to _messages/_notifications that left the store unchanged.
+Judgment: The developer's reasoning correctly identifies the specific functions (send_with_retry, send, reset), traces how repeated calls to send cause duplicate store mutations, states a precise invariant, and proposes a fix that the code implements; the causal chain is complete and the fix aligns with the diagnosed mechanism.

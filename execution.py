@@ -11,7 +11,6 @@ from pathlib import Path
 _exec_log = logging.getLogger("t3.execution")
 from evaluator import *
 from llm import call_model, get_model_config
-from call_logger import set_call_context
 from parse import parse_model_response
 from nudges.router import get_operator_names
 
@@ -110,16 +109,8 @@ def build_prompt(case: dict, condition: str) -> tuple[str, str | None]:
 
     r = _assembly_build(components, variables)
 
-    # Set prompt provenance for call logger (consumed by next emit_call)
-    from call_logger import set_prompt_provenance
-    try:
-        from experiment_config import get_config
-        _cfg_name = get_config().experiment.name
-    except Exception:
-        _cfg_name = None
-    set_prompt_provenance(r, variables, condition=condition, config_name=_cfg_name)
-
-    return r.final_prompt, label
+    prompt_assembly = _capture_prompt_assembly(r, variables, condition, r.final_prompt)
+    return r.final_prompt, label, prompt_assembly
 
 
 def _require_assignment_op(case_id: str, kind: str) -> str:
@@ -133,152 +124,33 @@ def _require_assignment_op(case_id: str, kind: str) -> str:
     return getattr(assignment, kind)
 
 
-# ============================================================
-# LIVE METRICS EVENT EMISSION
-# ============================================================
+def _capture_prompt_assembly(rendered, variables: dict, condition: str,
+                             full_prompt: str) -> dict:
+    """Capture prompt assembly provenance with canonical schema fields.
 
-_ablation_events_path: Path | None = None
-_ablation_trial: int | None = None
-_ablation_run_id: str | None = None
-
-
-def set_ablation_context(events_path: Path | None, trial: int | None, run_id: str | None):
-    """Set ablation context for event emission. Called from runner before evaluations."""
-    global _ablation_events_path, _ablation_trial, _ablation_run_id
-    _ablation_events_path = events_path
-    _ablation_trial = trial
-    _ablation_run_id = run_id
-
-
-def _emit_metrics_event(
-    case: dict, model: str, condition: str, ev: dict, elapsed_seconds: float | None = None
-) -> None:
-    """Emit a live metrics event.
-
-    In ablation mode (events_path set): writes to per-run events.jsonl via emit_event().
-    In legacy mode: writes to old shared events.jsonl if dashboard is running.
-    Also emits to Redis stream (if available) for real-time dashboard.
+    Computes prompt_hash and variables_hash here (caller side).
+    logging_core stores these verbatim — it does not compute them.
     """
-    # Redis stream emission (fire-and-forget, never blocks)
+    import hashlib as _hl
+    import json as _j
     try:
-        from redis_metrics import emit_event as _redis_emit
+        from experiment_config import get_config
+        config_name = get_config().experiment.name
+    except Exception:
+        config_name = None
+    return {
+        "prompt_family": condition,
+        "prompt_name": rendered.plan_hash,
+        "prompt_version": config_name,
+        "prompt_hash": _hl.sha256(full_prompt.encode()).hexdigest(),
+        "template_id": rendered.final_prompt_hash,
+        "variables_hash": _hl.sha256(
+            _j.dumps(variables, sort_keys=True, default=str).encode()
+        ).hexdigest(),
+    }
 
-        _redis_emit(
-            run_id=_ablation_run_id or "default",
-            model=model,
-            trial=_ablation_trial,
-            case_id=case["id"],
-            condition=condition,
-            ev=ev,
-            elapsed_seconds=elapsed_seconds,
-        )
-    except ImportError:
-        pass  # redis package not installed
-    except Exception as e:
-        _exec_log.debug("Redis emit skipped: %s", e)
 
-    if _ablation_events_path is not None:
-        # Ablation mode: strict event emission with schema validation
-        from live_metrics import emit_event
-        from reasoning import REASONING_SCHEMA_VERSION
-
-        alignment = ev.get("alignment", {})
-        event = {
-            "case_id": case["id"],
-            "model": model,
-            "condition": condition,
-            "trial": _ablation_trial,
-            "run_id": _ablation_run_id,
-            "pass": ev.get("pass", False),
-            "score": ev.get("score", 0),
-            "reasoning_correct": ev.get("reasoning_correct"),
-            "code_correct": ev.get("code_correct"),
-            "failure_type": ev.get("failure_type"),
-            "category": alignment.get("category"),
-            "num_attempts": ev.get("num_attempts", 1),
-            "elapsed_seconds": elapsed_seconds,
-            # Schema version
-            "reasoning_schema_version": REASONING_SCHEMA_VERSION,
-            # Reasoning validation (v2)
-            "reasoning_attempted": ev.get("reasoning_attempted", False),
-            "reasoning_present": ev.get("reasoning_present", False),
-            "reasoning_lengths": ev.get("reasoning_lengths", {}),
-            # Multi-dimensional classifier (v3)
-            "mechanism_identified": ev.get("mechanism_identified"),
-            "invariant_identified": ev.get("invariant_identified"),
-            "causal_chain_complete": ev.get("causal_chain_complete"),
-            "fix_alignment": ev.get("fix_alignment"),
-            "reasoning_code_alignment": ev.get("reasoning_code_alignment"),
-            "confidence": ev.get("confidence"),
-            "classifier_mode": ev.get("classifier_mode"),
-            "reasoning_correct_mode": ev.get("reasoning_correct_mode"),
-            "classify_parse_error": ev.get("classify_parse_error"),
-            # Phase 1 observability
-            "code_present": ev.get("code_present", False),
-            "code_empty_reason": ev.get("code_empty_reason"),
-            "code_source": ev.get("code_source", "unknown"),
-            "case_validity": ev.get("case_validity", "unknown"),
-            "parse_tier": ev.get("parse_tier", -1),
-            "parse_repaired": ev.get("parse_repaired", False),
-            "recovery_applied": ev.get("recovery_applied", False),
-            "reconstruction_status": ev.get("reconstruction_status"),
-            "reconstruction_recovered": ev.get("reconstruction_recovered", False),
-            "content_normalized": ev.get("content_normalized", False),
-            "failure_source": ev.get("failure_source", "unknown"),
-            "failure_source_detail": ev.get("failure_source_detail", "unknown"),
-        }
-        # V2 conditions: include ALL v2 fields from ev dict
-        if condition in ("baseline_v2", "leg_reduction_v2", "leg_reduction_lean_v2"):
-            v2_keys = [
-                "v2_artifact", "v2_category", "legacy_compat_category",
-                "mechanism_correct", "commitments_valid", "alignment_positive",
-                "commitments_satisfied_positive",
-                "mechanism_identified_dim", "commitments_extracted_dim",
-                "commitments_satisfied_dim", "reasoning_code_alignment_dim",
-                "classify_v2_raw", "classify_v2_parse_error",
-                "counterfactual", "evidence", "judgment",
-                "commitment_source_for_classifier", "schema_variant",
-                "operator_used", "reasoning_correct_compat",
-            ]
-            for k in v2_keys:
-                if k in ev:
-                    event[k] = ev[k]
-        emit_event(event, _ablation_events_path)
-        return
-
-    # Legacy mode: old emit_event path (for non-ablation runs)
-    try:
-        from live_metrics import EVENTS_PATH
-
-        events_path = Path(__file__).parent / "logs" / "events.jsonl"
-        if events_path.exists() or events_path.parent.exists():
-            from live_metrics import emit_event as _legacy_emit
-
-            alignment = ev.get("alignment", {})
-            # Legacy events don't have trial/run_id — skip strict validation
-            event = {
-                "case_id": case["id"],
-                "model": model,
-                "condition": condition,
-                "pass": ev.get("pass", False),
-                "score": ev.get("score", 0),
-                "reasoning_correct": ev.get("reasoning_correct"),
-                "code_correct": ev.get("code_correct"),
-                "failure_type": ev.get("failure_type"),
-                "category": alignment.get("category"),
-                "num_attempts": ev.get("num_attempts", 1),
-                "elapsed_seconds": elapsed_seconds,
-            }
-            # In legacy mode, write without strict schema validation
-            import json, os
-            from datetime import datetime
-
-            event["timestamp"] = datetime.now().isoformat()
-            line = json.dumps(event, default=str) + "\n"
-            with open(events_path, "a", encoding="utf-8") as f:
-                f.write(line)
-    except Exception as e:
-        _exec_log.warning("_emit_metrics_event failed: %s: %s", type(e).__name__, e)
+# _build_metrics_payload DELETED — field extraction now in logging_core._build_canonical_and_extra()
 
 
 # ============================================================
@@ -624,7 +496,7 @@ def evaluate_case(case: dict, raw_output: str, parser: str = "standard") -> tupl
 def _propagate_observability(parsed: dict, ev: dict) -> None:
     """Copy Phase 1 observability fields from parsed to ev.
 
-    ALL callers of evaluate_case MUST call this before write_log / _emit_metrics_event.
+    ALL callers of evaluate_case MUST call this before logger.log_run / logger.end_case.
     This is the ONE place these fields are propagated — no duplication.
     """
     ev["code_present"] = parsed.get("code_present", False)
@@ -649,72 +521,83 @@ def _attempt_and_evaluate(
     case: dict,
     model: str,
     prompt: str,
+    logger,
+    condition: str,
     file_paths: list[str] | None = None,
-    call_phase: str = "generation",
-    call_condition: str = "",
-    call_attempt: int = 0,
+    phase: str = "generation",
+    prompt_assembly: dict | None = None,
+    parent_event_id: int | None = None,
 ) -> tuple[str, dict, dict]:
-    """Thin wrapper: call_model + evaluate_case. Used by run_single and run_repair_loop.
+    """Thin wrapper: call_model + evaluate_case.
 
-    Will be removed once all callers migrate to calling call_model + evaluate_case directly.
+    Logger is required and passed explicitly to call_model.
+    Stores the call event_id in ev["_last_call_event_id"] for parent chaining.
     """
-    set_call_context(
-        phase=call_phase, case_id=case["id"], condition=call_condition, attempt_index=call_attempt
+    if logger is None:
+        raise RuntimeError("_attempt_and_evaluate requires an explicit logger")
+    case["_condition"] = condition
+    raw_output = call_model(
+        prompt, model=model, raw=True,
+        logger=logger, case_id=case["id"],
+        phase=phase, condition=condition,
+        prompt_assembly=prompt_assembly,
+        parent_event_id=parent_event_id,
     )
-    case["_condition"] = call_condition  # propagate to classifier context
-    # Output instruction is now included in the prompt by build_prompt().
-    # Pass raw=True to prevent call_model from appending it again.
-    raw_output = call_model(prompt, model=model, raw=True)
     parsed, ev = evaluate_case(case, raw_output)
+    # The last event_id written is accessible via the logger's counter
+    ev["_last_call_event_id"] = logger._event_counter
     return raw_output, parsed, ev
 
 
-def run_single(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
-    """Run a single (case, condition) pair. Returns (case_id, condition, eval)."""
-    t0 = __import__("time").monotonic()
-    prompt, op_used = build_prompt(case, condition)
+def run_single(case: dict, model: str, condition: str, logger,
+               case_start_eid: int) -> tuple[str, str, dict]:
+    """Run a single (case, condition) pair. Returns (case_id, condition, eval).
 
-    # Extract file paths for V2 output format
+    Args:
+        logger: RunLogger instance. Required.
+        case_start_eid: event_id from start_case() — used as parent for LLM call.
+    """
+    if logger is None:
+        raise RuntimeError("run_single requires an explicit logger")
+    t0 = __import__("time").monotonic()
+    cid = case["id"]
+    prompt, op_used, prompt_asm = build_prompt(case, condition)
+
     file_paths = list(case.get("code_files_contents", {}).keys()) or None
 
-    # Token instrumentation
     prompt_tokens = _estimate_prompt_tokens(prompt, model)
     token_budget = _get_token_budget(model)
     token_budget_exceeded = prompt_tokens > token_budget
 
     raw_output, parsed, ev = _attempt_and_evaluate(
-        case,
-        model,
-        prompt,
+        case, model, prompt, logger, condition,
         file_paths=file_paths,
-        call_phase="generation",
-        call_condition=condition,
-        call_attempt=0,
+        phase="generation",
+        prompt_assembly=prompt_asm,
+        parent_event_id=case_start_eid,
     )
 
     ev["operator_used"] = op_used
     ev["condition"] = condition
-    # Phase 1 observability (ONE call, no duplication)
     _propagate_observability(parsed, ev)
-    # Token instrumentation
     ev["prompt_tokens"] = prompt_tokens
     ev["token_budget"] = token_budget
     ev["token_budget_exceeded"] = token_budget_exceeded
     if token_budget_exceeded:
         _exec_log.warning(
             "TOKEN BUDGET EXCEEDED: case=%s cond=%s tokens=%d budget=%d",
-            case["id"],
-            condition,
-            prompt_tokens,
-            token_budget,
+            cid, condition, prompt_tokens, token_budget,
         )
     ev["reconstruction_error"] = parsed.get("_reconstruction_error")
 
-    write_log(case["id"], condition, model, prompt, raw_output, parsed, ev)
-    _emit_metrics_event(
-        case, model, condition, ev, elapsed_seconds=round(__import__("time").monotonic() - t0, 2)
-    )
-    return case["id"], condition, ev
+    elapsed_ms = round((__import__("time").monotonic() - t0) * 1000)
+    # gen_eid is the event_id returned by log_call via _attempt_and_evaluate
+    gen_eid = ev.get("_last_call_event_id", case_start_eid)
+    end_eid = logger.end_case(cid, condition=condition, raw_ev=ev,
+                              runtime_ms=elapsed_ms, parent_event_id=gen_eid)
+    logger.log_run(cid, condition, prompt, raw_output, parsed,
+                   canonical_event_id=end_eid)
+    return cid, condition, ev
 
 
 def _estimate_prompt_tokens(prompt: str, model: str) -> int:
@@ -743,79 +626,63 @@ def _get_token_budget(model: str) -> int:
 # ============================================================
 
 
-def run_repair_loop(case: dict, model: str) -> tuple[str, str, dict]:
+def run_repair_loop(case: dict, model: str, logger,
+                    case_start_eid: int) -> tuple[str, str, dict]:
     """Attempt 1 with diagnostic. If fails, attempt 2 with error feedback."""
+    if logger is None:
+        raise RuntimeError("run_repair_loop requires an explicit logger")
     t0 = __import__("time").monotonic()
+    cid = case["id"]
     attempts = []
 
     # Attempt 1
-    prompt, _ = build_prompt(case, "repair_loop")
+    prompt, _, prompt_asm = build_prompt(case, "repair_loop")
     raw_output, parsed, ev = _attempt_and_evaluate(
-        case, model, prompt, call_phase="generation", call_condition="repair_loop", call_attempt=0
+        case, model, prompt, logger, "repair_loop",
+        phase="generation", prompt_assembly=prompt_asm,
+        parent_event_id=case_start_eid,
     )
+    gen1_eid = ev["_last_call_event_id"]
     attempts.append(
         {"attempt": 1, "pass": ev["pass"], "score": ev["score"], "reasons": ev.get("reasons", [])}
     )
 
     if ev["pass"]:
         _propagate_observability(parsed, ev)
-        ev.update(
-            operator_used="REPAIR_LOOP",
-            condition="repair_loop",
-            attempts=attempts,
-            num_attempts=1,
-            final_pass=True,
-        )
-        write_log(case["id"], "repair_loop", model, prompt, raw_output, parsed, ev)
-        _emit_metrics_event(
-            case,
-            model,
-            "repair_loop",
-            ev,
-            elapsed_seconds=round(__import__("time").monotonic() - t0, 2),
-        )
-        return case["id"], "repair_loop", ev
+        ev.update(operator_used="REPAIR_LOOP", condition="repair_loop",
+                  attempts=attempts, num_attempts=1, final_pass=True)
+        elapsed_ms = round((__import__("time").monotonic() - t0) * 1000)
+        end_eid = logger.end_case(cid, condition="repair_loop", raw_ev=ev,
+                                  runtime_ms=elapsed_ms, parent_event_id=gen1_eid)
+        logger.log_run(cid, "repair_loop", prompt, raw_output, parsed,
+                       canonical_event_id=end_eid)
+        return cid, "repair_loop", ev
 
-    # Attempt 2: feed errors back
+    # New trajectory for attempt 2 (re-entry after evaluation)
+    logger.new_trajectory()
+
     error_reasons = "; ".join(ev.get("reasons", []))
     repair_prompt = (
         prompt
         + f"\n\nYour previous attempt FAILED with:\n{error_reasons}\n\nFix and return corrected code."
     )
     raw_2, parsed_2, ev2 = _attempt_and_evaluate(
-        case,
-        model,
-        repair_prompt,
-        call_phase="generation",
-        call_condition="repair_loop",
-        call_attempt=1,
+        case, model, repair_prompt, logger, "repair_loop",
+        phase="generation", parent_event_id=gen1_eid,
     )
-    attempts.append(
-        {
-            "attempt": 2,
-            "pass": ev2["pass"],
-            "score": ev2["score"],
-            "reasons": ev2.get("reasons", []),
-        }
-    )
+    gen2_eid = ev2["_last_call_event_id"]
+    attempts.append({"attempt": 2, "pass": ev2["pass"], "score": ev2["score"],
+                     "reasons": ev2.get("reasons", [])})
 
     _propagate_observability(parsed_2, ev2)
-    ev2.update(
-        operator_used="REPAIR_LOOP",
-        condition="repair_loop",
-        attempts=attempts,
-        num_attempts=2,
-        final_pass=ev2["pass"],
-    )
-    write_log(case["id"], "repair_loop", model, repair_prompt, raw_2, parsed_2, ev2)
-    _emit_metrics_event(
-        case,
-        model,
-        "repair_loop",
-        ev2,
-        elapsed_seconds=round(__import__("time").monotonic() - t0, 2),
-    )
-    return case["id"], "repair_loop", ev2
+    ev2.update(operator_used="REPAIR_LOOP", condition="repair_loop",
+               attempts=attempts, num_attempts=2, final_pass=ev2["pass"])
+    elapsed_ms = round((__import__("time").monotonic() - t0) * 1000)
+    end_eid = logger.end_case(cid, condition="repair_loop", raw_ev=ev2,
+                              runtime_ms=elapsed_ms, parent_event_id=gen2_eid)
+    logger.log_run(cid, "repair_loop", repair_prompt, raw_2, parsed_2,
+                   canonical_event_id=end_eid)
+    return cid, "repair_loop", ev2
 
 
 # ============================================================
@@ -823,21 +690,23 @@ def run_repair_loop(case: dict, model: str) -> tuple[str, str, dict]:
 # ============================================================
 
 
-def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
+def run_contract_gated(case: dict, model: str, logger,
+                       case_start_eid: int) -> tuple[str, str, dict]:
     """Multi-step CGE: elicit contract → generate code → gate → retry → eval."""
-    import logging
+    if logger is None:
+        raise RuntimeError("run_contract_gated requires an explicit logger")
+    import logging as _logging
     from contract import parse_contract
     from diff_gate import validate as gate_validate
 
     cid = case["id"]
     code_files = case["code_files_contents"]
     task = case["task"]
-    _log = logging.getLogger("t3.cge")
+    _log = _logging.getLogger("t3.cge")
 
-    # Reference code for must_not_change comparison
     ref_code = "\n\n".join(code_files.values())
 
-    # Step 1: Elicit contract (raw=True, no output instruction)
+    # Step 1: Elicit contract
     from assembly_engine import build as _assembly_build
     from prompts import _format_code_files as _fmt_cf
     from contract import CONTRACT_SCHEMA_TEXT
@@ -850,25 +719,24 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
     }
     _elicit_r = _assembly_build(["cge_stage"], _elicit_vars)
     contract_prompt = _elicit_r.final_prompt
-    from call_logger import set_prompt_provenance
-    set_prompt_provenance(_elicit_r, _elicit_vars, condition="contract_gated")
-    set_call_context(
-        phase="generation",
-        case_id=cid,
-        condition="contract_gated",
-        attempt_index=0,
-        step="contract_elicit",
+    elicit_asm = _capture_prompt_assembly(_elicit_r, _elicit_vars, "contract_gated", contract_prompt)
+    contract_raw = call_model(
+        contract_prompt, model=model, raw=True,
+        logger=logger, case_id=cid, phase="generation",
+        condition="contract_gated", prompt_assembly=elicit_asm,
+        parent_event_id=case_start_eid,
     )
-    contract_raw = call_model(contract_prompt, model=model, raw=True)
+    elicit_eid = logger._event_counter
     contract = parse_contract(contract_raw)
 
     if contract is None:
         _log.warning("Contract parse failed for %s — falling back to standard", cid)
-        return _fallback_run(case, model, contract_raw)
+        logger.new_trajectory()  # fallback = new trajectory
+        return _fallback_run(case, model, contract_raw, logger, elicit_eid)
 
     contract_verifiable = contract.get("_verifiable", False)
 
-    # Step 2: Generate code conditioned on contract (with output instruction)
+    # Step 2: Generate code conditioned on contract
     import json as _json
     _code_vars = {
         "task": task, "code_files_block": _cge_code_block,
@@ -878,17 +746,16 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
     }
     _code_r = _assembly_build(["cge_stage", "output_instruction_v1"], _code_vars)
     code_prompt = _code_r.final_prompt
-    set_prompt_provenance(_code_r, _code_vars, condition="contract_gated")
-    set_call_context(
-        phase="generation",
-        case_id=cid,
-        condition="contract_gated",
-        attempt_index=0,
-        step="code_gen",
+    code_asm = _capture_prompt_assembly(_code_r, _code_vars, "contract_gated", code_prompt)
+    code_raw = call_model(
+        code_prompt, model=model, raw=True,
+        logger=logger, case_id=cid, phase="generation",
+        condition="contract_gated", prompt_assembly=code_asm,
+        parent_event_id=elicit_eid,
     )
-    code_raw = call_model(code_prompt, model=model, raw=True)
+    code_gen_eid = logger._event_counter
 
-    # Step 3: Gate validation (extraction-only, NOT evaluation)
+    # Step 3: Gate validation
     candidate_code = extract_code_from_raw(code_raw)
     gate_1 = gate_validate(contract, candidate_code, ref_code)
     gate_results = [gate_1]
@@ -897,7 +764,8 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
     final_code_raw = code_raw
 
     if not gate_1["valid"]:
-        # Step 4: Retry with violations
+        # New trajectory for retry (re-entry after gate evaluation)
+        logger.new_trajectory()
         _log.info("Gate failed for %s (%d violations) — retrying", cid, len(gate_1["violations"]))
         _v_text = "\n".join(f"  - {v}" for v in gate_1["violations"])
         _retry_vars = {
@@ -908,15 +776,13 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
         }
         _retry_r = _assembly_build(["cge_stage", "output_instruction_v1"], _retry_vars)
         retry_prompt = _retry_r.final_prompt
-        set_prompt_provenance(_retry_r, _retry_vars, condition="contract_gated")
-        set_call_context(
-            phase="generation",
-            case_id=cid,
-            condition="contract_gated",
-            attempt_index=1,
-            step="code_retry",
+        retry_asm = _capture_prompt_assembly(_retry_r, _retry_vars, "contract_gated", retry_prompt)
+        retry_raw = call_model(
+            retry_prompt, model=model, raw=True,
+            logger=logger, case_id=cid, phase="generation",
+            condition="contract_gated", prompt_assembly=retry_asm,
+            parent_event_id=code_gen_eid,
         )
-        retry_raw = call_model(retry_prompt, model=model, raw=True)
         retry_code = extract_code_from_raw(retry_raw)
 
         gate_2 = gate_validate(contract, retry_code, ref_code)
@@ -924,14 +790,11 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
         num_attempts = 2
         final_code_raw = retry_raw
 
-    # Step 5: Evaluate FINAL output through canonical pipeline
+    # Step 5: Evaluate
     case["_condition"] = "contract_gated"
     parsed, ev = evaluate_case(case, final_code_raw)
-
-    # Phase 1 observability
     _propagate_observability(parsed, ev)
 
-    # Attach CGE-specific metadata
     final_gate = gate_results[-1]
     ev["operator_used"] = "CONTRACT_GATED"
     ev["condition"] = "contract_gated"
@@ -945,13 +808,17 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
     ev["gate_results"] = gate_results
     ev["num_attempts"] = num_attempts
 
-    write_log(cid, "contract_gated", model, code_prompt, final_code_raw, parsed, ev)
-    _emit_metrics_event(case, model, "contract_gated", ev)
+    last_call_eid = logger._event_counter
+    end_eid = logger.end_case(cid, condition="contract_gated", raw_ev=ev,
+                              parent_event_id=last_call_eid)
+    logger.log_run(cid, "contract_gated", code_prompt, final_code_raw, parsed,
+                   canonical_event_id=end_eid)
     return cid, "contract_gated", ev
 
 
-def _fallback_run(case, model, contract_raw):
+def _fallback_run(case, model, contract_raw, logger, elicit_eid: int):
     """Fallback when contract parsing fails — CGE DID NOT EXECUTE."""
+    cid = case["id"]
     case["_condition"] = "contract_gated"
     parsed, ev = evaluate_case(case, contract_raw)
     _propagate_observability(parsed, ev)
@@ -965,9 +832,11 @@ def _fallback_run(case, model, contract_raw):
     ev["contract_satisfied"] = False
     ev["gate_results"] = []
     ev["num_attempts"] = 1
-    write_log(case["id"], "contract_gated", model, "", contract_raw, parsed, ev)
-    _emit_metrics_event(case, model, "contract_gated", ev)
-    return case["id"], "contract_gated", ev
+    end_eid = logger.end_case(cid, condition="contract_gated", raw_ev=ev,
+                              parent_event_id=elicit_eid)
+    logger.log_run(cid, "contract_gated", "", contract_raw, parsed,
+                   canonical_event_id=end_eid)
+    return cid, "contract_gated", ev
 
 
 # ============================================================
@@ -975,15 +844,11 @@ def _fallback_run(case, model, contract_raw):
 # ============================================================
 
 
-def run_leg_reduction(case: dict, model: str) -> tuple[str, str, dict]:
-    """Run LEG-reduction condition: plan → code → verify → self-correct (one call).
-
-    Uses a specialized prompt that instructs the model to generate a plan,
-    write code, verify plan→code consistency, and self-correct — all in a
-    single response.
-
-    Returns (case_id, condition, eval_dict).
-    """
+def run_leg_reduction(case: dict, model: str, logger,
+                      case_start_eid: int) -> tuple[str, str, dict]:
+    """Run LEG-reduction condition."""
+    if logger is None:
+        raise RuntimeError("run_leg_reduction requires an explicit logger")
     from assembly_engine import build as _assembly_build
     from prompts import _format_code_files
 
@@ -991,13 +856,11 @@ def run_leg_reduction(case: dict, model: str) -> tuple[str, str, dict]:
     code_files = case["code_files_contents"]
     task = case["task"]
 
-    # Build file_keys_example for the prompt template
     file_paths = list(code_files.keys())
     file_keys_example = ", ".join(
         f'"{p}": "<complete file contents or UNCHANGED>"' for p in file_paths
     )
 
-    # Build prompt via AssemblyEngine
     code_block = _format_code_files(code_files)
     _leg_vars = {
         "task": task,
@@ -1006,19 +869,19 @@ def run_leg_reduction(case: dict, model: str) -> tuple[str, str, dict]:
     }
     _rendered = _assembly_build(["leg_reduction"], _leg_vars)
     prompt = _rendered.final_prompt
-    from call_logger import set_prompt_provenance
-    set_prompt_provenance(_rendered, _leg_vars, condition="leg_reduction")
-    set_call_context(phase="generation", case_id=cid, condition="leg_reduction", attempt_index=0)
-    raw_output = call_model(prompt, model=model, raw=True)
+    prompt_asm = _capture_prompt_assembly(_rendered, _leg_vars, "leg_reduction", prompt)
+    raw_output = call_model(
+        prompt, model=model, raw=True,
+        logger=logger, case_id=cid, phase="generation",
+        condition="leg_reduction", prompt_assembly=prompt_asm,
+        parent_event_id=case_start_eid,
+    )
+    gen_eid = logger._event_counter
 
-    # Evaluate through canonical pipeline with LEG parser
     case["_condition"] = "leg_reduction"
     parsed, ev = evaluate_case(case, raw_output, parser="leg")
-
-    # Phase 1 observability
     _propagate_observability(parsed, ev)
 
-    # Attach LAG metadata (minimal schema: root_cause, fix_strategy, risk_check)
     leg_fields = parsed.get("leg_fields", {})
     ev["operator_used"] = "LEG_REDUCTION"
     ev["condition"] = "leg_reduction"
@@ -1030,257 +893,15 @@ def run_leg_reduction(case: dict, model: str) -> tuple[str, str, dict]:
         "risk_check": leg_fields.get("risk_check", ""),
     }
 
-    write_log(cid, "leg_reduction", model, prompt, raw_output, parsed, ev)
-    _emit_metrics_event(case, model, "leg_reduction", ev)
+    end_eid = logger.end_case(cid, condition="leg_reduction", raw_ev=ev,
+                              parent_event_id=gen_eid)
+    logger.log_run(cid, "leg_reduction", prompt, raw_output, parsed,
+                   canonical_event_id=end_eid)
     return cid, "leg_reduction", ev
 
 
-# ============================================================
-# LOGGING — RunLogger class (no shared global state)
-# ============================================================
 
-
-class RunLogger:
-    """Isolated logger for a single experiment run.
-
-    Owns its file paths, run identity, write counts, and closed state.
-    Writing after close, model mismatch, or run_id mismatch raises RuntimeError.
-
-    Serial execution only — no threads, no locks needed.
-    """
-
-    def __init__(self, log_path: Path, model: str, run_id: str):
-        self.log_path = log_path
-        self.model = model
-        self.run_id = run_id
-        self.closed = False
-        self.writes_attempted = 0
-        self.writes_failed = 0
-
-    def _check_invariants(self, case_id: str, condition: str, model: str):
-        """Check all write preconditions. Raises on any violation."""
-        if self.closed:
-            raise RuntimeError(
-                f"LOG WRITE AFTER CLOSE: attempted write for {case_id}/{condition} "
-                f"to closed logger ({self.log_path}). This is a run isolation bug."
-            )
-        if model != self.model:
-            raise RuntimeError(
-                f"LOG MODEL MISMATCH: logger was created for model '{self.model}' "
-                f"but write received model '{model}'. This is a cross-run contamination bug."
-            )
-
-    def write(self, case_id, condition, model, prompt, raw_output, parsed, ev):
-        """Write one call's data to all three log files. Serial execution only."""
-        self._write_locked(case_id, condition, model, prompt, raw_output, parsed, ev)
-
-    @staticmethod
-    def _derive_recovery_method(parsed: dict) -> str | None:
-        """Derive recovery_method from parse state."""
-        pe = parsed.get("parse_error")
-        if not pe:
-            return None
-        pe_str = str(pe)
-        if "lenient" in pe_str:
-            return "partial_json"
-        if parsed.get("_raw_fallback"):
-            return None  # raw_fallback is not recovery — it's a total loss
-        if pe and parsed.get("reasoning") and str(parsed.get("reasoning")).strip():
-            return "fallback_parser"
-        return None
-
-    def _write_locked(self, case_id, condition, model, prompt, raw_output, parsed, ev):
-        self._check_invariants(case_id, condition, model)
-
-        parse_error = parsed.get("parse_error")
-        if parse_error and "SEVERE" in str(parse_error):
-            _exec_log.warning(
-                "SEVERE parse issue for %s/%s: %s (response len=%d)",
-                case_id,
-                condition,
-                parse_error,
-                len(raw_output),
-            )
-
-        reasoning_text = parsed.get("reasoning") or ""
-        code_text = parsed.get("code") or ""
-        recovery_method = self._derive_recovery_method(parsed)
-        reasoning_obj = parsed.get("reasoning_obj", {})
-        reasoning_validation = parsed.get("reasoning_validation", {})
-
-        record = {
-            "run_id": self.run_id,
-            "case_id": case_id,
-            "condition": condition,
-            "model": model,
-            "model_config": get_model_config(),
-            "prompt_length": len(prompt),
-            "raw_response_length": len(raw_output),
-            "parsed": {
-                "reasoning": (
-                    reasoning_text
-                    if isinstance(reasoning_text, str)
-                    else str(reasoning_text)
-                ),
-                "code_length": (
-                    len(code_text) if isinstance(code_text, str) else len(str(code_text))
-                ),
-                "parse_error": parse_error,
-                "_raw_fallback": parsed.get("_raw_fallback", False),
-                "response_format": parsed.get("response_format"),
-                "data_lineage": parsed.get("data_lineage"),
-            },
-            "execution": ev.get("execution", {}),
-            # Full evaluation dict — no truncation, no cherry-picking.
-            # Every field that run_single/run_leg_reduction/etc. sets on ev
-            # is preserved here for downstream analysis.
-            "evaluation": {k: v for k, v in ev.items()
-                          if k != "execution"},  # execution is already a top-level key
-        }
-
-        for path, data in [
-            (self.log_path, record),
-        ]:
-            self.writes_attempted += 1
-            try:
-                with open(path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(data, default=str) + "\n")
-            except OSError as e:
-                self.writes_failed += 1
-                _exec_log.error("LOG WRITE FAILED for %s/%s to %s: %s", case_id, condition, path, e)
-
-    def write_summary(self, summary: dict):
-        """Write a summary record to the metadata log. Injects run_id."""
-        if self.closed:
-            raise RuntimeError(
-                f"LOG WRITE AFTER CLOSE: summary write to closed logger ({self.log_path})."
-            )
-        summary.setdefault("run_id", self.run_id)
-        self.writes_attempted += 1
-        try:
-            with open(self.log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(summary, default=str) + "\n")
-        except OSError as e:
-            self.writes_failed += 1
-            _exec_log.error("SUMMARY WRITE FAILED to %s: %s", self.log_path, e)
-
-    def get_stats(self) -> dict:
-        return {
-            "run_id": self.run_id,
-            "model": self.model,
-            "log_path": str(self.log_path),
-            "attempted": self.writes_attempted,
-            "failed": self.writes_failed,
-            "success_rate": (
-                (self.writes_attempted - self.writes_failed) / self.writes_attempted
-                if self.writes_attempted > 0
-                else 1.0
-            ),
-        }
-
-    def verify_integrity(self) -> tuple[bool, str]:
-        """Verify run log integrity. Call at end of run.
-
-        Returns (valid, reason). If valid=False, the run data should be
-        discarded or marked INVALID.
-        """
-        if self.writes_failed > 0:
-            return False, (
-                f"RUN INVALID: {self.writes_failed}/{self.writes_attempted} log writes failed. "
-                f"Data in {self.log_path} is INCOMPLETE."
-            )
-        if self.writes_attempted == 0:
-            return False, (
-                f"RUN INVALID: zero writes attempted. Logger was created but never used. "
-                f"Log file {self.log_path} is EMPTY."
-            )
-        return True, f"OK: {self.writes_attempted} writes, 0 failures"
-
-    def close(self):
-        if self.closed:
-            return  # idempotent
-        self.closed = True
-        _exec_log.info(
-            "RunLogger closed: run_id=%s, %s (%d writes, %d failed)",
-            self.run_id,
-            self.log_path,
-            self.writes_attempted,
-            self.writes_failed,
-        )
-
-
-# Single active logger — enforced singleton with explicit lifecycle
-_active_logger: RunLogger | None = None
-
-
-def init_run_log(model: str, log_dir: Path | None = None) -> Path:
-    """Create a RunLogger for this experiment run.
-
-    Args:
-        model: Model name for this run.
-        log_dir: If provided, write log files to this directory with fixed names
-                 (run.jsonl, run_prompts.jsonl, run_responses.jsonl).
-                 If None, use legacy timestamped naming in logs/.
-
-    Returns the log path. The logger is accessible via get_run_logger().
-    Raises RuntimeError if a previous logger is still active.
-    """
-    global _active_logger
-
-    if _active_logger is not None and not _active_logger.closed:
-        raise RuntimeError(
-            f"LOG BLEED PREVENTED: init_run_log('{model}') called while "
-            f"previous logger is still active for model '{_active_logger.model}' "
-            f"at {_active_logger.log_path}. Call close_run_log() first."
-        )
-
-    if log_dir is None:
-        raise ValueError("init_run_log requires log_dir. Legacy mode has been removed.")
-
-    log_dir = Path(log_dir)
-    log_path = log_dir / "run.jsonl"
-
-    import uuid
-
-    run_id = str(uuid.uuid4())[:8]
-    _active_logger = RunLogger(log_path, model, run_id)
-    _exec_log.info("RunLogger created: run_id=%s, model=%s, log_dir=%s", run_id, model, log_dir)
-    return log_path
-
-
-def close_run_log():
-    """Close the active logger. Must be called before init_run_log for a new model."""
-    global _active_logger
-    if _active_logger is not None:
-        _active_logger.close()
-    _active_logger = None
-
-
-def get_run_logger() -> RunLogger:
-    """Get the active RunLogger. Raises if none active."""
-    if _active_logger is None or _active_logger.closed:
-        raise RuntimeError("No active RunLogger. Call init_run_log() before writing logs.")
-    return _active_logger
-
-
-def get_current_log_path() -> Path | None:
-    """Backward compat — returns active log path or None."""
-    if _active_logger and not _active_logger.closed:
-        return _active_logger.log_path
-    return None
-
-
-def get_log_write_stats() -> dict:
-    """Return log write statistics for the active logger."""
-    if _active_logger:
-        return _active_logger.get_stats()
-    return {"attempted": 0, "failed": 0, "success_rate": 1.0}
-
-
-def write_log(case_id, condition, model, prompt, raw_output, parsed, ev):
-    """Write one call's data via the active RunLogger.
-
-    Raises RuntimeError if no logger is active or if model doesn't match.
-    """
-    logger = get_run_logger()
-    logger.write(case_id, condition, model, prompt, raw_output, parsed, ev)
+# Legacy RunLogger, init_run_log, close_run_log, get_run_logger,
+# get_current_log_path, get_log_write_stats, and write_log have been
+# REMOVED. All logging now goes through logging_core.RunLogger passed
+# explicitly as a parameter through the call stack.

@@ -1,0 +1,276 @@
+=== CALL 000035 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: stale_cache_c
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:36:06.688281
+LATENCY_MS: 36529
+
+--- PROMPT ---
+API returns stale product data despite updates. Fix the caching issue. Return the updated code.
+
+## Codebase (3 files)
+
+### FILE 1/3: code_snippets_v2/stale_cache_c/api.py ###
+```python
+"""API layer: reads through two-layer cache."""
+
+from cache import get_local, get_shared, put_local, put_shared
+from catalog import db_get
+
+
+def get_product(product_id):
+    """Get product through cache layers: local -> shared -> DB."""
+    # Check local cache first
+    result = get_local(product_id)
+    if result is not None:
+        return result
+
+    # Check shared cache
+    result = get_shared(product_id)
+    if result is not None:
+        put_local(product_id, result)
+        return result
+
+    # Fall through to DB
+    result = db_get(product_id)
+    if result is not None:
+        put_shared(product_id, result)
+        put_local(product_id, result)
+    return result
+
+
+def format_product(product_id):
+    """Format product for display (distractor)."""
+    p = get_product(product_id)
+    if p is None:
+        return "Not found"
+    return f"{p['name']}: ${p['price']}"
+```
+
+### FILE 2/3: code_snippets_v2/stale_cache_c/cache.py ###
+```python
+"""Two-layer cache: local (per-request) and shared (global)."""
+
+_local = {}
+_shared = {}
+
+
+def get_local(key):
+    """Read from local cache."""
+    return _local.get(key)
+
+
+def put_local(key, value):
+    """Write to local cache."""
+    _local[key] = value
+
+
+def invalidate_local(key):
+    """Remove key from local cache."""
+    _local.pop(key, None)
+
+
+def get_shared(key):
+    """Read from shared cache."""
+    return _shared.get(key)
+
+
+def put_shared(key, value):
+    """Write to shared cache."""
+    _shared[key] = value
+
+
+def invalidate_shared(key):
+    """Remove key from shared cache."""
+    _shared.pop(key, None)
+
+
+def clear_all():
+    """Clear both layers."""
+    _local.clear()
+    _shared.clear()
+```
+
+### FILE 3/3: code_snippets_v2/stale_cache_c/catalog.py ###
+```python
+"""Product catalog with two-layer cache integration."""
+
+from cache import put_local, put_shared, invalidate_shared, invalidate_local
+
+_db = {}
+
+
+def add_product(product_id, name, price):
+    """Add product to database."""
+    _db[product_id] = {"name": name, "price": price}
+
+
+def db_get(product_id):
+    """Raw DB lookup."""
+    p = _db.get(product_id)
+    return dict(p) if p else None
+
+
+def update_product(product_id, **fields):
+    """Update product in DB and invalidate caches.
+
+    Invariant: after update, all cache layers must be invalidated.
+    """
+    if product_id not in _db:
+        return False
+    _db[product_id].update(fields)
+    invalidate_shared(product_id)
+    # BUG: local cache not invalidated — api.get_product reads local first
+    return True
+
+
+def reset():
+    """Clear DB."""
+    _db.clear()
+```
+
+You are implementing a STRICT reasoning + code generation procedure designed to REDUCE reasoning-execution mismatch.
+
+This is NOT a formatting task. This is a TWO-PASS reasoning process with adversarial verification.
+
+You MUST follow the procedure exactly.
+
+Return a SINGLE valid JSON object. No text outside JSON. No markdown fences.
+
+# GOAL
+
+Fix the bug AND ensure your reasoning is causally correct and robust to failure.
+
+You are required to:
+- identify the correct mechanism
+- challenge your own hypothesis
+- verify your fix against failure scenarios
+
+# PROCEDURE (MANDATORY)
+
+## STEP 1 — DIAGNOSE (PRIMARY HYPOTHESIS)
+
+Identify:
+
+- root_cause:
+  Name the exact function + variable + operation causing the bug.
+  Must describe a causal relationship (not just "missing X").
+
+- failure_mechanism:
+  Give a concrete scenario:
+  cause → mutation/event → propagation → observable failure
+
+- broken_invariant:
+  A specific, testable property that is violated.
+
+## STEP 2 — ALTERNATIVE HYPOTHESIS (CRITICAL)
+
+Propose ONE alternative explanation for the bug.
+
+- What else could plausibly be the cause?
+- Why might your primary hypothesis be wrong?
+
+Then explicitly reject it:
+
+- Why is your original diagnosis more correct?
+- What evidence in the code supports this?
+
+This step is REQUIRED. Do not skip.
+
+## STEP 3 — PLAN FIX
+
+Describe:
+
+- fix_strategy:
+  What exact change you will make
+  Why it breaks the causal chain
+
+Must reference actual code behavior.
+
+## STEP 4 — CODE
+
+Implement the fix.
+
+Rules:
+- Modify ONLY necessary files
+- Return COMPLETE contents for modified files
+- Use "UNCHANGED" for others
+
+## STEP 5 — ADVERSARIAL SELF-CHECK (MANDATORY)
+
+You must actively try to BREAK your own fix.
+
+Answer ALL:
+
+1. Failure Scenario:
+   Describe a concrete scenario where your fix might still fail.
+
+2. Edge Case:
+   Identify a boundary condition (e.g., retries, empty values, ordering).
+
+3. Invariant Check:
+   Verify your invariant holds under:
+   - multiple calls
+   - retries / loops
+   - state reuse
+
+4. Conclusion:
+   - If a flaw is found → REVISE your fix
+   - If no flaw → explain WHY it is safe
+
+Your answer MUST reference your actual code.
+
+# OUTPUT FORMAT (STRICT JSON)
+
+{
+  "root_cause": "<exact function + variable + causal relationship>",
+  "failure_mechanism": "<cause → mutation → propagation → observable failure>",
+  "broken_invariant": "<specific testable property that is violated>",
+  "alternative_hypothesis": "<one alternative explanation for the bug>",
+  "hypothesis_rejection": "<why primary hypothesis is correct, with code evidence>",
+  "fix_strategy": "<what change you will make and why it breaks the causal chain>",
+  "self_check": {
+    "failure_scenario": "<concrete scenario where fix might still fail>",
+    "edge_case": "<boundary condition to test>",
+    "invariant_check": "<verify invariant under multiple calls, retries, state reuse>",
+    "conclusion": "<flaw found → revise, or why it is safe>"
+  },
+  "files": {"<path>": "<complete file contents or UNCHANGED>"}
+}
+
+# RULES
+
+- All fields are REQUIRED and must be substantive
+- No generic statements — ground every claim in actual code
+- Must reference actual variables and behavior
+- Do NOT restate the task
+- Do NOT skip alternative hypothesis
+- Do NOT skip adversarial self-check
+- For files you did NOT modify, set value to "UNCHANGED"
+- Do NOT include markdown formatting (no ```python blocks) inside file values
+- File values must be raw Python source code, not markdown
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "catalog.update_product: missing call to invalidate_local(product_id) after _db[product_id].update(fields) — the local cache variable _local (in cache.py) remains unchanged, so api.get_product's get_local(product_id) returns stale data",
+  "failure_mechanism": "A client updates a product via catalog.update_product → update_product mutates _db[product_id] with new fields but only calls invalidate_shared(product_id) (missing local invalidation) → the local cache (_local) in the same process still contains the old product dict → subsequent api.get_product(product_id) checks get_local first and returns the stale dictionary from _local instead of the updated DB value, so callers observe stale product data.",
+  "broken_invariant": "Invariant 'after update, all cache layers must be invalidated' is violated: after calling catalog.update_product(product_id, ...), get_local(product_id) may still return the pre-update value (i.e., _local contains a stale value). This is directly testable: call add_product; get_product (caches locally); call update_product to change price; call get_product again — it returns the old price.",
+  "alternative_hypothesis": "An alternative explanation is that db_get returns a shallow copy (dict(p)) and cached objects are references that are mutated elsewhere, so the observed stale behavior could come from caching references pointing to a mutated object rather than missing invalidation. For example, if cache stored a reference and DB update mutated that same object, caches might appear inconsistent.",
+  "hypothesis_rejection": "The alternative is unlikely: db_get already returns dict(p) (a new dict) and caches store that dict; update_product mutates _db[product_id] via _db[product_id].update(fields) which does not affect previously returned dict copies sitting in _local. The code evidence: db_get returns dict(p) if p else None, and cache.put_local simply stores the passed object. Thus stale returns come from cached copies that were not removed, not from shared references. The missing invalidate_local(product_id) in update_product is the precise code-level cause (see comment in original update_product: '# BUG: local cache not invalidated — api.get_product reads local first').",
+  "fix_strategy": "Modify catalog.update_product to ensure local cache is invalidated after the DB mutation and ensure shared cache is refreshed with the new DB snapshot. Concretely: after updating _db[product_id], call invalidate_local(product_id) to remove the stale entry from the process-local cache; then update the shared cache with a fresh copy of the DB row via put_shared(product_id, dict(_db[product_id])). This breaks the causal chain because get_product will no longer return stale values from the local cache in this process, and shared cache will hold the fresh data for other processes that miss local.",
+  "self_check": {
+    "failure_scenario": "Cross-process/locality race: Because _local is a module-level dict (per-process), another process can have a stale _local entry that we cannot reach from this process. Sequence: Process A caches product in its _local; Process B calls update_product (which in our fix invalidates only B's _local and updates shared); Process A's _local is still stale and will return stale data until Process A's local invalidation happens. Thus stale reads can still occur in other process contexts. This is a limitation of the current in-process local cache design.",
+    "edge_case": "Concurrent racing reads and writes within the same process: If a reader calls api.get_product(product_id) concurrently while update_product runs, ordering could produce a stale return. Example: Reader calls get_local (sees the old value) before invalidate_local in update_product runs; reader returns stale. The code-level edge is that invalidate_local and put_shared are not atomic with respect to get_local in multi-threaded scenarios.",
+    "invariant_check": "After the change, for the same process and sequential calls: - add_product -> get_product caches locally -> update_product invalidates local and updates shared -> subsequent get_product will: get_local returns None (invalidated) → get_shared returns the fresh copy (we updated shared) → put_local caches the fresh copy → returned value is fresh. For retries/loops: repeated update_product calls always produce a fresh snapshot placed in shared and local invalidated before next read repopulates it. For state reuse: reset() will clear _db; clear_all() in cache module (if used) clears caches. The functions used are invalidate_local(product_id) and put_shared(product_id, dict(_db[product_id])), which deterministically set cache state to reflect DB.",
+    "conclusion": "Flaw found but constrained: The original bug (missing local invalidation) is fixed by calling invalidate_local(product_id). To reduce the propagation window we also update the shared cache with the fresh DB snapshot. However, because local caches are per-process module-level structures, we cannot globally invalidate other processes' local caches without an external invalidation mechanism (e.g., pub/sub or version stamps). Given the existing codebase, this fix is correct and substantially reduces stale responses in the common single-process/unit-test scenarios and addresses the explicit bug in catalog.update_product. For full distributed correctness, the architecture must add cross-process invalidation; that's outside the current code changes.",
+  "files": {
+    "code_snippets_v2/stale_cache_c/catalog.py": " \"\"\"Product catalog with two-layer cache integration.\"\"\"\n\nfrom cache import put_local, put_shared, invalidate_shared, invalidate_local\n\n_db = {}\n\n\ndef add_product(product_id, name, price):\n    \"\"\"Add product to database.\"\"\"\n    _db[product_id] = {\"name\": name, \"price\": price}\n\n\ndef db_get(product_id):\n    \"\"\"Raw DB lookup.\"\"\"\n    p = _db.get(product_id)\n    return dict(p) if p else None\n\n\ndef update_product(product_id, **fields):\n    \"\"\"Update product in DB and invalidate/refresh caches.\n\n    Invariant: after update, all cache layers must be invalidated or refreshed so\n    that subsequent reads do not observe stale values in this process.\n    \"\"\"\n    if product_id not in _db:\n        return False\n    # Mutate the database row\n    _db[product_id].update(fields)\n\n    # Invalidate this process's local cache entry to avoid returning stale data\n    invalidate_local(product_id)\n\n    # Refresh shared cache with a fresh snapshot from the DB so other processes\n    # that miss their own local cache can see the updated value.\n    put_shared(product_id, dict(_db[product_id]))\n\n    return True\n\n\ndef reset():\n    \"\"\"Clear DB.\"\"\"\n    _db.clear()\n",
+    "code_snippets_v2/stale_cache_c/api.py": "UNCHANGED",
+    "code_snippets_v2/stale_cache_c/cache.py": "UNCHANGED"
+  }
+}

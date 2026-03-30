@@ -1,0 +1,191 @@
+=== CALL 000062 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: effect_order_a
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:44:56.743864
+LATENCY_MS: 24622
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In process_batch(items) the function increments the module-level variable _counter for each item but only calls snapshot() once after the loop, so the module-level list _snapshots is appended a single value instead of one per item. The causal relationship: process_batch updates _counter for each item but defers calling snapshot() until after the loop, so snapshot() observes only the final _counter and appends it just once to _snapshots.
+
+## Failure Mechanism
+Concrete scenario: call reset(), then process_batch([1, 2, 3]). The loop in process_batch adds 1, then 2, then 3 to _counter, making _counter == 6. Because snapshot() is invoked only once after the loop, _snapshots becomes [6] (length 1) instead of [1, 3, 6] (length 3). Any code that expects one snapshot per processed item (for example, a test that asserts len(get_snapshots()) == 3 after processing three items) will fail. The function verify_consistency() currently returns len(_snapshots) (an integer) rather than checking that snapshot count matches processed items, so it cannot detect or express this mismatch.
+
+## Broken Invariant
+For every item processed by process_batch, exactly one snapshot must be recorded. Formally: after any sequence of calls (starting from reset()), the number of recorded snapshots equals the total number of items processed. Equivalently, len(get_snapshots()) == total number of items passed to all prior process_batch calls. This is a concrete, testable assertion (e.g., reset(); process_batch([1,2,3]); assert len(get_snapshots()) == 3).
+
+## Fix Strategy
+Call snapshot() once per item inside the processing loop and track the total count of processed items. Specifically, process_batch now calls snapshot() immediately after updating _counter for each item and increments a new module-level _processed_items counter per item. verify_consistency() was updated to return a boolean that compares len(_snapshots) to _processed_items. This ensures the snapshot list length is kept in sync with the number of processed items and makes the invariant testable. The change fixes the mechanism because snapshot() is now invoked in direct correspondence with each processed item instead of once at the end, and the new _processed_items variable gives verify_consistency() a concrete expected value to compare against.
+
+
+# Task Description
+Refactor this event processor for clarity. Return the updated code.
+
+# Code Produced
+```python
+"""Batch processor with per-item snapshots.
+
+This module maintains a running counter and records a snapshot of the counter
+after each processed item. It exposes utilities for resetting state and
+verifying that exactly one snapshot was recorded per processed item.
+"""
+
+_counter = 0
+_snapshots = []
+_processed_items = 0
+
+
+def reset():
+    """Reset all module state to initial values."""
+    global _counter, _snapshots, _processed_items
+    _counter = 0
+    _snapshots = []
+    _processed_items = 0
+
+
+def snapshot():
+    """Record the current counter value as a snapshot.
+
+    This appends the current value of _counter to the _snapshots list.
+    """
+    # appending to a list mutates it in-place; no global declaration needed
+    _snapshots.append(_counter)
+
+
+def get_snapshots():
+    """Return a shallow copy of the snapshots list."""
+    return list(_snapshots)
+
+
+def process_batch(items):
+    """Process each item: increment counter and snapshot after each.
+
+    For each element in items this function increments the running
+    _counter by that element's value, records a snapshot immediately
+    after that increment, and updates the count of processed items.
+    Returns the new counter value.
+    """
+    global _counter, _processed_items
+    for item in items:
+        _counter += item
+        # record a snapshot for this item
+        snapshot()
+        # record that we processed one more item
+        _processed_items += 1
+    return _counter
+
+
+def verify_consistency():
+    """Verify that there is exactly one snapshot per processed item.
+
+    Returns True when len(_snapshots) equals the total number of items
+    processed by all prior calls to process_batch (since the last reset()).
+    """
+    return _processed_items == len(_snapshots)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If snapshot() were invoked once per item (removing the deferred single-call root cause), the snapshot-count mismatch would not occur.
+Evidence: - process_batch loop: for item in items: _counter += item; snapshot(); _processed_items += 1; - snapshot(): _snapshots.append(_counter); - reset() clears _counter, _snapshots, _processed_items; - verify_consistency(): returns _processed_items == len(_snapshots); - therefore for reset(); process_batch([1,2,3]) snapshots become [1,3,6] and _processed_items == 3.
+Judgment: The developer identifies the exact function (_counter updates in process_batch and delayed snapshot call), traces the mutation and observable failure, and proposes a fix that the submitted code implements; the invariant is precise and testable, so the reasoning and code align.

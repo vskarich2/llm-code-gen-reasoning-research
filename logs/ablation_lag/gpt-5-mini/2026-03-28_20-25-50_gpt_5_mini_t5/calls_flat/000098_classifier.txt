@@ -1,0 +1,173 @@
+=== CALL 000098 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: partial_rollback_a
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:59:53.840276
+LATENCY_MS: 16823
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In function place_order the code calls inventory.reserve(qty) and then tries wallet.charge(qty * price). If wallet.charge raises ValueError, the except block re-raises the error without calling inventory.release(qty). Because inventory.reserve increments inventory.reserved but inventory.release is never invoked in that failure path, inventory.reserved remains incremented incorrectly.
+
+## Failure Mechanism
+Concrete scenario: Inventory(stock=5, reserved=0) and Wallet(balance=10). place_order(inventory, wallet, qty=3, price=5) runs inventory.reserve(3) which sets inventory.reserved to 3. Next wallet.charge(15) raises ValueError because 15 > wallet.balance. The except ValueError: raise re-raises the exception but does not call inventory.release(3). As a result inventory.reserved stays at 3 and inventory.available() returns 2 instead of 5, causing future orders to see reduced availability even though the failed order never completed.
+
+## Broken Invariant
+If wallet.charge raises ValueError during place_order, the function must undo the prior reservation: inventory.reserved must be decremented by qty (i.e., inventory.release(qty) must be called). Currently, when place_order raises ValueError, inventory.reserved remains incremented by qty, violating the rollback invariant.
+
+## Fix Strategy
+Call inventory.release(qty) in the except ValueError path before re-raising the error. This explicitly undoes the earlier inventory.reserve(qty) when charging the wallet fails. The change affects only the failure branch; successful flows still return a confirmed order without releasing the reservation.
+
+
+
+# Task Description
+Refactor this order system for clarity. Return the updated code.
+
+# Code Produced
+```python
+"""Order fulfillment with inventory and wallet."""
+
+
+class Inventory:
+    def __init__(self, stock):
+        self.stock = stock
+        self.reserved = 0
+
+    def reserve(self, qty):
+        if qty > self.stock - self.reserved:
+            raise ValueError("insufficient stock")
+        self.reserved += qty
+
+    def release(self, qty):
+        self.reserved -= qty
+
+    def available(self):
+        return self.stock - self.reserved
+
+
+class Wallet:
+    def __init__(self, balance):
+        self.balance = balance
+
+    def charge(self, amount):
+        if amount > self.balance:
+            raise ValueError("insufficient funds")
+        self.balance -= amount
+
+
+def place_order(inventory, wallet, qty, price):
+    """Reserve inventory, then charge wallet. Release on failure."""
+    inventory.reserve(qty)
+    try:
+        wallet.charge(qty * price)
+    except ValueError:
+        # Roll back the prior reservation before propagating the error.
+        inventory.release(qty)
+        raise
+    return {"status": "confirmed", "qty": qty, "total": qty * price}
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If the reservation were always released when wallet.charge fails, the stale-reservation failure would not occur.
+Evidence: inventory.reserve does self.reserved += qty so a reservation mutates reserved; wallet.charge raises ValueError when amount > balance and does not revert inventory; inventory.available() returns stock - reserved so a leaked reserved value reduces availability; the produced code adds inventory.release(qty) in the except before re-raising.
+Judgment: The developer's reasoning correctly and completely traces cause → mutation → exception → observable failure and specifies the invariant to restore; the provided code implements the described rollback. Minor hardening (e.g., guard release against underflow or use a transactional/finally pattern) would improve robustness but does not undermine the core fix.

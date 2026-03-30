@@ -1,0 +1,161 @@
+=== CALL 000033 ===
+MODEL: gpt-4.1-nano
+PHASE: generation
+CASE_ID: stale_cache_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:49:55.743480
+LATENCY_MS: 2848
+
+--- PROMPT ---
+API returns stale product data despite updates. Fix the caching issue. Return the updated code.
+
+## Codebase (3 files)
+
+### FILE 1/3: code_snippets_v2/stale_cache_c/api.py ###
+```python
+"""API layer: reads through two-layer cache."""
+
+from cache import get_local, get_shared, put_local, put_shared
+from catalog import db_get
+
+
+def get_product(product_id):
+    """Get product through cache layers: local -> shared -> DB."""
+    # Check local cache first
+    result = get_local(product_id)
+    if result is not None:
+        return result
+
+    # Check shared cache
+    result = get_shared(product_id)
+    if result is not None:
+        put_local(product_id, result)
+        return result
+
+    # Fall through to DB
+    result = db_get(product_id)
+    if result is not None:
+        put_shared(product_id, result)
+        put_local(product_id, result)
+    return result
+
+
+def format_product(product_id):
+    """Format product for display (distractor)."""
+    p = get_product(product_id)
+    if p is None:
+        return "Not found"
+    return f"{p['name']}: ${p['price']}"
+```
+
+### FILE 2/3: code_snippets_v2/stale_cache_c/cache.py ###
+```python
+"""Two-layer cache: local (per-request) and shared (global)."""
+
+_local = {}
+_shared = {}
+
+
+def get_local(key):
+    """Read from local cache."""
+    return _local.get(key)
+
+
+def put_local(key, value):
+    """Write to local cache."""
+    _local[key] = value
+
+
+def invalidate_local(key):
+    """Remove key from local cache."""
+    _local.pop(key, None)
+
+
+def get_shared(key):
+    """Read from shared cache."""
+    return _shared.get(key)
+
+
+def put_shared(key, value):
+    """Write to shared cache."""
+    _shared[key] = value
+
+
+def invalidate_shared(key):
+    """Remove key from shared cache."""
+    _shared.pop(key, None)
+
+
+def clear_all():
+    """Clear both layers."""
+    _local.clear()
+    _shared.clear()
+```
+
+### FILE 3/3: code_snippets_v2/stale_cache_c/catalog.py ###
+```python
+"""Product catalog with two-layer cache integration."""
+
+from cache import put_local, put_shared, invalidate_shared, invalidate_local
+
+_db = {}
+
+
+def add_product(product_id, name, price):
+    """Add product to database."""
+    _db[product_id] = {"name": name, "price": price}
+
+
+def db_get(product_id):
+    """Raw DB lookup."""
+    p = _db.get(product_id)
+    return dict(p) if p else None
+
+
+def update_product(product_id, **fields):
+    """Update product in DB and invalidate caches.
+
+    Invariant: after update, all cache layers must be invalidated.
+    """
+    if product_id not in _db:
+        return False
+    _db[product_id].update(fields)
+    invalidate_shared(product_id)
+    # BUG: local cache not invalidated — api.get_product reads local first
+    return True
+
+
+def reset():
+    """Clear DB."""
+    _db.clear()
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/stale_cache_c/api.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/stale_cache_c/cache.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/stale_cache_c/catalog.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{"root_cause": "The function update_product in catalog.py updates the product data in the database but only invalidates the shared cache layer using invalidate_shared(product_id). It does not invalidate the local cache layer, which may still hold stale data for the product.", "failure_mechanism": "When a product is updated via update_product, the shared cache is invalidated but the local cache remains unchanged. Subsequent calls to get_product will first check the local cache, find the stale data, and return it without fetching the updated data from the database, causing stale product data to be returned despite the update.", "broken_invariant": "After update_product is called for a product_id, both the local and shared cache layers must be invalidated so that subsequent get_product calls fetch fresh data from the database.", "fix_strategy": "Adding invalidate_local(product_id) in update_product ensures that both cache layers are invalidated after a product update, preventing stale data from being returned from the local cache layer.", "files": {"code_snippets_v2/stale_cache_c/api.py": "UNCHANGED", "code_snippets_v2/stale_cache_c/cache.py": "UNCHANGED", "code_snippets_v2/stale_cache_c/catalog.py": "```python\n\"\"\"Product catalog with two-layer cache integration.\"\"\"\n\nfrom cache import put_local, put_shared, invalidate_shared, invalidate_local\n\n_db = {}\n\n\ndef add_product(product_id, name, price):\n    \"\"\"Add product to database.\"\"\"\n    _db[product_id] = {\"name\": name, \"price\": price}\n\n\ndef db_get(product_id):\n    \"\"\"Raw DB lookup.\"\"\"\n    p = _db.get(product_id)\n    return dict(p) if p else None\n\n\ndef update_product(product_id, **fields):\n    \"\"\"Update product in DB and invalidate caches.\n\n    Invariant: after update, all cache layers must be invalidated.\n    \"\"\"\n    if product_id not in _db:\n        return False\n    _db[product_id].update(fields)\n    invalidate_shared(product_id)\n    invalidate_local(product_id)  # Invalidate local cache to prevent stale data\n    return True\n\n\ndef reset():\n    \"\"\"Clear DB.\"\"\"\n    _db.clear()\n```"}}

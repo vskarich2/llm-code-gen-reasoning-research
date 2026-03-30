@@ -1,0 +1,157 @@
+=== CALL 000078 ===
+MODEL: gpt-4.1-nano
+PHASE: generation
+CASE_ID: invariant_partial_fail
+CONDITION: baseline_v2
+TRIAL: 1
+RUN_ID: v2_smoke_parsefail_nano_001
+TRACE_ID: a38c685f40184de3955af7ae950fbebc
+TIMESTAMP: 2026-03-30T01:21:15.083477
+LATENCY_MS: 4908
+
+--- PROMPT ---
+The execute_transfer function has too many logging calls mixed with business logic. Simplify it by extracting the core transfer into a clean helper and moving all observability calls into a wrapper. Return the updated code.
+
+## Codebase (4 files)
+
+### FILE 1/4: code_snippets_v2/invariant_partial_fail/models.py ###
+```python
+class Account:
+    def __init__(self, account_id, balance):
+        self.account_id = account_id
+        self.balance = balance
+
+    def __repr__(self):
+        return f"Account({self.account_id}, balance={self.balance})"
+```
+
+### FILE 2/4: code_snippets_v2/invariant_partial_fail/ledger.py ###
+```python
+_entries = []
+
+
+def record_debit(account_id, amount):
+    _entries.append({"type": "debit", "account": account_id, "amount": amount})
+
+
+def record_credit(account_id, amount):
+    _entries.append({"type": "credit", "account": account_id, "amount": amount})
+
+
+def record_transfer_attempt(from_id, to_id, amount, status="pending"):
+    _entries.append({
+        "type": "transfer_attempt",
+        "from": from_id, "to": to_id,
+        "amount": amount, "status": status,
+    })
+
+
+def get_entries():
+    return list(_entries)
+```
+
+### FILE 3/4: code_snippets_v2/invariant_partial_fail/transfer_service.py ###
+```python
+import random
+from models import Account
+from ledger import record_debit, record_credit, record_transfer_attempt
+from audit import emit_transfer_event, emit_failure_alert
+
+
+def validate_transfer(sender, amount):
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    if sender.balance < amount:
+        raise ValueError("insufficient funds")
+
+
+def execute_transfer(sender, receiver, amount):
+    validate_transfer(sender, amount)
+
+    record_transfer_attempt(sender.account_id, receiver.account_id, amount)
+
+    sender.balance -= amount
+    record_debit(sender.account_id, amount)
+
+    if random.random() < 0.3:
+        emit_failure_alert(
+            sender.account_id, receiver.account_id, amount,
+            "connection reset during credit phase",
+        )
+        raise RuntimeError("transient failure during credit")
+
+    receiver.balance += amount
+    record_credit(receiver.account_id, amount)
+
+    emit_transfer_event(sender.account_id, receiver.account_id, amount)
+```
+
+### FILE 4/4: code_snippets_v2/invariant_partial_fail/audit.py ###
+```python
+_alerts = []
+
+
+def emit_transfer_event(from_id, to_id, amount):
+    _alerts.append({
+        "event": "transfer", "from": from_id,
+        "to": to_id, "amount": amount,
+    })
+
+
+def emit_failure_alert(from_id, to_id, amount, error):
+    _alerts.append({
+        "event": "transfer_failure", "from": from_id,
+        "to": to_id, "amount": amount, "error": str(error),
+    })
+
+
+def get_alerts():
+    return list(_alerts)
+```Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/invariant_partial_fail/models.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/invariant_partial_fail/ledger.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/invariant_partial_fail/transfer_service.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/invariant_partial_fail/audit.py": "<complete file contents or UNCHANGED>"}}
+
+Where:
+
+- "root_cause":
+  Identify the bug mechanism.
+  Must name the specific function/variable and explain the causal issue.
+
+- "fix_strategy":
+  Describe the exact code change and why it fixes the bug.
+  Must refer to a specific location and concrete operation.
+
+Requirements:
+- Be specific and code-grounded
+- Avoid vague phrases like "fix the issue" or "handle properly"
+- Your fix_strategy should make the intended code change obvious
+
+Examples:
+
+GOOD:
+- "create_config returns DEFAULTS directly, so it should return DEFAULTS.copy()"
+- "update_product writes to DB but does not invalidate cache, so cache must be cleared"
+
+BAD:
+- "fix shared state issue"
+- "update the cache correctly"
+
+RULES:
+- "root_cause" and "fix_strategy" are REQUIRED
+- "files" MUST include every file listed
+- Use "UNCHANGED" where appropriate
+- Include full contents for modified files
+- No markdown inside file values
+- Return ONLY the JSON object
+
+--- RESPONSE ---
+{
+  "root_cause": "The execute_transfer function mixes business logic with multiple logging and observability calls, such as record_transfer_attempt, emit_failure_alert, and emit_transfer_event, which makes the core transfer logic hard to test and maintain.",
+  "fix_strategy": "Extract the core transfer logic into a helper function named perform_transfer that only performs balance updates and ledger recording. Then, create a wrapper function execute_transfer that calls perform_transfer and surrounds it with all logging and observability calls, ensuring separation of concerns.",
+  "files": {
+    "code_snippets_v2/invariant_partial_fail/models.py": "UNCHANGED",
+    "code_snippets_v2/invariant_partial_fail/ledger.py": "UNCHANGED",
+    "code_snippets_v2/invariant_partial_fail/transfer_service.py": "import random\nfrom models import Account\nfrom ledger import record_debit, record_credit, record_transfer_attempt\nfrom audit import emit_transfer_event, emit_failure_alert\n\n\ndef validate_transfer(sender, amount):\n    if amount <= 0:\n        raise ValueError(\"amount must be positive\")\n    if sender.balance < amount:\n        raise ValueError(\"insufficient funds\")\n\n\ndef perform_transfer(sender, receiver, amount):\n    validate_transfer(sender, amount)\n\n    # Perform balance updates and ledger recording\n    sender.balance -= amount\n    record_debit(sender.account_id, amount)\n\n    # Simulate transient failure\n    if random.random() < 0.3:\n        raise RuntimeError(\"transient failure during credit\")\n\n    receiver.balance += amount\n    record_credit(receiver.account_id, amount)\n\n\ndef execute_transfer(sender, receiver, amount):\n    # Wrapper with observability calls\n    record_transfer_attempt(sender.account_id, receiver.account_id, amount)\n    try:\n        perform_transfer(sender, receiver, amount)\n    except Exception as e:\n        emit_failure_alert(\n            sender.account_id, receiver.account_id, amount,\n            str(e),\n        )\n        raise\n    emit_transfer_event(sender.account_id, receiver.account_id, amount)\n",
+    "code_snippets_v2/invariant_partial_fail/audit.py": "UNCHANGED"
+  }
+}

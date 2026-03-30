@@ -1,0 +1,183 @@
+=== CALL 000100 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: partial_rollback_a
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:06:43.854609
+LATENCY_MS: 23931
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+place_order: the except ValueError: raise operation re-raises the exception without calling inventory.release(qty), so the inventory variable's reserved counter is not decremented when wallet.charge fails.
+
+## Failure Mechanism
+Cause: place_order calls inventory.reserve(qty) which increments Inventory.reserved. Event: wallet.charge(qty * price) raises ValueError (insufficient funds). Mutation: control flow enters the except ValueError block and immediately re-raises the exception without calling inventory.release(qty). Propagation: the exception propagates to the caller while Inventory.reserved remains incremented. Observable failure: Inventory.available() is permanently reduced (stock effectively 'leaked' as reserved), subsequent orders may be incorrectly blocked by the stuck reservation.
+
+## Broken Invariant
+After a failed place_order (where wallet.charge raises), inventory.reserved must be decreased by qty (i.e., reserved returns to its prior value). Currently, this invariant is violated: inventory.reserved remains increased after a failed charge.
+
+## Fix Strategy
+Modify place_order so that if wallet.charge fails it explicitly releases the previously reserved inventory before re-raising. Make Inventory.release robust and idempotent (clamp reserved to zero) and validate inputs (non-negative qty/amount) so release cannot accidentally raise during normal rollback. This change breaks the causal chain because: reserve increments reserved, and on any charging failure the except handler now calls inventory.release(qty) to undo the mutation, restoring the invariant that failed orders do not leave reservations.
+
+
+## Self-Check
+{'failure_scenario': 'If Inventory.release raised an exception while handling the except block in place_order, the release attempt could mask the original wallet.charge exception or leave state inconsistent. Example: if release raised because qty was negative or reserved was in an unexpected state, the caller would receive the release exception instead of the original charge failure, and reserved might remain incorrect. In the updated code, release is implemented to be idempotent (it clamps reserved to >= 0) and only raises on a negative qty input, so for the normal rollback path (where qty is the same as previously reserved and non-negative) release will not raise. Thus the scenario is mitigated by making release safe.', 'edge_case': 'Boundary condition: qty == 0 or price == 0. The code permits reserving 0 (reserve(0) is a no-op but allowed) and charging 0 will succeed. Multiple repeated calls with qty==0 should not change inventory.reserved or wallet.balance. Another edge: concurrent or interleaved calls modifying the same Inventory instance are not synchronized by this code; this module does not attempt to be thread-safe.', 'invariant_check': 'Under multiple calls: reserve increments reserved; on success, place_order returns confirmed and does not call release (reservation remains — representing sold/reserved semantics in this simple model). On failure (wallet.charge raising), catch Exception in place_order executes inventory.release(qty) which uses a clamp so reserved decreases by qty (never goes negative). Under retries/loops: repeated failed charges will reserve then release each time, so reserved returns to prior value after each failure. Under state reuse: if inventory.reserved was already less than qty due to external mutation, release clamps reserved to zero and will not raise, preventing further corruption. Thus the invariant (no leaked reservation after failed charge) holds for typical sequences in this module.', 'conclusion': 'No flaw requiring code revision was found in this fix path: calling inventory.release(qty) in the except block and making Inventory.release idempotent prevents reservation leakage when wallet.charge fails. For real concurrent systems further synchronization would be required, but within this single-threaded design the fix is safe.'}
+
+
+# Task Description
+Refactor this order system for clarity. Return the updated code.
+
+# Code Produced
+```python
+ """Order fulfillment with inventory and wallet."""
+
+
+class Inventory:
+    def __init__(self, stock):
+        self.stock = stock
+        self.reserved = 0
+
+    def reserve(self, qty):
+        if qty < 0:
+            raise ValueError("qty must be non-negative")
+        if qty > self.stock - self.reserved:
+            raise ValueError("insufficient stock")
+        self.reserved += qty
+
+    def release(self, qty):
+        if qty < 0:
+            raise ValueError("qty must be non-negative")
+        # Make release idempotent and safe: never produce negative reserved
+        self.reserved = max(0, self.reserved - qty)
+
+    def available(self):
+        return self.stock - self.reserved
+
+
+class Wallet:
+    def __init__(self, balance):
+        self.balance = balance
+
+    def charge(self, amount):
+        if amount < 0:
+            raise ValueError("amount must be non-negative")
+        if amount > self.balance:
+            raise ValueError("insufficient funds")
+        self.balance -= amount
+
+
+def place_order(inventory, wallet, qty, price):
+    """Reserve inventory, then charge wallet. Release on failure."""
+    inventory.reserve(qty)
+    try:
+        wallet.charge(qty * price)
+    except Exception:
+        # ensure reservation is released if charging fails
+        inventory.release(qty)
+        raise
+    return {"status": "confirmed", "qty": qty, "total": qty * price}
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If the except-path were changed to always release the previously reserved qty (or the reserve never happened), the reservation leak would not occur.
+Evidence: - place_order calls inventory.reserve(qty) which increments Inventory.reserved; - Wallet.charge(amount) raises ValueError when amount > balance, causing an exception during charging; - original failure was that control re-raised without calling inventory.release, leaving reserved incremented; - updated place_order catches exceptions and calls inventory.release(qty) before re-raising; - Inventory.release clamps reserved to max(0, reserved - qty) and validates qty so rollback won't usually raise.
+Judgment: The developer precisely identified the mutated variable and gave a complete causal chain and invariant; the proposed fix matches the diagnosis and the code implements it, though catching Exception (vs ValueError) may be broader than intended and concurrency concerns remain unaddressed.

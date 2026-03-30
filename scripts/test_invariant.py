@@ -17,7 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from exec_eval import _CASE_TESTS
+from exec_eval import _CASE_TESTS, load_module_from_code
+from code_assembly import assemble_code
 
 
 def main():
@@ -25,6 +26,7 @@ def main():
     parser.add_argument("test_name", help="Key in _CASE_TESTS (e.g. alias_mutation_shadow)")
     parser.add_argument("code_file", nargs="?", help="Path to .py file with code to test")
     parser.add_argument("--inline", help="Inline code string to test")
+    parser.add_argument("--case-id", help="Case ID for assembly context (uses cases_v2.json)")
     args = parser.parse_args()
 
     if args.test_name not in _CASE_TESTS:
@@ -40,9 +42,27 @@ def main():
         print("Provide either a code_file or --inline")
         sys.exit(1)
 
-    mod = types.ModuleType("test_mod")
+    # Build case context for assembly
+    import json
+    cases = json.loads((Path(__file__).resolve().parents[1] / "cases_v2.json").read_text())
+    case = None
+    if args.case_id:
+        case = next((c for c in cases if c["id"] == args.case_id), None)
+    if case is None:
+        # Try to match test_name to a case
+        case = next((c for c in cases if c["id"] == args.test_name), None)
+    if case is None:
+        # Minimal case — single file, no assembly needed
+        case = {"code_files": [], "code_files_contents": {}, "failure_mode": "TEST", "reference_fix": {}}
+
+    # Assemble through canonical path
+    asm = assemble_code(code, case)
+    if asm.status != "SUCCESS":
+        print(f"ASSEMBLY ERROR: {asm.errors}")
+        sys.exit(1)
+
     try:
-        exec(code, mod.__dict__)
+        mod = load_module_from_code(asm.code, "test_mod")
     except Exception as e:
         print(f"LOAD ERROR: {e}")
         sys.exit(1)

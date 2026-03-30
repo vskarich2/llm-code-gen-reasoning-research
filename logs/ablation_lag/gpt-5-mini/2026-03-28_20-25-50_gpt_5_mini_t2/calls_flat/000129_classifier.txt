@@ -1,0 +1,172 @@
+=== CALL 000129 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: missing_branch_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:11:22.490978
+LATENCY_MS: 17916
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In code_snippets_v2/missing_branch_c/auth.py the function authorize uses the local variable role (ctx['role']) but lacks a branch handling the 'service_account' role. As a result, when authenticate(request) returns ctx with role == 'service_account' and allowed == True, authorize falls through to the final else and returns all False.
+
+## Failure Mechanism
+Given a request = {'role': 'service_account', ...}, middleware.authenticate(request) correctly returns something like {'role': 'service_account', 'allowed': True, 'elevated': True}. authorize(request) then sets ctx = authenticate(request), sees ctx.get('allowed') is True and role = ctx['role'] == 'service_account', but because authorize only tests 'admin', 'moderator', 'user', and 'guest', it hits the final else branch and returns {'can_read': False, 'can_write': False, 'can_admin': False}. Thus an allowed service account is denied access despite middleware allowing it.
+
+## Broken Invariant
+If middleware.authenticate(request) returns a context with 'allowed': True and 'role' == 'service_account', then authorize(request) must return permissions granting access (authorize(request)['can_read'] == True, authorize(request)['can_write'] == True, and authorize(request)['can_admin'] == True). Currently that invariant is violated because authorize returns all False for that role.
+
+## Fix Strategy
+Add an explicit branch in authorize to handle role == 'service_account' and return the intended permission set. This directly fixes the missing-case fall-through that caused allowed service accounts to be denied. The change is minimal and preserves existing behavior for other roles.
+
+
+
+# Task Description
+Service accounts denied despite middleware allowing. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Authorization handler: decides what a role can do."""
+
+from middleware import authenticate
+from roles import get_role_level
+
+
+def authorize(request):
+    """Authorize a request by checking middleware + handler logic.
+
+    Returns dict with 'can_read', 'can_write', 'can_admin'.
+    """
+    ctx = authenticate(request)
+    if not ctx.get("allowed"):
+        return {"can_read": False, "can_write": False, "can_admin": False}
+
+    role = ctx["role"]
+
+    # BUG: handler doesn't handle "service_account" — falls to default
+    if role == "admin":
+        return {"can_read": True, "can_write": True, "can_admin": True}
+    elif role == "service_account":
+        # Service accounts are recognized by middleware as elevated; grant full access
+        return {"can_read": True, "can_write": True, "can_admin": True}
+    elif role == "moderator":
+        return {"can_read": True, "can_write": False, "can_admin": True}
+    elif role == "user":
+        return {"can_read": True, "can_write": True, "can_admin": False}
+    elif role == "guest":
+        return {"can_read": True, "can_write": False, "can_admin": False}
+    else:
+        # Unknown role — no access
+        return {"can_read": False, "can_write": False, "can_admin": False}
+
+
+def get_authorization_summary(request):
+    """Return a human-readable summary of authorization."""
+    result = authorize(request)
+    perms = [k for k, v in result.items() if v]
+    return {"role": request.get("role"), "permissions": perms}
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If the authorize function handled 'service_account' (or mapped that role to full permissions), the observed denial would not occur.
+Evidence: ctx = authenticate(request) and short-circuit deny on not ctx.get("allowed"); role = ctx["role"] is compared against branches; before fix no 'service_account' branch so final else returns all False; added elif role == "service_account" returns all True permissions.
+Judgment: The reasoning accurately identifies the missing-case causal chain from authenticate -> ctx.role -> authorize fall-through -> denial, states a precise invariant, and the code implements the exact fix to restore the invariant.

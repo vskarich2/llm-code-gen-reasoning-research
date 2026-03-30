@@ -1,0 +1,170 @@
+=== CALL 000094 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: retry_dup_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:59:21.317261
+LATENCY_MS: 26023
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In pipeline.ingest (code_snippets_v2/retry_dup_c/pipeline.py) the for-loop over max_pipeline_retries calls send_with_retry(...) but lacks a break after a successful call. Because send_with_retry itself performs the send (which calls sender.send that appends messages via store.append and records notifications via store.notify), the pipeline loop will invoke send_with_retry again and cause additional calls to sender.send for the same message.
+
+## Failure Mechanism
+Example: call ingest(msg, max_pipeline_retries=2, fail_first=True). On the first pipeline attempt, send_with_retry will internally retry via sender.send: sender.send fails on its first try (raising ConnectionError) and succeeds on its second try, which appends msg once. Back in pipeline.ingest, there is no break, so the pipeline loop proceeds to its second attempt and calls send_with_retry again — sender.send will append msg again. The result is msg appearing multiple times in store._messages and multiple notifications, typically doubling the expected single append (so messages appear 2x, and depending on nested retry counts could be 3-4 times).
+
+## Broken Invariant
+Calling ingest(msg, ...) must result in exactly one append of msg to store._messages and exactly one notification for that msg; formally, after reset() and a single ingest(msg) call, store.message_count() == 1 and len([n for n in get_notifications() if n['msg'] == msg]) == 1.
+
+## Fix Strategy
+Stop the pipeline-level retry loop once send_with_retry succeeds. I added an explicit break after the successful send_with_retry(...) call in pipeline.ingest so the pipeline does not make an additional successful call to sender.send. I also replaced the previous attempt to directly reset other module-level variables in pipeline.reset with calls to the appropriate reset functions (store.reset and sender.reset_sender) so reset properly reinitializes shared state rather than creating local globals that don't affect the other modules. Together these changes prevent duplicate invocations of sender.send for the same ingest and ensure a clean reset.
+
+
+# Task Description
+Messages appearing 3-4 times. Fix the retry logic. Return the updated code.
+
+# Code Produced
+```python
+"""Ingestion pipeline with its own retry around sender."""
+
+from sender import send_with_retry, reset_sender
+from store import get_messages, reset as reset_store
+
+_ingest_log = []
+
+
+def reset():
+    global _ingest_log
+    _ingest_log = []
+    # Reset shared state in other modules instead of trying to reassign their globals
+    reset_store()
+    reset_sender()
+
+
+def ingest(msg, max_pipeline_retries=2, fail_first=False):
+    """Ingest a message with pipeline-level retry."""
+    for attempt in range(max_pipeline_retries):
+        try:
+            send_with_retry(msg, max_retries=2, fail_first=fail_first)
+            # Successful send; stop pipeline-level retry to avoid duplicate sends
+            break
+        except ConnectionError:
+            continue
+    _ingest_log.append(msg)
+    return True
+
+
+def get_ingest_log():
+    return list(_ingest_log)
+
+
+def batch_ingest(messages):
+    """Ingest multiple messages. Legitimate batch — no retry needed."""
+    for msg in messages:
+        send_with_retry(msg, max_retries=1)
+    return len(messages)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;RETRY_LOGIC_BUG
+HIGH
+Counterfactual: If the pipeline loop stopped after the first successful send (i.e., the missing break were added), the duplicate appends/notifications would not occur.
+Evidence: - ingest() iterates for attempt in range(max_pipeline_retries) and calls send_with_retry; - send_with_retry performs the actual sender.send which appends to store and notifies; - without a break the outer loop re-invokes send_with_retry after an internal retry-success, causing multiple store.append calls; - reset() now calls reset_store() and reset_sender() to properly reinitialize shared state.
+Judgment: The developer correctly identifies the missing break in pipeline.ingest as the causal root, traces how inner retries plus an unbroken outer loop produce duplicate appends/notifications, and implemented a fix that matches the reasoning (break on success and proper resets).

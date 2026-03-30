@@ -1,0 +1,125 @@
+=== CALL 000220 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: check_then_act
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:46:30.275731
+LATENCY_MS: 30248
+
+--- PROMPT ---
+Under interleaving, two withdrawals of 80 from balance=100 both succeed, leaving -60. Fix so balance never goes negative.
+
+## Codebase (1 file)
+
+### FILE 1/1: code_snippets_v2/check_then_act/bank.py ###
+```python
+"""Bank with non-atomic check-then-act withdrawal, simulated via steps."""
+
+_accounts = {}
+
+
+def reset():
+    _accounts.clear()
+
+
+def create_account(name, balance):
+    _accounts[name] = balance
+
+
+def get_balance(name):
+    return _accounts.get(name, 0)
+
+
+def check_balance(name, amount):
+    """CHECK: is balance sufficient?"""
+    return _accounts.get(name, 0) >= amount
+
+
+def do_withdraw(name, amount):
+    """ACT: decrement balance. Assumes caller verified."""
+    _accounts[name] = _accounts.get(name, 0) - amount
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def make_withdraw_steps(name, amount):
+    """Split withdrawal into separate check and act steps.
+
+    BUG: under interleaving, both checks pass before either debits.
+    """
+    result = {"approved": False}
+
+    def step_check():
+        result["approved"] = check_balance(name, amount)
+        return ("check", result["approved"])
+
+    def step_act():
+        if result["approved"]:
+            do_withdraw(name, amount)
+        return ("act", result["approved"])
+
+    return step_check, step_act
+
+
+def sequential_withdrawals():
+    """Two withdrawals of 80 from balance=100. Sequential: second denied."""
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (act_a, ()), (check_b, ()), (act_b, ())])
+    return get_balance("alice")
+
+
+def interleaved_withdrawals():
+    """Two withdrawals of 80, interleaved: BUG — both approved, overdraft."""
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (check_b, ()), (act_a, ()), (act_b, ())])
+    return get_balance("alice")
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/check_then_act/bank.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "In make_withdraw_steps the inner function step_act uses the closure variable result['approved'] (set earlier by step_check) to decide whether to call do_withdraw(name, amount) without re-checking the current account balance. Because make_withdraw_steps is called twice (creating two distinct result dictionaries) both step_check functions can set their own result['approved'] = True, and each corresponding step_act will blindly call do_withdraw based only on its own result['approved']. This causal chain (step_check -> result['approved'] True -> step_act unconditionally calling do_withdraw) allows multiple withdrawals to proceed even if intervening operations have reduced the balance.",
+  "failure_mechanism": "Concrete interleaving: reset(); create_account('alice', 100); make_withdraw_steps is called twice, producing (check_a, act_a) with result_a and (check_b, act_b) with result_b. run_steps executes (check_a) which sets result_a['approved'] = True (balance >= 80 at that moment). Then (check_b) runs and sets result_b['approved'] = True (balance still 100). Now (act_a) runs: it sees result_a['approved'] True and calls do_withdraw('alice', 80), reducing the balance to 20. Then (act_b) runs: it sees result_b['approved'] True (from its earlier check) and calls do_withdraw('alice', 80) again, reducing the balance to -60. Because step_act did not re-check the current balance via check_balance before performing the decrement, the second withdrawal proceeds even though the account no longer has sufficient funds.",
+  "broken_invariant": "After any sequence of steps executed via run_steps, for every account name the balance must be non-negative: get_balance(name) >= 0. The current implementation allows get_balance('alice') to become -60 after the interleaved sequence described above, violating this invariant.",
+  "fix_strategy": "Enforce the check-and-act atomicity at the act step by re-checking the current balance inside step_act before calling do_withdraw. The change makes step_act call check_balance(name, amount) and only performs do_withdraw if that check returns True; otherwise it sets result['approved'] = False and does not withdraw. This prevents an act from relying solely on a stale approval flag and stops overdrawing even when checks were interleaved. Because the guard uses the same check_balance and the actual subtraction do_withdraw, this preserves intended behavior for sequential operations while preventing the described interleaving failure.",
+  "files": {
+    "code_snippets_v2/check_then_act/bank.py": " \"\"\"Bank with non-atomic check-then-act withdrawal, simulated via steps.\"\"\"\n\n_accounts = {}\n\n\ndef reset():\n    _accounts.clear()\n\n\ndef create_account(name, balance):\n    _accounts[name] = balance\n\n\ndef get_balance(name):\n    return _accounts.get(name, 0)\n\n\ndef check_balance(name, amount):\n    \"\"\"CHECK: is balance sufficient?\"\"\"\n    return _accounts.get(name, 0) >= amount\n\n\ndef do_withdraw(name, amount):\n    \"\"\"ACT: decrement balance. Assumes caller verified.\"\"\"\n    _accounts[name] = _accounts.get(name, 0) - amount\n\n\ndef run_steps(steps):\n    results = []\n    for fn, args in steps:\n        results.append(fn(*args))\n    return results\n\n\ndef make_withdraw_steps(name, amount):\n    \"\"\"Split withdrawal into separate check and act steps.\n\n    The act step now re-checks the balance before debiting to avoid\n    acting on a stale approval produced by an earlier check.\n    \"\"\"\n    result = {\"approved\": False}\n\n    def step_check():\n        result[\"approved\"] = check_balance(name, amount)\n        return (\"check\", result[\"approved\"])\n\n    def step_act():\n        # Re-check current balance before performing the withdrawal.\n        # If the balance is no longer sufficient, do not withdraw and\n        # mark approved False to reflect the actual outcome.\n        if result[\"approved\"] and check_balance(name, amount):\n            do_withdraw(name, amount)\n            result[\"approved\"] = True\n        else:\n            result[\"approved\"] = False\n        return (\"act\", result[\"approved\"])\n\n    return step_check, step_act\n\n\ndef sequential_withdrawals():\n    \"\"\"Two withdrawals of 80 from balance=100. Sequential: second denied.\"\"\"\n    reset()\n    create_account(\"alice\", 100)\n    check_a, act_a = make_withdraw_steps(\"alice\", 80)\n    check_b, act_b = make_withdraw_steps(\"alice\", 80)\n    run_steps([(check_a, ()), (act_a, ()), (check_b, ()), (act_b, ())])\n    return get_balance(\"alice\")\n\n\ndef interleaved_withdrawals():\n    \"\"\"Two withdrawals of 80, interleaved: fixed — second denied, no overdraft.\"\"\"\n    reset()\n    create_account(\"alice\", 100)\n    check_a, act_a = make_withdraw_steps(\"alice\", 80)\n    check_b, act_b = make_withdraw_steps(\"alice\", 80)\n    run_steps([(check_a, ()), (check_b, ()), (act_a, ()), (act_b, ())])\n    return get_balance(\"alice\")\n"
+  }
+}

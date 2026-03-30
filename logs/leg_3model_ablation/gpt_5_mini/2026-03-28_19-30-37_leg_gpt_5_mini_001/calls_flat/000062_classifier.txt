@@ -1,0 +1,166 @@
+=== CALL 000062 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: missing_branch_a
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:55:27.551795
+LATENCY_MS: 15344
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+get_permissions + ROLE_PERMISSIONS: the ROLE_PERMISSIONS mapping did not include a "moderator" key, so get_permissions('moderator') fell back to the default empty set and has_permission incorrectly returned False for moderators.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Add an explicit "moderator" entry to ROLE_PERMISSIONS with an appropriate permission set, and make lookups more robust and clear by normalizing role and action inputs (case-insensitive) and returning an empty set for unknown or non-string roles. This prevents accidental fall-through to an empty permission set for known roles and makes permission checks deterministic.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure would be mismatches caused by non-string role or action values or by callers expecting different casing/format. I mitigated this by checking that role and action are strings and normalizing with .strip().lower(). If callers relied on non-string roles or wanted an exception for unknown roles, behavior would change; I judged returning an empty set / False to be the safer, backward-compatible approach. No further revision required.
+
+
+# Task Description
+Refactor this access control for clarity. Return the updated code.
+
+# Code Produced
+```python
+"""Access control: map roles to permission sets."""
+
+ROLE_PERMISSIONS = {
+    "admin": {"read", "write", "delete", "manage_users"},
+    "user": {"read", "write"},
+    "moderator": {"read", "delete", "manage_reports"},
+}
+
+
+def get_permissions(role):
+    """Return the set of permissions for the given role.
+
+    Role comparisons are case-insensitive. Non-string or unknown roles
+    return an empty set.
+    """
+    if not isinstance(role, str):
+        return set()
+    key = role.strip().lower()
+    return ROLE_PERMISSIONS.get(key, set())
+
+
+def has_permission(role, action):
+    """Check whether a role has a specific permission.
+
+    Both role and action comparisons are case-insensitive.
+    """
+    if not isinstance(action, str):
+        return False
+    return action.strip().lower() in get_permissions(role)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;WRONG;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: If ROLE_PERMISSIONS contained the correct "moderator" entry (or get_permissions normalized and mapped roles), moderators would not be incorrectly denied permission.
+Evidence: ROLE_PERMISSIONS lookup uses ROLE_PERMISSIONS.get(key, set()) so a missing "moderator" key yields an empty set; has_permission returns action.strip().lower() in get_permissions(role) so an empty permission set causes False; produced code adds "moderator" and normalizes role/action, matching the proposed fix.
+Judgment: The developer correctly pinpointed the missing mapping and traced cause→fallback→failure, and the fix aligns and is implemented; however they failed to state the violated invariant (that known roles must appear in ROLE_PERMISSIONS), so the reasoning is otherwise complete but missing that explicit invariant.

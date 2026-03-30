@@ -1,0 +1,200 @@
+=== CALL 000026 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: stale_cache_a
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:32:45.814545
+LATENCY_MS: 15367
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+The bug is in update_product: it updates the in-memory database _db[product_id] but does not modify or remove the corresponding entry in _cache. Because update_product leaves _cache unchanged, later calls to get_product can return the old cached dict instead of the updated data.
+
+## Failure Mechanism
+Concrete sequence: add_product('p1', 'Widget', 10.0) stores the product in _db. get_product('p1') caches {'name': 'Widget', 'price': 10.0'} in _cache and returns it. update_product('p1', price=12.0) updates _db['p1']['price'] to 12.0 but does not touch _cache['p1']. A subsequent get_product('p1') sees the key in _cache and returns the cached dict with price 10.0, so callers observe stale data.
+
+## Broken Invariant
+After update_product(product_id, ...) returns True, get_product(product_id) must return a dictionary equal to the current _db[product_id] (for example, the 'price' field returned by get_product must equal _db[product_id]['price']). This invariant is violated because the cache can hold old values.
+
+## Fix Strategy
+Invalidate (remove) the cached entry for the product id whenever the authoritative _db is changed. Specifically, add_product and update_product now call _invalidate_cache(product_id) (which pops the entry from _cache). get_product stores a shallow copy of the DB entry into the cache and returns a copy to callers, preventing external mutation of the cached object. These changes ensure that after an update, get_product will fetch fresh data from _db and repopulate _cache with the up-to-date values.
+
+
+# Task Description
+Refactor this product catalog for clarity. Return the updated code.
+
+# Code Produced
+```python
+"""Product catalog with caching.
+
+This module maintains an in-memory product database and a simple read cache.
+Cache entries are invalidated when the authoritative database is changed so
+that callers never observe stale data after updates.
+"""
+from typing import Any, Dict, Optional
+
+_db: Dict[str, Dict[str, Any]] = {}
+_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def _invalidate_cache(product_id: str) -> None:
+    """Remove a product entry from the cache if present."""
+    _cache.pop(product_id, None)
+
+
+def add_product(product_id: str, name: str, price: float) -> None:
+    """Add or replace a product in the database and invalidate cache.
+
+    The cache is invalidated for the product id to avoid keeping a stale
+    cached entry when a product is added or replaced.
+    """
+    _db[product_id] = {"name": name, "price": price}
+    _invalidate_cache(product_id)
+
+
+def get_product(product_id: str) -> Optional[Dict[str, Any]]:
+    """Get product by ID, using cache for repeated lookups.
+
+    Returns a shallow copy of the cached or database dict so callers cannot
+    mutate internal cache/state directly.
+    """
+    # Return a copy of the cached entry if present
+    cached = _cache.get(product_id)
+    if cached is not None:
+        return dict(cached)
+
+    # Populate cache from authoritative DB if present
+    product = _db.get(product_id)
+    if product is not None:
+        # store a shallow copy in cache so later DB mutations do not
+        # mutate the cached object unexpectedly
+        _cache[product_id] = dict(product)
+        return dict(_cache[product_id])
+
+    return None
+
+
+def update_product(product_id: str, **fields: Any) -> bool:
+    """Update product fields in the database and invalidate cache.
+
+    Invariant: get_product() must return current data after update.
+    Returns True if the product existed and was updated, False otherwise.
+    """
+    if product_id not in _db:
+        return False
+    _db[product_id].update(fields)
+    # Invalidate cache for this product id so future get_product calls
+    # will see the updated authoritative data from _db.
+    _invalidate_cache(product_id)
+    return True
+
+
+def reset() -> None:
+    """Clear all data (database and cache)."""
+    _db.clear()
+    _cache.clear()
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If update_product removed or updated the cache (i.e., invalidated stale entries) then subsequent get_product calls would not observe stale data.
+Evidence: get_product reads _cache via _cache.get(product_id) and returns dict(cached); update_product performs _db[product_id].update(fields) and (in the refactor) calls _invalidate_cache(product_id) which does _cache.pop(product_id, None); add_product assigns _db[product_id] = {...} and invalidates cache so cache cannot retain prior values.
+Judgment: The developer's reasoning forms a complete causal chain from update_product mutating _db but leaving _cache unchanged to get_product returning stale data, states a precise invariant, and proposes a fix that the code implements; the only missing discussion is concurrency/atomicity trade-offs, but that does not invalidate the causal explanation.

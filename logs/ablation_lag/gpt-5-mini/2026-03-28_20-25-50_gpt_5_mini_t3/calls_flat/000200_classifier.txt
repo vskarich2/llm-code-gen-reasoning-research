@@ -1,0 +1,169 @@
+=== CALL 000200 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: async_race_lock
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:37:20.225807
+LATENCY_MS: 23074
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+worker.process_item directly called state.increment while state._counter contained an unused 'locked' flag and try_lock/unlock functions, creating unnecessary locking API/overhead and duplicate increment paths (process_item vs quick_increment), leading to inconsistent code paths and maintenance complexity.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Make process_item delegate to quick_increment everywhere and remove the unused locking machinery from state.py. Concretely: (1) update worker.process_item to simply call quick_increment(item) so there's a single increment path; (2) remove _counter['locked'], try_lock, and unlock from state.py, leaving only the counter value, increment, get_counter, and reset. This eliminates the unused locking API and ensures all increments use the same fast code path.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure is if some other part of the codebase imported or relied on try_lock/unlock or the 'locked' flag; that would raise ImportError or lead to missing behavior. I inspected the provided files: only worker.py imported try_lock/unlock and it no longer does, so there is no remaining external dependency. Therefore the fix is safe for this codebase. No revision was necessary.
+
+
+# Task Description
+process_item and quick_increment both increment the counter. Simplify by using quick_increment everywhere and removing the locking overhead. Return the updated code.
+
+# Code Produced
+```python
+_counter = {"value": 0}
+
+
+def get_counter():
+    return _counter["value"]
+
+
+def increment(n=1):
+    _counter["value"] += n
+
+
+def reset():
+    _counter["value"] = 0
+
+
+from state import increment
+
+
+def quick_increment(item):
+    increment(item["weight"])
+    return {"status": "ok"}
+
+
+def process_item(item):
+    return quick_increment(item)
+
+
+def process_batch_serial(items):
+    results = []
+    for item in items:
+        results.append(process_item(item))
+    return results
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+PARTIAL;WRONG;WRONG;CORRECT;PARTIAL;HIDDEN_DEPENDENCY
+MEDIUM
+Counterfactual: Removing the direct increment path (making process_item call quick_increment) would not prevent failures caused by lack of atomicity or by other call sites that relied on the removed try_lock/unlock API.
+Evidence: process_item now delegates to quick_increment; quick_increment calls increment(item["weight"]); the provided code no longer defines _counter['locked'], try_lock, or unlock; the file shows both a local increment definition and "from state import increment" (a contradiction/import confusion); there are no concurrency primitives so atomic increments are not enforced.
+Judgment: The developer correctly spotted duplicate increment paths and proposes a fix that centralizes increments, but they failed to state the violated invariant or trace a full causal chain from cause to observable failure; the produced code partially implements the plan but contains an import/definition mismatch and removes locking without proving it is unused elsewhere.

@@ -1,0 +1,173 @@
+=== CALL 000036 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: stale_cache_c
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:36:01.571446
+LATENCY_MS: 13365
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+catalog.update_product: missing call to invalidate_local(product_id) after _db[product_id].update(fields); the function invalidates_shared(product_id) but does not remove the stale entry from cache._local, so the local cache remains stale.
+
+## Failure Mechanism
+Cause → mutation/event: update_product(product_id, **fields) performs _db[product_id].update(fields) (the DB is changed).
+Propagation: update_product calls invalidate_shared(product_id) but does not call invalidate_local(product_id), so cache._shared is invalidated but cache._local (the local layer) still contains the pre-update value.
+Observable failure: api.get_product(product_id) calls get_local(product_id) first, finds the stale entry in cache._local, and returns stale data to callers instead of the updated DB value.
+
+## Broken Invariant
+After update_product(product_id, ...), all cache layers must be invalidated so that subsequent get_product(product_id) returns the updated DB value. Testable: add product, call get_product (populates local), call update_product(...), then call get_product(...) — it should return updated fields; currently it does not because local remains stale.
+
+## Fix Strategy
+Call invalidate_local(product_id) from catalog.update_product immediately after updating the DB and after invalidate_shared(product_id). This ensures both cache layers are removed on updates so api.get_product cannot return a stale value from the local cache. This change severs the causal chain: DB update → caches cleared (shared + local) → subsequent get_product will fetch from DB (and repopulate caches) rather than returning stale local data.
+
+
+## Self-Check
+{'failure_scenario': 'Concurrent access: if one thread updates the product and invalidates caches while another thread concurrently calls get_product, a race can occur. Example interleaving: Thread A updates DB and invalidates_shared; Thread B calls get_product, finds no local entry, calls get_shared and may get None if shared was invalidated and DB not updated yet, then falls back to db_get; or Thread B may find a stale local entry if it read local before invalidation. The fix does not add synchronization, so in a multi-threaded environment there remains a race between reads and writes. The current code base uses module-level caches without locks, so this scenario could still surface transient inconsistencies.', 'edge_case': "Updating with empty fields (update_product(product_id) with no fields): _db[product_id].update({}) still runs and will still perform invalidate_shared and invalidate_local; the code will still invalidate caches. Another edge case: updating a product that doesn't exist returns False and performs no invalidation — this is intentional. Also, fields that set values to None are written into the DB; caches are invalidated regardless.", 'invariant_check': "Verify invariant under multiple calls, retries, and state reuse using the actual code:\n- Multiple calls: sequence: add_product -> get_product (populates local via put_local) -> update_product (now invalidates_shared and invalidate_local) -> get_product: get_local returns None (local invalidated), get_shared returns None (shared invalidated), db_get returns updated DB row, put_shared and put_local store updated value. Thus invariant holds.\n- Retries/loops: calling update_product repeatedly will invalidate both caches each time; caches won't retain stale entries beyond the call.\n- State reuse (process-global caches): since caches are process-global, the fix ensures any process-wide local entry for that product is removed on update_product. This prevents cross-call stale reads in the single-process case.\nAll of the above are satisfied by calling invalidate_local(product_id) in catalog.update_product.\nNote: the remaining risk is concurrency (no locks). If the environment is multi-threaded or multi-process, further synchronization or atomic update semantics (or versioning/TTL) would be required. Given the code's structure (in-memory dict caches), adding invalidate_local addresses the direct correctness bug in single-threaded/process control flow.", 'conclusion': 'No flaw in the specific fix (adding invalidate_local) for the stated bug: it directly removes the stale entry from the local cache and restores the invariant that callers see updated product data after update_product. The only remaining class of issues are concurrency/race conditions and cross-process shared cache coherence, which are outside the narrow bug (missing local invalidation) and would require a different design (locking, atomic compare-and-swap, or a centralized cache with pub/sub). Therefore the fix is correct and safe within the existing code model.'}
+
+
+# Task Description
+API returns stale product data despite updates. Fix the caching issue. Return the updated code.
+
+# Code Produced
+```python
+'''Product catalog with two-layer cache integration.'''
+
+from cache import put_local, put_shared, invalidate_shared, invalidate_local
+
+_db = {}
+
+
+def add_product(product_id, name, price):
+    '''Add product to database.'''
+    _db[product_id] = {'name': name, 'price': price}
+
+
+def db_get(product_id):
+    '''Raw DB lookup.'''
+    p = _db.get(product_id)
+    return dict(p) if p else None
+
+
+def update_product(product_id, **fields):
+    '''Update product in DB and invalidate caches.
+
+    Invariant: after update, all cache layers must be invalidated.
+    '''
+    if product_id not in _db:
+        return False
+    _db[product_id].update(fields)
+    # Invalidate both cache layers so no stale local/shared entries remain
+    invalidate_shared(product_id)
+    invalidate_local(product_id)
+    return True
+
+
+def reset():
+    '''Clear DB.'''
+    _db.clear()
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If update_product removed the missing invalidate_local (so both invalidate_shared and invalidate_local run), the specific stale-local-cache failure would not occur in the single-process/single-thread execution model.
+Evidence: _db[product_id].update(fields) mutates the in-memory DB dict; developer notes update_product originally called invalidate_shared but not invalidate_local so cache._local could still hold pre-update dict; produced fix adds invalidate_local(product_id) immediately after invalidate_shared in update_product; get_product/get_local reads the local cache first (developer's propagation) which explains why stale data could be returned.
+Judgment: The developer's reasoning is causally precise and complete: they identify the exact mutation (_db.update), the missing invalidation (invalidate_local), the propagation path (local cache lookup returns stale entry), and the fix matches the diagnosis; they also correctly flag remaining concurrency/race risks as outside this specific bug.

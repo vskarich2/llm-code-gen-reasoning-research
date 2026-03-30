@@ -1,0 +1,116 @@
+=== CALL 000136 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: wrong_condition_b
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:23:42.773425
+LATENCY_MS: 21086
+
+--- PROMPT ---
+Rate limiter allows too many requests. Fix the policy. Return the updated code.
+
+## Codebase (2 files)
+
+### FILE 1/2: code_snippets_v2/wrong_condition_b/limiter.py ###
+```python
+"""Rate limiter using policy checks."""
+
+from policy import is_allowed
+
+
+class RateLimiter:
+    """Tracks request counts and enforces rate + quota policies."""
+
+    def __init__(self, rate_limit=100, daily_quota=10000):
+        self.rate_limit = rate_limit
+        self.daily_quota = daily_quota
+        self._minute_count = 0
+        self._daily_count = 0
+
+    def try_request(self):
+        """Attempt a request. Returns True if allowed, False if blocked."""
+        allowed = is_allowed(
+            self._minute_count, self.rate_limit,
+            self._daily_count, self.daily_quota,
+        )
+        if allowed:
+            self._minute_count += 1
+            self._daily_count += 1
+        return allowed
+
+    def reset_minute(self):
+        """Reset the per-minute counter (called each minute)."""
+        self._minute_count = 0
+
+    def get_stats(self):
+        """Return current counters."""
+        return {
+            "minute": self._minute_count,
+            "daily": self._daily_count,
+        }
+```
+
+### FILE 2/2: code_snippets_v2/wrong_condition_b/policy.py ###
+```python
+"""Rate and quota policy checks."""
+
+
+def check_rate(requests_per_minute, rate_limit):
+    """Return True if rate is within acceptable bounds."""
+    return requests_per_minute < rate_limit
+
+
+def check_quota(daily_total, daily_quota):
+    """Return True if daily quota is not exceeded."""
+    return daily_total < daily_quota
+
+
+def is_allowed(requests_per_minute, rate_limit, daily_total, daily_quota):
+    """Check if a request is allowed under BOTH rate and quota policies.
+
+    A request should only be allowed if it passes rate AND quota checks.
+    """
+    rate_ok = check_rate(requests_per_minute, rate_limit)
+    quota_ok = check_quota(daily_total, daily_quota)
+    # BUG: uses 'or' instead of 'and' — allows if EITHER passes
+    return rate_ok or quota_ok
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/wrong_condition_b/limiter.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/wrong_condition_b/policy.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "In policy.is_allowed the local variables rate_ok and quota_ok (results of check_rate(requests_per_minute, rate_limit) and check_quota(daily_total, daily_quota)) are combined with a logical OR (return rate_ok or quota_ok). Because is_allowed returns True when either rate_ok or quota_ok is True, a failing check on one policy can be masked by the other passing.",
+  "failure_mechanism": "If the per-minute limit is exceeded (check_rate returns False) but the daily quota has not been reached (check_quota returns True), is_allowed will return True due to the OR. Concretely, with rate_limit=100 and _minute_count=100 (requests_per_minute == rate_limit), check_rate returns False, check_quota returns True for a low daily_total, so is_allowed returns True and the RateLimiter.try_request increments counters and allows a request that should be blocked by the per-minute policy. The converse (rate_ok True, quota_ok False) similarly allows requests that should be blocked by the daily quota.",
+  "broken_invariant": "A request is allowed if and only if check_rate(requests_per_minute, rate_limit) is True AND check_quota(daily_total, daily_quota) is True. (Testable: when requests_per_minute >= rate_limit, is_allowed(...) must return False regardless of daily_total; and when daily_total >= daily_quota, is_allowed(...) must return False regardless of requests_per_minute.)",
+  "fix_strategy": "Combine the two boolean checks with logical AND so both policies must pass. Changing the return from 'rate_ok or quota_ok' to 'rate_ok and quota_ok' ensures that a failing rate check cannot be overridden by a passing quota check (and vice versa). This directly fixes the incorrect control flow in is_allowed by enforcing both conditions.",
+  "files": {
+    "code_snippets_v2/wrong_condition_b/limiter.py": "```python\n\"\"\"Rate limiter using policy checks.\"\"\"\n\nfrom policy import is_allowed\n\n\nclass RateLimiter:\n    \"\"\"Tracks request counts and enforces rate + quota policies.\"\"\"\n\n    def __init__(self, rate_limit=100, daily_quota=10000):\n        self.rate_limit = rate_limit\n        self.daily_quota = daily_quota\n        self._minute_count = 0\n        self._daily_count = 0\n\n    def try_request(self):\n        \"\"\"Attempt a request. Returns True if allowed, False if blocked.\"\"\"\n        allowed = is_allowed(\n            self._minute_count, self.rate_limit,\n            self._daily_count, self.daily_quota,\n        )\n        if allowed:\n            self._minute_count += 1\n            self._daily_count += 1\n        return allowed\n\n    def reset_minute(self):\n        \"\"\"Reset the per-minute counter (called each minute).\"\"\"\n        self._minute_count = 0\n\n    def get_stats(self):\n        \"\"\"Return current counters.\"\"\"\n        return {\n            \"minute\": self._minute_count,\n            \"daily\": self._daily_count,\n        }\n```",
+    "code_snippets_v2/wrong_condition_b/policy.py": "```python\n\"\"\"Rate and quota policy checks.\"\"\"\n\n\ndef check_rate(requests_per_minute, rate_limit):\n    \"\"\"Return True if rate is within acceptable bounds.\"\"\"\n    return requests_per_minute < rate_limit\n\n\ndef check_quota(daily_total, daily_quota):\n    \"\"\"Return True if daily quota is not exceeded.\"\"\"\n    return daily_total < daily_quota\n\n\ndef is_allowed(requests_per_minute, rate_limit, daily_total, daily_quota):\n    \"\"\"Check if a request is allowed under BOTH rate and quota policies.\n\n    A request should only be allowed if it passes rate AND quota checks.\n    \"\"\"\n    rate_ok = check_rate(requests_per_minute, rate_limit)\n    quota_ok = check_quota(daily_total, daily_quota)\n    return rate_ok and quota_ok\n```"
+  }
+}

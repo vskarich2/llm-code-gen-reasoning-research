@@ -1,0 +1,175 @@
+=== CALL 000008 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: partial_update_a
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:34:10.276721
+LATENCY_MS: 20046
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+update_profile: user['display_name'] is not updated when changes contains 'name' — the function assigns user['name'] but lacks the corresponding assignment to user['display_name'], breaking the invariant that display_name must equal name.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Change update_profile so that name/display_name are treated atomically: if 'name' is present in changes, set both user['name'] and user['display_name'] to that value; otherwise if 'display_name' is present, set both user['display_name'] and user['name'] to that value. Then update other supported fields (email, age). This ensures the invariant is maintained regardless of which field is provided.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure mode is ambiguity when both 'name' and 'display_name' appear in changes with different values. The implemented fix resolves this by giving 'name' priority (checks 'name' first) — if that ordering is unacceptable it should be specified and handled differently. Other risks (e.g., non-dict user) are out of scope for this change. I revised the fix to explicitly handle 'display_name' when 'name' is absent to avoid losing a provided display_name.
+
+
+# Task Description
+Refactor this profile module for clarity. Return the updated code.
+
+# Code Produced
+```python
+"""User profile management."""
+
+
+def update_profile(user, changes):
+    """Update user profile fields from changes dict.
+
+    Invariant: display_name must always equal name.
+    """
+    # If 'name' is provided, treat it as authoritative and sync display_name.
+    if "name" in changes:
+        new_name = changes["name"]
+        user["name"] = new_name
+        user["display_name"] = new_name
+    # If 'name' is not provided but 'display_name' is, sync name to it.
+    elif "display_name" in changes:
+        new_display = changes["display_name"]
+        user["display_name"] = new_display
+        user["name"] = new_display
+
+    # Update remaining supported fields. Skip name/display_name because handled above.
+    for key, value in changes.items():
+        if key in ("name", "display_name"):
+            continue
+        if key == "email":
+            user["email"] = value
+        elif key == "age":
+            user["age"] = value
+    return user
+
+
+def create_user(name, email):
+    """Create a new user profile with synced display_name."""
+    return {
+        "name": name,
+        "display_name": name,
+        "email": email,
+        "age": None,
+    }
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+PARTIAL;CORRECT;PARTIAL;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If update_profile always synchronized display_name with name (removing the missing-assignment root cause), the name/display_name divergence would not occur.
+Evidence: - update_profile now assigns user['name'] and user['display_name'] together when "name" in changes; - elif branch synchronizes user['name'] to changes['display_name'] when name absent; - subsequent loop explicitly skips "name"/"display_name" to avoid overwriting the sync; - create_user initializes display_name == name.
+Judgment: The developer correctly identified the specific invariant (display_name == name) and proposed a direct atomic sync fix which the code implements; however their written causal chain is incomplete — they named the missing assignment but did not explicitly trace how that mutation propagates to observable failures in callers or tests.

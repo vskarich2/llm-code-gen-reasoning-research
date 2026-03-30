@@ -1,0 +1,250 @@
+=== CALL 000229 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: false_fix_deadlock
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:10:37.811457
+LATENCY_MS: 19153
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+make_transfer_b_to_a_steps -> step_lock_b calls acquire("B") before acquire("A") (operation: lock acquisition order), causing opposite lock ordering compared to make_transfer_a_to_b_steps
+
+## Failure Mechanism
+lock A acquired by A→B transfer (step_lock_a -> acquire("A")) → concurrently/ interleaved B→A starts and acquires B (step_lock_b -> acquire("B")) → A→B's next step tries acquire("B") and acquire raises RuntimeError("deadlock: B already locked") → propagation: exception prevents release/ completion and the second transfer never runs → observable failure: interleaved_transfers returns {"error": "deadlock: B already locked"}.
+
+## Broken Invariant
+All transfers must acquire account locks in a consistent global order (for these resources: acquire("A") before acquire("B")). This invariant is violated because make_transfer_b_to_a_steps acquires B before A.
+
+## Fix Strategy
+Ensure all transfers acquire the required locks in a single atomic step using a canonical global order (sorted resource names) so there is no interleaving window where one transfer holds one lock and the other holds the other lock. Concretely: implement an ordered multi-acquire helper and make each transfer's first-step perform the full acquire → mutate → release sequence (the second step becomes a no-op). This breaks the causal chain because there is no point at which one transfer holds A while the other holds B across different steps; locks are taken and released inside one step in a consistent order, preventing the B-then-A acquisition that caused the deadlock.
+
+
+## Self-Check
+{'failure_scenario': 'If a transfer step tries to acquire locks atomically but another transfer previously began and never released a lock (e.g., because earlier code raised between acquire and release), the new acquire would raise RuntimeError. Concretely, if some other code acquires a resource and fails to release it (bug elsewhere), the atomic acquire will raise. However, in this module there are no partial-locking steps anymore: transfers acquire and release in the same step, so no step-internal exception path leaves a lock held. The only way a lock persists is if client code holds a lock across steps; client code in this module does not.', 'edge_case': "Calling interleaved_transfers() which uses the historical two-step pattern: now the first step performs the whole transfer, and the previously second step is a no-op. Edge case: code that expected 'locked_A' return strings from first-step now receives 'transferred_a_to_b' — but the module's public behavior (balances and absence of deadlock) is preserved. Another boundary: if a transfer amount is zero or negative; the transfer still performs the acquire/release but changes balances accordingly. The code handles zero or negative amounts without changing locking logic.", 'invariant_check': 'Invariant: \'no RuntimeError("deadlock: ...") is raised for the provided sequential or interleaved scenarios in this module\'. Verified as follows with the actual code changes: - sequential_transfers(): lock_ab step acquires A and B in canonical order and releases them, do_ab is a no-op; lock_ba likewise — no acquire raises. - interleaved_transfers(): lock_ab (first step) acquires both locks and releases them before lock_ba is run, so lock_ba can acquire locks normally; no RuntimeError. Multiple calls and state reuse: reset() clears _locks and restores balances; calling transfers multiple times will start from a clean state. Retries/loops: since every transfer acquires and releases in the same step and release() sets lock to False, a subsequent transfer can acquire locks again. Therefore the invariant holds under multiple calls, retries, and state reuse in this module.', 'conclusion': "No flaw remains in this module's transfer functions: by acquiring locks in a canonical order and performing acquire→mutate→release in one step we remove the interleaving point that previously allowed lock-order inversion. If a lock persists across steps due to external misuse, that external code (not this module) would be responsible; within this file transfers never deadlock under any interleaving of the provided step sequences."}
+
+
+# Task Description
+Concurrent transfers deadlock. Fix the locking so transfers never deadlock under any interleaving.
+
+# Code Produced
+```python
+ """Resource transfers with lock-ordering deadlock, simulated via steps."""
+
+_locks = {}
+_state = {"A": 100, "B": 100}
+
+
+def reset():
+    _locks.clear()
+    _state["A"] = 100
+    _state["B"] = 100
+
+
+def acquire(resource):
+    """Simulate lock. Raises RuntimeError if already held (deadlock)."""
+    if _locks.get(resource):
+        raise RuntimeError(f"deadlock: {resource} already locked")
+    _locks[resource] = True
+
+
+def release(resource):
+    _locks[resource] = False
+
+
+def get_state():
+    return dict(_state)
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+# Helper: acquire multiple resources in a canonical global order
+def _acquire_ordered(resources):
+    ordered = sorted(resources)
+    for r in ordered:
+        acquire(r)
+    return ordered
+
+
+def _release_ordered(acquired_resources):
+    for r in reversed(acquired_resources):
+        release(r)
+
+
+def make_transfer_a_to_b_steps(amount):
+    """Transfer A→B: acquire canonical order and perform entire transfer in one step."""
+
+    def step_lock_a():
+        # Acquire both locks in a canonical order (sorted) to avoid deadlock
+        acquired = _acquire_ordered(["A", "B"])
+        try:
+            _state["A"] -= amount
+            _state["B"] += amount
+            return "transferred_a_to_b"
+        finally:
+            _release_ordered(acquired)
+
+    def step_lock_b_and_transfer():
+        # No-op now: the transfer was done in the first step
+        return "noop"
+
+    return step_lock_a, step_lock_b_and_transfer
+
+
+def make_transfer_b_to_a_steps(amount):
+    """Transfer B→A: also acquire canonical order (sorted) and perform entire transfer in one step."""
+
+    def step_lock_b():
+        # Acquire both locks in the same global order as A→B
+        acquired = _acquire_ordered(["A", "B"])
+        try:
+            _state["B"] -= amount
+            _state["A"] += amount
+            return "transferred_b_to_a"
+        finally:
+            _release_ordered(acquired)
+
+    def step_lock_a_and_transfer():
+        # No-op now: the transfer was done in the first step
+        return "noop"
+
+    return step_lock_b, step_lock_a_and_transfer
+
+
+def sequential_transfers():
+    """A→B then B→A. Sequential: works fine."""
+    reset()
+    lock_ab, do_ab = make_transfer_a_to_b_steps(10)
+    lock_ba, do_ba = make_transfer_b_to_a_steps(10)
+    run_steps([
+        (lock_ab, ()), (do_ab, ()),
+        (lock_ba, ()), (do_ba, ()),
+    ])
+    return get_state()
+
+
+def interleaved_transfers():
+    """A→B and B→A interleaved: previously DEADLOCK; now both transfers acquire in canonical order inside the first step so no deadlock."""
+    reset()
+    lock_ab, do_ab = make_transfer_a_to_b_steps(10)
+    lock_ba, do_ba = make_transfer_b_to_a_steps(10)
+    try:
+        run_steps([
+            (lock_ab, ()),   # first transfer does full acquire/transfer/release
+            (lock_ba, ()),   # second transfer then runs safely
+            (do_ab, ()),     # no-op
+            (do_ba, ()),     # no-op
+        ])
+        return get_state()
+    except RuntimeError as e:
+        return {"error": str(e)}
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;TEMPORAL_ORDERING
+HIGH
+Counterfactual: If the opposite lock-acquisition order in make_transfer_b_to_a_steps were removed (i.e., both transfers used a canonical acquire order), the deadlock would not occur.
+Evidence: - acquire(resource) raises RuntimeError if _locks.get(resource) is truthy; - original failure chain arises when one step holds "A" and the other holds "B" before attempting the second acquire; - _acquire_ordered(sorted(resources)) enforces canonical order ("A","B") and is used by both make_transfer_a_to_b_steps and make_transfer_b_to_a_steps; - each transfer's first step does acquire→mutate→release inside a try/finally, so no lock is left held across steps; - run_steps executes those first steps before any no-op second steps, eliminating the interleaving window.
+Judgment: The developer precisely identifies the lock-order inversion, states a concrete invariant (global lock ordering), traces the full causal chain to the RuntimeError, and the code faithfully implements the proposed fix; reasoning is complete and well-grounded in the presented code.

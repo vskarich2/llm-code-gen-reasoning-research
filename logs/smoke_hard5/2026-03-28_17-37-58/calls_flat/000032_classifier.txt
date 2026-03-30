@@ -1,0 +1,162 @@
+=== CALL 000032 ===
+MODEL: gpt-4o-mini
+PHASE: classifier
+CASE_ID: stale_cache_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T17:41:39.256160
+LATENCY_MS: 2712
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+The bug is in the `update_product` function in `catalog.py`, specifically the lack of a call to `invalidate_local(product_id)`. This means that when a product is updated, the local cache is not invalidated, allowing stale data to persist.
+
+## Failure Mechanism
+When a product is updated using `update_product`, the local cache still holds the old data. If `get_product` is called afterward, it retrieves the stale data from the local cache instead of fetching the updated data from the database, leading to incorrect product information being displayed.
+
+## Broken Invariant
+After updating a product, all cache layers must reflect the most current data. The invariant is violated because the local cache still contains outdated information, which can be served to users.
+
+## Fix Strategy
+By adding a call to `invalidate_local(product_id)` in the `update_product` function, the local cache will be cleared of the outdated product data whenever an update occurs. This ensures that subsequent calls to `get_product` will fetch the latest data from the database.
+
+
+# Task Description
+API returns stale product data despite updates. Fix the caching issue. Return the updated code.
+
+# Code Produced
+```python
+"""Product catalog with two-layer cache integration."""
+
+from cache import put_local, put_shared, invalidate_shared, invalidate_local
+
+_db = {}
+
+def add_product(product_id, name, price):
+    """Add product to database."""
+    _db[product_id] = {"name": name, "price": price}
+
+def db_get(product_id):
+    """Raw DB lookup."""
+    p = _db.get(product_id)
+    return dict(p) if p else None
+
+def update_product(product_id, **fields):
+    """Update product in DB and invalidate caches.
+
+    Invariant: after update, all cache layers must be invalidated.
+    """
+    if product_id not in _db:
+        return False
+    _db[product_id].update(fields)
+    invalidate_shared(product_id)
+    invalidate_local(product_id)  # Added to invalidate local cache
+    return True
+
+def reset():
+    """Clear DB."""
+    _db.clear()
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION  
+HIGH  
+Counterfactual: If the call to `invalidate_local(product_id)` were removed, stale data would still be served from the local cache.  
+Evidence: `update_product` updates the database but fails to clear the local cache without `invalidate_local`, leading to stale data in `get_product`.  
+Judgment: Reasoning accurately identifies the mechanism of stale data due to cache not being invalidated, correctly states the invariant, and the fix aligns perfectly with the identified issue.

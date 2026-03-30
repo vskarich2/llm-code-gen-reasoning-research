@@ -1,0 +1,156 @@
+=== CALL 000054 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: mutable_default_b
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:41:36.832593
+LATENCY_MS: 13201
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In worker.py, the function process_batch declares a mutable default argument seen=set(). Because default argument expressions are evaluated once at function definition time, the same set object is reused across multiple calls to process_batch. As a result, task IDs added to that set during one call remain in that same set on later calls.
+
+## Failure Mechanism
+Concrete scenario: call process_batch([{"name": "A"}]). The function adds 'A' to the default seen set and returns a processed result for task A. Later, call process_batch([{"name": "A"}, {"name": "B"}]). Because the same seen set still contains 'A', the function skips task A and only processes B (or may skip both if previously added). This manifests as valid tasks in a fresh batch being incorrectly skipped because their IDs are present in the persisted seen set.
+
+## Broken Invariant
+The function process_batch violates its documented invariant: 'each call to process_batch with a fresh batch must process ALL tasks in that batch, regardless of prior calls.' Specifically, for any two independent calls with input lists tasks1 and tasks2, every task in tasks2 must be returned as processed if not duplicated inside that call; the current implementation can return fewer processed tasks for tasks2 because seen is shared across calls.
+
+## Fix Strategy
+Replace the mutable default seen=set() with a sentinel default seen=None and allocate a new set inside the function when seen is None. This ensures each call gets a fresh set (so per-call duplicate tracking remains local) and prevents cross-call state from causing valid tasks in later batches to be skipped. The code change is: def process_batch(tasks, seen=None): followed by if seen is None: seen = set().
+
+
+# Task Description
+Workers skip valid tasks on second batch. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Worker that processes task batches."""
+
+
+def process_batch(tasks, seen=None):
+    """Process a batch of tasks, skipping already-seen ones.
+
+    Invariant: each call to process_batch with a fresh batch must
+    process ALL tasks in that batch, regardless of prior calls.
+    """
+    if seen is None:
+        seen = set()
+    results = []
+    for task in tasks:
+        task_id = task["name"]
+        if task_id in seen:
+            continue
+        seen.add(task_id)
+        results.append({"name": task["name"], "result": "processed"})
+    return results
+
+
+def summarize(results):
+    """Summarize processing results (distractor)."""
+    return f"{len(results)} tasks processed"
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If the mutable default were removed (each call gets a fresh set), previously-seen IDs would not persist across calls and the skipping behavior would not occur.
+Evidence: process_batch previously used seen=set() so the default set is created once and shared across calls; the loop calls seen.add(task_id) which mutates that shared set; the membership check if task_id in seen then continues, causing valid tasks to be skipped on later calls; the new code uses seen=None and assigns seen = set() per call, preventing shared-state persistence.
+Judgment: The developer correctly and completely identifies the shared mutable-default as the root cause, traces mutation→persistence→skipped tasks, and the provided code implements the described fix that restores the per-call invariant.

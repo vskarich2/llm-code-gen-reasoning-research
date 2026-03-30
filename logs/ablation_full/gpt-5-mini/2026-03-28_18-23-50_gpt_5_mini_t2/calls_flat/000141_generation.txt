@@ -1,0 +1,254 @@
+=== CALL 000141 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: wrong_condition_c
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:24:28.552355
+LATENCY_MS: 34943
+
+--- PROMPT ---
+Expired tokens still allowed for exempt users. Fix. Return the updated code.
+
+## Codebase (3 files)
+
+### FILE 1/3: code_snippets_v2/wrong_condition_c/limiter.py ###
+```python
+"""Core rate limiter logic."""
+
+from policy import is_expired, is_under_limit, is_exempt
+
+
+def should_allow(client_id, count, limit, timestamp, now,
+                 window_seconds, exempt_list):
+    """Decide whether to allow a request.
+
+    Allow if:
+      - token is not expired AND (under limit OR exempt)
+
+    Exempt clients bypass the rate limit even if over it,
+    but expired tokens are always rejected.
+    """
+    expired = is_expired(timestamp, now, window_seconds)
+    under_limit = is_under_limit(count, limit)
+    exempt = is_exempt(client_id, exempt_list)
+
+    # BUG: operator precedence — Python parses this as:
+    #   ((not expired) and under_limit) or exempt
+    # Correct intent: (not expired) and (under_limit or exempt)
+    # When expired=True AND exempt=True:
+    #   buggy:  (False and under_limit) or True = True  (allows!)
+    #   correct: False and (under_limit or True) = False (blocks!)
+    return not expired and under_limit or exempt
+```
+
+### FILE 2/3: code_snippets_v2/wrong_condition_c/middleware.py ###
+```python
+"""Rate limiting middleware for request processing."""
+
+from limiter import should_allow
+
+
+# Default configuration
+DEFAULT_WINDOW = 60  # seconds
+DEFAULT_LIMIT = 100
+EXEMPT_CLIENTS = {"internal-service", "health-checker"}
+
+
+def process_request(request, client_states):
+    """Process a request through the rate limiter.
+
+    Args:
+        request: dict with 'client_id' and 'timestamp'
+        client_states: dict mapping client_id -> {count, first_seen}
+
+    Returns:
+        dict with 'allowed' and 'reason'
+    """
+    client_id = request["client_id"]
+    now = request["timestamp"]
+
+    state = client_states.get(client_id, {"count": 0, "first_seen": now})
+
+    allowed = should_allow(
+        client_id=client_id,
+        count=state["count"],
+        limit=DEFAULT_LIMIT,
+        timestamp=state["first_seen"],
+        now=now,
+        window_seconds=DEFAULT_WINDOW,
+        exempt_list=EXEMPT_CLIENTS,
+    )
+
+    if allowed:
+        state["count"] = state.get("count", 0) + 1
+        client_states[client_id] = state
+        return {"allowed": True, "reason": "ok"}
+
+    return {"allowed": False, "reason": "rate_limited"}
+```
+
+### FILE 3/3: code_snippets_v2/wrong_condition_c/policy.py ###
+```python
+"""Rate limiting policy definitions."""
+
+
+def is_expired(timestamp, now, window_seconds):
+    """Check if a timestamp is outside the current window."""
+    return (now - timestamp) > window_seconds
+
+
+def is_under_limit(count, limit):
+    """Check if count is under the allowed limit."""
+    return count < limit
+
+
+def is_exempt(client_id, exempt_list):
+    """Check if a client is exempt from rate limiting."""
+    return client_id in exempt_list
+```
+
+You are implementing a STRICT reasoning + code generation procedure designed to REDUCE reasoning-execution mismatch.
+
+This is NOT a formatting task. This is a TWO-PASS reasoning process with adversarial verification.
+
+You MUST follow the procedure exactly.
+
+Return a SINGLE valid JSON object. No text outside JSON. No markdown fences.
+
+# GOAL
+
+Fix the bug AND ensure your reasoning is causally correct and robust to failure.
+
+You are required to:
+- identify the correct mechanism
+- challenge your own hypothesis
+- verify your fix against failure scenarios
+
+# PROCEDURE (MANDATORY)
+
+## STEP 1 — DIAGNOSE (PRIMARY HYPOTHESIS)
+
+Identify:
+
+- root_cause:
+  Name the exact function + variable + operation causing the bug.
+  Must describe a causal relationship (not just "missing X").
+
+- failure_mechanism:
+  Give a concrete scenario:
+  cause → mutation/event → propagation → observable failure
+
+- broken_invariant:
+  A specific, testable property that is violated.
+
+## STEP 2 — ALTERNATIVE HYPOTHESIS (CRITICAL)
+
+Propose ONE alternative explanation for the bug.
+
+- What else could plausibly be the cause?
+- Why might your primary hypothesis be wrong?
+
+Then explicitly reject it:
+
+- Why is your original diagnosis more correct?
+- What evidence in the code supports this?
+
+This step is REQUIRED. Do not skip.
+
+## STEP 3 — PLAN FIX
+
+Describe:
+
+- fix_strategy:
+  What exact change you will make
+  Why it breaks the causal chain
+
+Must reference actual code behavior.
+
+## STEP 4 — CODE
+
+Implement the fix.
+
+Rules:
+- Modify ONLY necessary files
+- Return COMPLETE contents for modified files
+- Use "UNCHANGED" for others
+
+## STEP 5 — ADVERSARIAL SELF-CHECK (MANDATORY)
+
+You must actively try to BREAK your own fix.
+
+Answer ALL:
+
+1. Failure Scenario:
+   Describe a concrete scenario where your fix might still fail.
+
+2. Edge Case:
+   Identify a boundary condition (e.g., retries, empty values, ordering).
+
+3. Invariant Check:
+   Verify your invariant holds under:
+   - multiple calls
+   - retries / loops
+   - state reuse
+
+4. Conclusion:
+   - If a flaw is found → REVISE your fix
+   - If no flaw → explain WHY it is safe
+
+Your answer MUST reference your actual code.
+
+# OUTPUT FORMAT (STRICT JSON)
+
+{
+  "root_cause": "<exact function + variable + causal relationship>",
+  "failure_mechanism": "<cause → mutation → propagation → observable failure>",
+  "broken_invariant": "<specific testable property that is violated>",
+  "alternative_hypothesis": "<one alternative explanation for the bug>",
+  "hypothesis_rejection": "<why primary hypothesis is correct, with code evidence>",
+  "fix_strategy": "<what change you will make and why it breaks the causal chain>",
+  "self_check": {
+    "failure_scenario": "<concrete scenario where fix might still fail>",
+    "edge_case": "<boundary condition to test>",
+    "invariant_check": "<verify invariant under multiple calls, retries, state reuse>",
+    "conclusion": "<flaw found → revise, or why it is safe>"
+  },
+  "files": {"<path>": "<complete file contents or UNCHANGED>"}
+}
+
+# RULES
+
+- All fields are REQUIRED and must be substantive
+- No generic statements — ground every claim in actual code
+- Must reference actual variables and behavior
+- Do NOT restate the task
+- Do NOT skip alternative hypothesis
+- Do NOT skip adversarial self-check
+- For files you did NOT modify, set value to "UNCHANGED"
+- Do NOT include markdown formatting (no ```python blocks) inside file values
+- File values must be raw Python source code, not markdown
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "limiter.should_allow return expression: the boolean expression 'not expired and under_limit or exempt' is evaluated with Python's operator precedence, causing 'exempt' to bypass the 'not expired' check (i.e. the return expression's operators and operands: expired, under_limit, exempt).",
+  "failure_mechanism": "When an expired token exists (is_expired -> True) and the client is exempt (is_exempt -> True), the return expression is evaluated as ((not expired) and under_limit) or exempt -> (False and under_limit) or True -> True. This causes should_allow to return True for an expired token, propagating to middleware.process_request which treats the request as allowed, increments the client's count, and returns {'allowed': True, 'reason': 'ok'} — observable failure: expired tokens are incorrectly allowed for exempt clients.",
+  "broken_invariant": "For any inputs, if is_expired(timestamp, now, window_seconds) == True then should_allow(...) must return False. (Testable: call should_allow with expired=True and any values for under_limit and exempt -> must be False.)",
+  "alternative_hypothesis": "The bug could be caused by incorrect semantics in is_expired (for example wrong comparison sign or wrong timestamp source), or by middleware passing the wrong timestamp (using first_seen instead of last_seen), making tokens appear expired or not in unexpected ways.",
+  "hypothesis_rejection": "The code comment in limiter.py already documents the operator-precedence issue and demonstrates the exact truth-table failure (shows expired=True and exempt=True leading to allowed). The is_expired implementation (policy.py) is simple and returns (now - timestamp) > window_seconds; that can only change whether 'expired' is True or False, but does not explain why an expired token would be allowed while exempt==True. The expression 'not expired and under_limit or exempt' syntactically explains the observed behavior (exempt bypassing 'not expired') independent of is_expired or middleware timestamp choices. Therefore the operator-precedence error in should_allow is the primary cause.",
+  "fix_strategy": "Change the boolean expression in limiter.should_allow to enforce the intended precedence: require that 'not expired' is True AND (under_limit OR exempt) is True. Concretely replace 'return not expired and under_limit or exempt' with 'return (not expired) and (under_limit or exempt)'. This ensures the 'expired' predicate gates access before honoring 'exempt'. By making 'not expired' a required conjunct, an expired token cannot be allowed even if exempt==True, breaking the causal chain that previously allowed expired+exempt through the trailing 'or'.",
+  "self_check": {
+    "failure_scenario": "If request timestamps are None, or not numeric, is_expired will raise a TypeError when evaluating (now - timestamp), causing should_allow to not return a boolean. This is a different failure mode not introduced by the fix. Example: request with timestamp=None passed through middleware will cause a TypeError from policy.is_expired, independent of the changed boolean expression.",
+    "edge_case": "Boundary condition where (now - timestamp) == window_seconds: is_expired uses '>' so tokens exactly at the boundary are considered not expired. This is a semantic choice in policy.is_expired; our fix preserves that behavior. Another edge: limit==0 (no allowed requests); then under_limit is count < 0 (always False) so only exempt+not-expired clients are allowed — with the fix an expired exempt client will be correctly blocked.",
+    "invariant_check": "Multiple calls: middleware.process_request uses state['first_seen'] as 'timestamp' for window computations and increments count when should_allow returns True. With the fix, across repeated requests within the window (is_expired False), exempt clients will be allowed and counts incremented; expired clients (is_expired True) will be rejected even if exempt, so the invariant 'expired -> blocked' holds for every call. Retries/loops: if a client retries after its token becomes expired, should_allow will evaluate expired=True and return False due to the enforced conjunction, so repeated retries do not bypass the rule. State reuse: client_states is updated only on allowed responses; an expired exempt client will not cause state mutation. Therefore the invariant is preserved under multiple calls, retries, and state reuse.",
+    "conclusion": "No flaw found in the fixed boolean logic: changing the return to '(not expired) and (under_limit or exempt)' directly addresses the operator-precedence bug and enforces the intended invariant that expired tokens are always rejected even for exempt clients. Remaining potential failures (e.g., bad timestamp types or semantic choices in is_expired) are separate issues in input validation or policy design, not regressions introduced by this fix."
+  },
+  "files": {
+    "code_snippets_v2/wrong_condition_c/limiter.py": " \"\"\"Core rate limiter logic.\"\"\"\n\nfrom policy import is_expired, is_under_limit, is_exempt\n\n\ndef should_allow(client_id, count, limit, timestamp, now,\n                 window_seconds, exempt_list):\n    \"\"\"Decide whether to allow a request.\n\n    Allow if:\n      - token is not expired AND (under limit OR exempt)\n\n    Exempt clients bypass the rate limit even if over it,\n    but expired tokens are always rejected.\n    \"\"\"\n    expired = is_expired(timestamp, now, window_seconds)\n    under_limit = is_under_limit(count, limit)\n    exempt = is_exempt(client_id, exempt_list)\n\n    # Enforce intended precedence: require token to be not expired AND\n    # (either under the limit or the client is exempt).\n    # This prevents 'exempt' from bypassing the expired check.\n    return (not expired) and (under_limit or exempt)\n",
+    "code_snippets_v2/wrong_condition_c/middleware.py": "UNCHANGED",
+    "code_snippets_v2/wrong_condition_c/policy.py": "UNCHANGED"
+  }
+}

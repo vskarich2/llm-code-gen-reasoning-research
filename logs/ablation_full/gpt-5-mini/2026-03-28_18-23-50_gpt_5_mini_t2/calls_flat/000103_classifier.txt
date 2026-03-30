@@ -1,0 +1,181 @@
+=== CALL 000103 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: partial_rollback_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:06:35.181284
+LATENCY_MS: 23018
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+order_service.place_order -> except ValueError: raise (re-raising without calling release(product_id, qty)) causing the reserved count to remain incremented
+
+## Failure Mechanism
+Payment gateway failure (_process_payment raises ValueError) → place_order's except block re-raises the exception without invoking release(product_id, qty) → the prior reserve(product_id, qty) mutation to inventory._reserved is not undone → inventory.available(product_id) remains decreased and inventory.get_reserved(product_id) remains elevated → observable failure: inventory remains 'stuck' as reserved after a payment failure, preventing correct subsequent reservations/availability.
+
+## Broken Invariant
+After a failed payment during place_order, the reserved count for the product must be restored to its previous value. Concretely: if _reserved_before = get_reserved(product_id) before calling place_order and payment fails, then get_reserved(product_id) must equal _reserved_before after the failure. This is violated because place_order increments _reserved but does not decrement it on payment failure.
+
+## Fix Strategy
+On payment failure, explicitly call release(product_id, qty) to roll back the earlier reserve(product_id, qty) before re-raising the payment exception. This breaks the causal chain: reserve → payment failure → missing rollback → stuck reservation, by adding the missing rollback step. Implementation: in order_service.place_order, change the except ValueError (and generally except Exception) handler to call release(product_id, qty) then re-raise the exception. Also tidy reset() to avoid creating misleading local _stock/_reserved globals in the order_service module.
+
+
+## Self-Check
+{'failure_scenario': 'If release(product_id, qty) itself raised an unexpected exception (for example if release were changed later to assume the product exists and index directly into _reserved), the exception handler would fail while trying to roll back, potentially masking the original payment error and leaving state partially modified. In current code, release uses _reserved.get(product_id, 0) and will not KeyError, so it is safe. However, if release were later modified to validate and raise, the rollback might fail.', 'edge_case': 'If reserve(product_id, qty) raised (insufficient stock) then no reservation occurred and the except block for payment is not reached; no release is needed. If _process_payment raises an unexpected BaseException (SystemExit/KeyboardInterrupt), the except Exception block will not catch it; in that case the reservation would remain. We catch Exception (not BaseException) intentionally; catching BaseException is rarely appropriate. If desired to be extra robust, we could catch BaseException, call release, then re-raise, but that risks catching interrupts.', 'invariant_check': 'Multiple calls: calling place_order(product, 1, price) repeatedly with gateway failing will now each time: reserve -> attempt payment -> on failure release -> re-raise. The net effect after each failed call is that get_reserved(product) is the same as before the call. Retries/loops: a caller can retry place_order; each failed attempt rolls back, so repeated failures do not accumulate reserved counts. State reuse: order_service.reset() no longer creates order_service-local _stock/_reserved variables, avoiding confusion; inventory state remains in inventory module and is untouched by reset(), which is fine because inventory.reset() can be called separately when needed. Therefore the invariant (reserved restored on failure) holds under multiple calls and retries.', 'conclusion': 'No flaw found in the present fix given the current implementations of reserve and release. The fix is safe because release(product_id, qty) will correctly undo the earlier reserve(product_id, qty) and does not raise under current code. The only residual risk is if release is later changed to raise errors; to guard against that a more defensive rollback could wrap release in its own try/except to ensure the original payment exception is propagated while logging rollback failures. For now, the change keeps behavior explicit and correct.'}
+
+
+# Task Description
+Inventory stuck as reserved after payment failure. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Order service coordinating inventory and payment."""
+
+from inventory import reserve, release
+
+_notifications = []
+_gateway_fail = False
+
+
+def reset():
+    global _notifications, _gateway_fail
+    _notifications = []
+    _gateway_fail = False
+
+
+def set_gateway_fail(fail):
+    """Configure gateway to simulate payment failure."""
+    global _gateway_fail
+    _gateway_fail = fail
+
+
+def _process_payment(amount):
+    """Simulate payment gateway."""
+    if _gateway_fail:
+        raise ValueError("payment declined")
+    return {"paid": amount}
+
+
+def place_order(product_id, qty, price):
+    """Place an order: reserve inventory, process payment, notify.
+
+    If payment fails, inventory reservation should be rolled back.
+    """
+    reserve(product_id, qty)
+    try:
+        result = _process_payment(qty * price)
+    except Exception:
+        # Roll back the reservation so inventory isn't left stuck as reserved
+        release(product_id, qty)
+        raise
+    _notifications.append({"product": product_id, "qty": qty})
+    return {"status": "confirmed", "payment": result}
+
+
+def get_notifications():
+    return list(_notifications)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If the missing rollback were removed (i.e., release(product_id, qty) is guaranteed to run on payment failure), the stuck-reservation failure would not occur.
+Evidence: reserve(product_id, qty) is invoked before the try; _process_payment(...) can raise ValueError when _gateway_fail is True; the except Exception handler in the produced code calls release(product_id, qty) then re-raises; _notifications is only appended after successful payment — so previously re-raising without release would leave inventory._reserved incremented.
+Judgment: The developer identifies the exact function and mutation (reserve → payment failure → missing release → stale _reserved) and proposes a direct rollback fix which the code implements; remaining legitimate edge-cases (release itself throwing or uncaught BaseException interrupts) are noted but do not invalidate the causal chain.

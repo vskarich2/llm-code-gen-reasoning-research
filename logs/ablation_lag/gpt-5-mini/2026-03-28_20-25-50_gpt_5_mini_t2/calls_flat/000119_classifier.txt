@@ -1,0 +1,181 @@
+=== CALL 000119 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: temporal_drift_c
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:08:10.181180
+LATENCY_MS: 19762
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+pipeline.pipeline: compute_raw_stats was called with the variable 'normalized' (compute_raw_stats(normalized)) instead of the original input 'data', causing raw_stats to reflect transformed data rather than the original untransformed data.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Compute raw statistics from the original input. Concretely: (1) ensure the input is materialized once (data = list(data)) so it can be safely iterated multiple times (handles generators/iterators), (2) call compute_raw_stats(data) and compute_derived(raw_stats) before applying normalize/clip, and (3) then run normalize and clip and summarize_for_display. This guarantees raw_stats uses the original untransformed values and prevents the prior bug where raw metrics were computed on normalized data.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure mode: converting the input to a list (data = list(data)) can be memory-intensive or infeasible for very large or infinite streams; this could cause high memory usage or OOM. I considered streaming alternatives (e.g., a single-pass aggregator that computes raw stats while also producing normalized/cleaned output via on-disk buffering or two-pass streaming), but those are more complex and change the pipeline contract. Given the current pipeline semantics and that compute_raw_stats requires access to the original values, materializing the input once is the simplest safe fix. If memory use is a real concern in the deployment environment, the pipeline should be reworked to support streaming (e.g., compute raw stats in a streaming pass and persist intermediate values or use online algorithms). For typical use with in-memory lists, this fix is safe.
+
+
+# Task Description
+Report shows wrong raw metrics. Fix the pipeline. Return the updated code.
+
+# Code Produced
+```python
+"""Multi-stage metrics pipeline.
+
+Stage 1: compute raw stats on original data
+Stage 2: normalize
+Stage 3: clip to range
+Stage 4: summarize for display
+"""
+
+from transforms import normalize, clip, summarize_for_display
+from metrics import compute_raw_stats, compute_derived
+
+
+def pipeline(data):
+    """4-stage pipeline.
+
+    raw_stats MUST reflect the original data before any transforms.
+    """
+    # Ensure we can iterate multiple times (handle generators/iterators)
+    data = list(data)
+
+    # Stage 1: raw stats (must be computed on original data)
+    raw_stats = compute_raw_stats(data)
+    derived = compute_derived(raw_stats)
+
+    # Stage 2: normalize
+    normalized = normalize(data)
+    # Stage 3: clip
+    clipped = clip(normalized, 0.05, 0.95)
+
+    # Stage 4: display summary
+    display = summarize_for_display(clipped)
+
+    return {
+        "raw_stats": raw_stats,
+        "derived": derived,
+        "cleaned": clipped,
+        "display": display,
+    }
+
+
+def quick_report(data):
+    """Quick report that only uses display stats. Unrelated path."""
+    normalized = normalize(data)
+    return summarize_for_display(normalized)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;PARTIAL;CORRECT;CORRECT;TEMPORAL_ORDERING
+MEDIUM
+Counterfactual: If compute_raw_stats were called on the original data (not on normalized/clipped data), the incorrect raw metrics would not be produced.
+Evidence: data = list(data) materializes the input; raw_stats = compute_raw_stats(data) is computed before normalized = normalize(data) and clipped = clip(...); summarize_for_display(clipped) uses transformed values only for display while raw_stats/derived come from original data; quick_report still calls normalize(data) directly (generator handling not applied).
+Judgment: The developer correctly pinpointed the wrong-argument/ordering bug and their fix implements the intended invariant (raw_stats computed from original input). However the causal chain exposition skipped explicit propagation steps from the mis-call to the visible report error and they did not fully address the memory/streaming tradeoffs (quick_report still bypasses materialization), so the reasoning is mostly sound but slightly incomplete.

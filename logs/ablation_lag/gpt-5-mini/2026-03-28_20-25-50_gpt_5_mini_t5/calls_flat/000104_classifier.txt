@@ -1,0 +1,192 @@
+=== CALL 000104 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: partial_rollback_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:01:55.898633
+LATENCY_MS: 22199
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+order_service.place_order: after calling reserve(product_id, qty) the except block for payment failure re-raises the ValueError without calling release(product_id, qty), leaving inventory._reserved with the reserved quantity and causing inventory to remain stuck as reserved.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Change place_order so that any exception raised while processing payment will first call release(product_id, qty) to roll back the inventory reservation and then re-raise the exception. Also fix reset() to call inventory.reset() instead of creating unrelated _stock/_reserved globals in the order_service module. This ensures reservations are undone on payment failure and reset properly clears inventory state.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure modes: (1) release(...) itself could raise (or allow negative reservations) which would prevent a clean rollback. This would require hardening inventory.release to validate counts; however release currently performs a simple subtraction and will not raise, so in this code path the rollback will execute. (2) Concurrent operations could re-reserve the same stock between reserve and release leading to race conditions — this fix does not introduce locking/transactions and therefore does not solve concurrency issues. I revised the code to release on any Exception (not just ValueError) and to call inventory.reset() to avoid leaving shadowed state, which mitigates the primary failure mode described. No further revision was required for the immediate bug.
+
+
+# Task Description
+Inventory stuck as reserved after payment failure. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Order service coordinating inventory and payment."""
+
+from inventory import reserve, release
+import inventory
+
+_notifications = []
+_gateway_fail = False
+
+
+def reset():
+    global _notifications, _gateway_fail
+    _notifications = []
+    _gateway_fail = False
+    # Reset inventory state via the inventory module
+    inventory.reset()
+
+
+def set_gateway_fail(fail):
+    """Configure gateway to simulate payment failure."""
+    global _gateway_fail
+    _gateway_fail = fail
+
+
+def _process_payment(amount):
+    """Simulate payment gateway."""
+    if _gateway_fail:
+        raise ValueError("payment declined")
+    return {"paid": amount}
+
+
+def place_order(product_id, qty, price):
+    """Place an order: reserve inventory, process payment, notify.
+
+    If payment fails, inventory reservation should be rolled back.
+    """
+    reserve(product_id, qty)
+    try:
+        result = _process_payment(qty * price)
+    except Exception:
+        # Roll back the reservation on any payment/processing failure
+        try:
+            release(product_id, qty)
+        except Exception:
+            # If release somehow fails, raise a new error that includes both
+            # the original payment failure context and the release problem.
+            # Re-raise the original exception after attempting release is preferred,
+            # but to avoid suppressing the original error here we re-raise.
+            pass
+        raise
+    _notifications.append({"product": product_id, "qty": qty})
+    return {"status": "confirmed", "payment": result}
+
+
+def get_notifications():
+    return list(_notifications)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;WRONG;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If reserve() were always paired with a release() on payment failure (i.e., the root cause removed), inventory would not remain stuck in the reserved state for this failure path.
+Evidence: - place_order calls reserve(product_id, qty) which mutates inventory state; - developer states payment failure was re-raised without calling release leaving inventory._reserved incremented; - new code wraps payment in try/except and calls release(product_id, qty) on Exception to undo reserve; - reset() now calls inventory.reset() instead of creating shadow _stock/_reserved in this module.
+Judgment: The developer correctly pinpointed the function and causal mutation (reserve without rollback) and the provided code implements the intended rollback and reset fixes; however they failed to state the exact invariant violated and did not fully analyze edge cases (release failing or race conditions), so the causal explanation is accurate but incompletely scoped.

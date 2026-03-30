@@ -1,0 +1,211 @@
+=== CALL 000054 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: mutable_default_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:42:53.023835
+LATENCY_MS: 33924
+
+--- PROMPT ---
+Workers skip valid tasks on second batch. Fix. Return the updated code.
+
+## Codebase (2 files)
+
+### FILE 1/2: code_snippets_v2/mutable_default_b/queue.py ###
+```python
+"""Task queue module."""
+
+
+def create_task(name, priority=1):
+    """Create a task dict."""
+    return {"name": name, "priority": priority, "status": "pending"}
+
+
+def enqueue(task, queue=None):
+    """Add task to queue. Returns the queue."""
+    if queue is None:
+        queue = []
+    queue.append(task)
+    return queue
+
+
+def dequeue(queue):
+    """Remove and return the first task, or None."""
+    if queue:
+        return queue.pop(0)
+    return None
+```
+
+### FILE 2/2: code_snippets_v2/mutable_default_b/worker.py ###
+```python
+"""Worker that processes task batches."""
+
+from queue import create_task
+
+
+def process_batch(tasks, seen=set()):
+    """Process a batch of tasks, skipping already-seen ones.
+
+    Invariant: each call to process_batch with a fresh batch must
+    process ALL tasks in that batch, regardless of prior calls.
+    """
+    # BUG: seen set persists across calls — valid tasks skipped as duplicates
+    results = []
+    for task in tasks:
+        task_id = task["name"]
+        if task_id in seen:
+            continue
+        seen.add(task_id)
+        results.append({"name": task["name"], "result": "processed"})
+    return results
+
+
+def summarize(results):
+    """Summarize processing results (distractor)."""
+    return f"{len(results)} tasks processed"
+```
+
+You are implementing a STRICT reasoning + code generation procedure designed to REDUCE reasoning-execution mismatch.
+
+This is NOT a formatting task. This is a TWO-PASS reasoning process with adversarial verification.
+
+You MUST follow the procedure exactly.
+
+Return a SINGLE valid JSON object. No text outside JSON. No markdown fences.
+
+# GOAL
+
+Fix the bug AND ensure your reasoning is causally correct and robust to failure.
+
+You are required to:
+- identify the correct mechanism
+- challenge your own hypothesis
+- verify your fix against failure scenarios
+
+# PROCEDURE (MANDATORY)
+
+## STEP 1 — DIAGNOSE (PRIMARY HYPOTHESIS)
+
+Identify:
+
+- root_cause:
+  Name the exact function + variable + operation causing the bug.
+  Must describe a causal relationship (not just "missing X").
+
+- failure_mechanism:
+  Give a concrete scenario:
+  cause → mutation/event → propagation → observable failure
+
+- broken_invariant:
+  A specific, testable property that is violated.
+
+## STEP 2 — ALTERNATIVE HYPOTHESIS (CRITICAL)
+
+Propose ONE alternative explanation for the bug.
+
+- What else could plausibly be the cause?
+- Why might your primary hypothesis be wrong?
+
+Then explicitly reject it:
+
+- Why is your original diagnosis more correct?
+- What evidence in the code supports this?
+
+This step is REQUIRED. Do not skip.
+
+## STEP 3 — PLAN FIX
+
+Describe:
+
+- fix_strategy:
+  What exact change you will make
+  Why it breaks the causal chain
+
+Must reference actual code behavior.
+
+## STEP 4 — CODE
+
+Implement the fix.
+
+Rules:
+- Modify ONLY necessary files
+- Return COMPLETE contents for modified files
+- Use "UNCHANGED" for others
+
+## STEP 5 — ADVERSARIAL SELF-CHECK (MANDATORY)
+
+You must actively try to BREAK your own fix.
+
+Answer ALL:
+
+1. Failure Scenario:
+   Describe a concrete scenario where your fix might still fail.
+
+2. Edge Case:
+   Identify a boundary condition (e.g., retries, empty values, ordering).
+
+3. Invariant Check:
+   Verify your invariant holds under:
+   - multiple calls
+   - retries / loops
+   - state reuse
+
+4. Conclusion:
+   - If a flaw is found → REVISE your fix
+   - If no flaw → explain WHY it is safe
+
+Your answer MUST reference your actual code.
+
+# OUTPUT FORMAT (STRICT JSON)
+
+{
+  "root_cause": "<exact function + variable + causal relationship>",
+  "failure_mechanism": "<cause → mutation → propagation → observable failure>",
+  "broken_invariant": "<specific testable property that is violated>",
+  "alternative_hypothesis": "<one alternative explanation for the bug>",
+  "hypothesis_rejection": "<why primary hypothesis is correct, with code evidence>",
+  "fix_strategy": "<what change you will make and why it breaks the causal chain>",
+  "self_check": {
+    "failure_scenario": "<concrete scenario where fix might still fail>",
+    "edge_case": "<boundary condition to test>",
+    "invariant_check": "<verify invariant under multiple calls, retries, state reuse>",
+    "conclusion": "<flaw found → revise, or why it is safe>"
+  },
+  "files": {"<path>": "<complete file contents or UNCHANGED>"}
+}
+
+# RULES
+
+- All fields are REQUIRED and must be substantive
+- No generic statements — ground every claim in actual code
+- Must reference actual variables and behavior
+- Do NOT restate the task
+- Do NOT skip alternative hypothesis
+- Do NOT skip adversarial self-check
+- For files you did NOT modify, set value to "UNCHANGED"
+- Do NOT include markdown formatting (no ```python blocks) inside file values
+- File values must be raw Python source code, not markdown
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "process_batch function: default argument 'seen=set()' is created once at function definition and then mutated via 'seen.add(task_id)', causing the same set instance to persist across calls and affecting membership checks",
+  "failure_mechanism": "Default mutable set constructed at function definition → process_batch mutates that set with seen.add(task_id) during its loop → the mutated set persists into subsequent calls to process_batch (because default arg is reused) → later calls find task names already in seen and skip them → observable failure: valid tasks in a fresh batch are incorrectly skipped.",
+  "broken_invariant": "For any independent call process_batch(tasks) where 'tasks' is a fresh batch, every task in 'tasks' must be processed (i.e., returned in results). Testable failure: calling process_batch([{'name':'A'}]) twice should return [{'name':'A','result':'processed'}] both times; current implementation returns the result only on the first call and an empty list on the second.",
+  "alternative_hypothesis": "An alternative cause could be that task objects are being reused (same dict instances) elsewhere and mutated so that the 'name' field or task identity changes across calls, leading to unexpected membership behavior in a globally held structure (e.g., a global seen variable external to process_batch).",
+  "hypothesis_rejection": "The alternative is unlikely because the code shows a default argument seen=set() declared directly in the process_batch signature and the function itself calls seen.add(task_id). There is no global seen variable elsewhere, and tasks are looked up by task['name'] (a string) so reuse or mutation of dict instances would not explain the persistent skipping across independent calls. The simplest and direct evidence is the presence of 'seen=set()' in the signature and the mutation 'seen.add(task_id)' inside the function, which matches the observed persistence bug.",
+  "fix_strategy": "Change the default sentinel from a mutable set to None and instantiate a fresh set() inside the function when seen is None: def process_batch(tasks, seen=None): if seen is None: seen = set(). This prevents mutation of a shared set instance across calls. The change breaks the causal chain by ensuring the 'seen' set is a new local object for each call unless the caller explicitly passes a set to maintain cross-call state.",
+  "self_check": {
+    "failure_scenario": "If a caller intentionally relied on implicit persistence of 'seen' across calls (i.e., expecting process_batch to remember processed task names across invocations without passing a set), this fix will change that behavior and the caller's code will process duplicate work instead of skipping it. However, the original invariant requires fresh batches be fully processed, so implicit persistence was a bug, not a feature.",
+    "edge_case": "Tasks lacking the 'name' key will raise KeyError because the code accesses task['name']; this was present in the original code and remains. Also, within a single call, repeated task names in 'tasks' will cause the first occurrence to be processed and subsequent duplicates in the same call to be skipped — that behavior is preserved and should be tested.",
+    "invariant_check": "Multiple calls: With the fix, calling process_batch([{'name':'A'}]) twice without passing a shared 'seen' will process 'A' both times because a fresh set is created each call. Retries/loops: If caller wants persistent skipping across retries, they can supply a shared set: s = set(); process_batch(batch1, seen=s); process_batch(batch2, seen=s). State reuse: If the caller passes the same set instance as 'seen', the function will continue to use that set and skip previously-seen names (same as before but now explicit). Thus the invariant that each fresh call processes all tasks is preserved by default, and explicit state reuse is still possible.",
+    "conclusion": "No flaw found in this fix relative to the reported bug: replacing the mutable default with None and creating a fresh set inside the function prevents unintended persistence across calls while preserving the ability for callers to pass an explicit set when they want cross-call state. The code still requires tasks to contain a 'name' key; that is an unrelated preexisting assumption."
+  },
+  "files": {
+    "code_snippets_v2/mutable_default_b/queue.py": "UNCHANGED",
+    "code_snippets_v2/mutable_default_b/worker.py": "\"\"\"Worker that processes task batches.\"\"\"\n\nfrom queue import create_task\n\n\ndef process_batch(tasks, seen=None):\n    \"\"\"Process a batch of tasks, skipping already-seen ones.\n\n    Invariant: each call to process_batch with a fresh batch must\n    process ALL tasks in that batch, regardless of prior calls.\n\n    Note: The previous implementation used a mutable default seen=set()\n    which caused the same set instance to persist across calls. To avoid\n    that unintended persistence we use None as the default and allocate a\n    fresh set inside the function unless a caller provides one explicitly.\n    \"\"\"\n    if seen is None:\n        seen = set()\n    results = []\n    for task in tasks:\n        task_id = task[\"name\"]\n        if task_id in seen:\n            continue\n        seen.add(task_id)\n        results.append({\"name\": task[\"name\"], \"result\": \"processed\"})\n    return results\n\n\ndef summarize(results):\n    \"\"\"Summarize processing results (distractor).\"\"\"\n    return f\"{len(results)} tasks processed\"\n"
+  }
+}

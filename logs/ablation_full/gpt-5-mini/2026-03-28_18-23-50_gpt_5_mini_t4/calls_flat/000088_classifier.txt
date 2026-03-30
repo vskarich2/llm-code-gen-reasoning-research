@@ -1,0 +1,179 @@
+=== CALL 000088 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: retry_dup_a
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:58:53.767341
+LATENCY_MS: 25312
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+Function retry_send: the loop's control logic (the 'if not result: continue' check and lack of break/return on success) causes the function to keep calling send(msg) even when send reports success.
+
+## Failure Mechanism
+First call to send(msg) → send returns True (success) and appends msg to _sent → retry_send does not break or return on that success (because it only 'continues' when result is False but does nothing when result is True) → loop proceeds to next iteration and calls send(msg) again → send appends duplicate msg(s) to _sent → observable failure: duplicate messages logged (violation of intended single-send-on-success invariant).
+
+## Broken Invariant
+After calling retry_send(msg, max_retries=n) when send(msg) succeeds on the first attempt, the number of appended messages must increase by exactly 1. The current code can increase it by >1 (duplicates).
+
+## Fix Strategy
+Change retry_send to stop retrying when send(msg) returns True (success) and to return True immediately. If all attempts fail, return False. Also handle non-positive max_retries by not attempting any sends and returning False. This directly breaks the causal chain by ensuring the loop does not make further send() calls after a reported success, preventing duplicates being appended to _sent.
+
+
+## Self-Check
+{'failure_scenario': 'If send(msg) has side effects (e.g., appends msg) even when it ultimately returns False, then retry_send may still cause multiple side-effectful calls before a success because each failed attempt already mutated _sent. Example: if send(msg) appended and then later returned False (contrary to current implementation), retry_send would append repeatedly on each failed attempt. This fix does not change that behavior; it only stops further attempts after a reported success.', 'edge_case': 'max_retries <= 0: the function now immediately returns False and does not call send(msg). This is intentional; callers that expect at least one attempt must pass max_retries >= 1. Another edge case: empty or None msg values — send(msg) will still append whatever is passed; retry_send does not validate message content.', 'invariant_check': "Under the updated code:\n- multiple calls: calling retry_send('m') repeatedly will append one entry per successful call (send succeeds once per retry_send invocation); reset() / clear_log() can clear state between calls.\n- retries / loops: if send returns False for the first k-1 attempts and True on attempt k (k <= max_retries), retry_send will call send exactly k times and then return True; if send never returns True in max_retries attempts, retry_send will call send max_retries times and return False.\n- state reuse: _sent is a module-level list; reset() and clear_log() set it to an empty list, so state can be reused between tests. get_sent() returns a shallow copy (list(...)) to avoid external mutation. These behaviors ensure the invariant 'if first send succeeds, only one append occurs' holds for single-threaded use because retry_send now stops after the first reported success.", 'conclusion': "No flaw remains for the originally observed duplicate-send bug in single-threaded scenarios: the updated retry_send returns immediately on success, preventing repeated send() calls and duplicates. The remaining potential issues (send having side effects while returning False, or concurrent calls in multithreaded contexts) are outside the original bug's causal chain; addressing them would require changes to send semantics or adding synchronization, which is not necessary to fix the described defect."}
+
+
+# Task Description
+Refactor this message sender for clarity. Return the updated code.
+
+# Code Produced
+```python
+"""Message sender with retry logic."""
+
+_sent = []
+
+
+def reset():
+    global _sent
+    _sent = []
+
+
+def send(msg):
+    """Send a message. Always succeeds. Appends to _sent."""
+    _sent.append(msg)
+    return True
+
+
+def retry_send(msg, max_retries=2):
+    """Send with retry. Should only send once if first attempt succeeds.
+
+    Behavior:
+    - If max_retries < 1: do not attempt and return False.
+    - Attempt up to max_retries times; stop and return True on the first successful send(msg).
+    - Return False if all attempts fail.
+    """
+    if max_retries < 1:
+        return False
+
+    for attempt in range(max_retries):
+        result = send(msg)
+        if result:
+            # success: stop retrying
+            return True
+        # failure: loop will try again until attempts exhausted
+    return False
+
+
+def get_sent():
+    return list(_sent)
+
+
+def clear_log():
+    """Utility to clear the log for display purposes."""
+    reset()
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;RETRY_LOGIC_BUG
+HIGH
+Counterfactual: If retry_send stopped retrying immediately on a reported success, the duplicate appends would not occur.
+Evidence: retry_send now returns True on first successful send(msg); send(msg) performs _sent.append(msg) and returns True; original defect was missing a break/return so loop invoked send again causing duplicate _sent.append calls; max_retries<1 path returns False and avoids any send calls.
+Judgment: The developer's reasoning forms a complete, code-grounded causal chain and the provided fix implements it exactly; acknowledged edge-cases (send with side-effects on False, concurrency) are real but outside the demonstrated single-threaded bug.

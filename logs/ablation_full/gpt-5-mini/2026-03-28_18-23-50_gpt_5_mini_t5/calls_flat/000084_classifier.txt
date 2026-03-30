@@ -1,0 +1,183 @@
+=== CALL 000084 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: use_before_set_c
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:53:59.404937
+LATENCY_MS: 21102
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+pipeline.find_best: the for-loop else branch assigns best = _last_best (use of module-level _last_best) which allows a previous call's _last_best to be returned when no current record exceeds threshold
+
+## Failure Mechanism
+A caller invokes pipeline.find_best with records where none of the validated records have value > threshold → the for-loop finishes without setting a local 'best' variable → the else branch assigns best = _last_best (which still holds a record from a prior successful call) → function returns that stale record instead of None → observable failure: callers receive a non-qualifying record (stale data) and _pipeline_result becomes 'found' even though the current input had no qualifying record.
+
+## Broken Invariant
+After find_best completes for a given input, _last_best must be non-stale: specifically, if no current record in 'records' satisfies value > threshold, then _last_best must be None and the function must return None. This is violated because _last_best retains prior state and find_best returns that prior record.
+
+## Fix Strategy
+Initialize a local 'best = None' before scanning 'valid'. If a record exceeds the threshold assign both 'best' and _last_best to that record and break. If loop finds no candidate leave 'best' as None and also set _last_best = None to clear stale state. Then set _pipeline_result based on whether 'best' is None. This breaks the causal chain because it prevents returning the module-level stale _last_best for inputs that have no qualifying record and enforces the contract that find_best returns either a current match or None.
+
+
+## Self-Check
+{'failure_scenario': 'If callers expect _last_best to persist across calls as a cache (i.e., they expect subsequent find_best calls with no matches to return the previous best), clearing _last_best will change behavior. However, current contract in the docstring requires returning the matching record or None; returning stale data was a bug. If some external code relied on the old (buggy) behavior, this change will break that code.', 'edge_case': "records is empty or load_and_validate returns an empty 'valid' list: the code sets best = None, sets _last_best = None, sets _pipeline_result = 'not_found' and returns None. Also handles when multiple records exist but none exceed threshold — same behavior.", 'invariant_check': "Multiple calls: On each call find_best computes a fresh 'valid' from load_and_validate. For each invocation the function sets a local 'best' default None and only assigns _last_best when a current candidate is found. Thus across multiple calls, _last_best reflects only the last successful match (or None if none). Retries/loops: repeated calls with varying inputs will not leak prior matches into new results because _last_best is cleared when no current match exists. State reuse: pipeline.reset still resets _last_best to None; the fix sets _last_best = None in the no-match path ensuring the invariant 'returned best must be from current valid list or None' holds.", 'conclusion': 'No flaw found in the fix relative to the original contract. The change ensures find_best never returns stale data and enforces that _last_best reflects only a current successful match. If external code relied on the prior buggy behavior (returning stale _last_best), that would require changes to that code, but the pipeline contract in the docstring is now satisfied. The code change is minimal and localized to pipeline.find_best.'}
+
+
+# Task Description
+Processing crashes when no items match filter. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Multi-stage pipeline with search and fallback."""
+
+from loader import load_and_validate, get_status
+
+_pipeline_result = "not_run"
+_last_best = None
+
+
+def reset():
+    global _pipeline_result, _last_best, _loaded, _load_status
+    _pipeline_result = "not_run"
+    _last_best = None
+    _loaded = None
+    _load_status = "idle"
+
+
+def find_best(records, rules):
+    """Find the first record matching all rules with value > threshold.
+
+    Contract: must return the matching record or None if none qualifies.
+    """
+    global _pipeline_result, _last_best
+
+    valid, status = load_and_validate(records, rules)
+
+    threshold = 50
+    best = None
+    for rec in valid:
+        if rec["value"] > threshold:
+            best = rec
+            _last_best = best
+            break
+    # If no record exceeds threshold, ensure we do NOT return stale data.
+    if best is None:
+        _last_best = None
+
+    _pipeline_result = "found" if best is not None else "not_found"
+    return best
+
+
+def get_pipeline_result():
+    return _pipeline_result
+
+
+def set_threshold(val):
+    """Distractor: adjusting threshold at wrong scope doesn't fix the bug."""
+    pass
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If the stale reuse of the module-level _last_best were removed (or cleared when no current match exists), the erroneous return of a prior record would not occur.
+Evidence: - find_best now initializes best = None and only assigns _last_best = best when rec["value"] > threshold; - when no match best is None and code explicitly sets _last_best = None; - _pipeline_result is set from whether best is None ('found' vs 'not_found'); - original failure mechanism described was returning module _last_best when local best was never set.
+Judgment: The developer's reasoning correctly identifies the exact variable and control-path causing stale-state leakage, specifies a precise invariant that was violated, traces the mutation-to-observable-failure chain, and proposes a minimal fix; the provided code implements that fix.

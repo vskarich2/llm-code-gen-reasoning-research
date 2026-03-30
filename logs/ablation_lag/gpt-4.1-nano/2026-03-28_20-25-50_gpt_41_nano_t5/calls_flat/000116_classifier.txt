@@ -1,0 +1,205 @@
+=== CALL 000116 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: temporal_drift_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:47:11.998535
+LATENCY_MS: 17070
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In pipeline.py, the call to compute_raw_stats is passing 'normalized' data instead of the original 'data'. Since compute_raw_stats expects untransformed data, this results in incorrect raw metrics being computed.
+
+## Failure Mechanism
+When the pipeline normalizes the data before computing raw stats, the raw statistics no longer reflect the original data distribution, leading to inaccurate raw_max, raw_min, raw_sum, and raw_count values, which then affect derived metrics and reporting.
+
+## Broken Invariant
+compute_raw_stats must receive the original untransformed data to accurately compute raw metrics, and the pipeline must pass 'data' to compute_raw_stats, not 'normalized'.
+
+## Fix Strategy
+Changing the call in pipeline.py from compute_raw_stats(normalized) to compute_raw_stats(data) ensures raw metrics are computed on the original data, maintaining the correct invariant that raw stats reflect untransformed data.
+
+
+
+# Task Description
+Report shows wrong raw metrics. Fix the pipeline. Return the updated code.
+
+# Code Produced
+```python
+"""Raw metrics computation.
+
+compute_raw_stats MUST receive the original (untransformed) data.
+"""
+
+def compute_raw_stats(data):
+    """Compute statistics on raw (untransformed) data.
+
+    Keys: raw_max, raw_min, raw_sum, raw_count.
+    """
+    if not data:
+        return {"raw_max": 0, "raw_min": 0, "raw_sum": 0, "raw_count": 0}
+    return {
+        "raw_max": max(data),
+        "raw_min": min(data),
+        "raw_sum": sum(data),
+        "raw_count": len(data),
+    }
+
+
+def compute_derived(raw_stats):
+    """Compute derived metrics from raw stats."""
+    count = raw_stats.get("raw_count", 0)
+    if count == 0:
+        return {"raw_mean": 0}
+    return {"raw_mean": raw_stats["raw_sum"] / count}
+
+
+"""Multi-stage metrics pipeline.
+
+Stage 1: compute raw stats on original data
+Stage 2: normalize
+Stage 3: clip to range
+Stage 4: summarize for display
+"""
+
+from transforms import normalize, clip, summarize_for_display
+from metrics import compute_raw_stats, compute_derived
+
+
+def pipeline(data):
+    """4-stage pipeline.
+
+    raw_stats MUST reflect the original data before any transforms.
+    """
+    # Stage 2: normalize
+    normalized = normalize(data)
+    # Stage 3: clip
+    clipped = clip(normalized, 0.05, 0.95)
+    # Stage 1: raw stats
+    raw_stats = compute_raw_stats(data)  # FIXED: pass original data, not normalized
+    derived = compute_derived(raw_stats)
+    # Stage 4: display summary
+    display = summarize_for_display(clipped)
+
+    return {
+        "raw_stats": raw_stats,
+        "derived": derived,
+        "cleaned": clipped,
+        "display": display,
+    }
+
+
+def quick_report(data):
+    """Quick report that only uses display stats. Unrelated path."""
+    normalized = normalize(data)
+    return summarize_for_display(normalized)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL;INVARIANT_VIOLATION
+MEDIUM
+Counterfactual: If compute_raw_stats is called with the original data (data) instead of normalized, the raw_max/raw_min/raw_sum/raw_count errors would disappear unless another codepath also computes raw stats from transformed data.
+Evidence: pipeline sequence shows normalized = normalize(data); clipped = clip(normalized, ...); raw_stats = compute_raw_stats(data) (comment: FIXED: pass original data, not normalized); compute_raw_stats returns max/min/sum/len of its input; file also DOES an import "from metrics import compute_raw_stats, compute_derived" after local definitions, which will override local functions if this is pipeline.py.
+Judgment: The developer correctly identified the function and causal chain and the proposed fix directly addresses it, but the provided code has an import/definition mismatch (importing compute_raw_stats from metrics after defining it locally) that makes the implementation only partially aligned with the reasoning and could leave the bug if the metrics module is not updated. 
+---DEBUG---
+- Mechanism: Developer pinpointed that compute_raw_stats was being invoked with 'normalized' rather than the original 'data' in pipeline.py; that is precise and actionable.
+- Causal chain: normalize(data) -> compute_raw_stats(normalized) -> wrong raw_max/raw_min/raw_sum/raw_count -> wrong derived metrics/display — all steps are present.
+- Fix: Changing the call to compute_raw_stats(data) directly addresses the cause.
+- Code issue: The file defines compute_raw_stats and compute_derived at top, then later does "from metrics import compute_raw_stats, compute_derived" which will shadow those local defs; if the metrics module still contains the buggy call-site or a different implementation, the runtime behavior may not reflect the intended fix.

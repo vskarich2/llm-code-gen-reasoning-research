@@ -1,0 +1,148 @@
+=== CALL 000193 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: invariant_partial_fail
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:34:29.729416
+LATENCY_MS: 49554
+
+--- PROMPT ---
+The execute_transfer function has too many logging calls mixed with business logic. Simplify it by extracting the core transfer into a clean helper and moving all observability calls into a wrapper. Return the updated code.
+
+## Codebase (4 files)
+
+### FILE 1/4: code_snippets_v2/invariant_partial_fail/models.py ###
+```python
+class Account:
+    def __init__(self, account_id, balance):
+        self.account_id = account_id
+        self.balance = balance
+
+    def __repr__(self):
+        return f"Account({self.account_id}, balance={self.balance})"
+```
+
+### FILE 2/4: code_snippets_v2/invariant_partial_fail/ledger.py ###
+```python
+_entries = []
+
+
+def record_debit(account_id, amount):
+    _entries.append({"type": "debit", "account": account_id, "amount": amount})
+
+
+def record_credit(account_id, amount):
+    _entries.append({"type": "credit", "account": account_id, "amount": amount})
+
+
+def record_transfer_attempt(from_id, to_id, amount, status="pending"):
+    _entries.append({
+        "type": "transfer_attempt",
+        "from": from_id, "to": to_id,
+        "amount": amount, "status": status,
+    })
+
+
+def get_entries():
+    return list(_entries)
+```
+
+### FILE 3/4: code_snippets_v2/invariant_partial_fail/transfer_service.py ###
+```python
+import random
+from models import Account
+from ledger import record_debit, record_credit, record_transfer_attempt
+from audit import emit_transfer_event, emit_failure_alert
+
+
+def validate_transfer(sender, amount):
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    if sender.balance < amount:
+        raise ValueError("insufficient funds")
+
+
+def execute_transfer(sender, receiver, amount):
+    validate_transfer(sender, amount)
+
+    record_transfer_attempt(sender.account_id, receiver.account_id, amount)
+
+    sender.balance -= amount
+    record_debit(sender.account_id, amount)
+
+    if random.random() < 0.3:
+        emit_failure_alert(
+            sender.account_id, receiver.account_id, amount,
+            "connection reset during credit phase",
+        )
+        raise RuntimeError("transient failure during credit")
+
+    receiver.balance += amount
+    record_credit(receiver.account_id, amount)
+
+    emit_transfer_event(sender.account_id, receiver.account_id, amount)
+```
+
+### FILE 4/4: code_snippets_v2/invariant_partial_fail/audit.py ###
+```python
+_alerts = []
+
+
+def emit_transfer_event(from_id, to_id, amount):
+    _alerts.append({
+        "event": "transfer", "from": from_id,
+        "to": to_id, "amount": amount,
+    })
+
+
+def emit_failure_alert(from_id, to_id, amount, error):
+    _alerts.append({
+        "event": "transfer_failure", "from": from_id,
+        "to": to_id, "amount": amount, "error": str(error),
+    })
+
+
+def get_alerts():
+    return list(_alerts)
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/invariant_partial_fail/models.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/invariant_partial_fail/ledger.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/invariant_partial_fail/transfer_service.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/invariant_partial_fail/audit.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "The root cause is in transfer_service.execute_transfer: it mixes business state mutations (sender.balance -= amount and receiver.balance += amount) with observability/side-effect calls (ledger.record_transfer_attempt, ledger.record_debit, ledger.record_credit, audit.emit_failure_alert, audit.emit_transfer_event). Because the balance updates live alongside logging/alerting, errors raised between those lines can leave balances and recorded events out of sync. The specific variables involved are sender.balance and receiver.balance being mutated directly inside execute_transfer while observability calls are interleaved.",
+  "failure_mechanism": "Concretely, execute_transfer first decrements sender.balance (sender.balance -= amount) and then calls record_debit(sender.account_id, amount). Immediately after that it evaluates the simulated transient fault (if random.random() < 0.3) and, on that branch, calls emit_failure_alert(...) and raises RuntimeError before it ever increments receiver.balance or records the credit. The effect is a recorded debit entry and a decreased sender.balance but no recorded credit and no receiver.balance increase. This manifests as a partial/one-sided transfer when the random failure triggers between the debit and credit steps.",
+  "broken_invariant": "Invariant violated: \"If a debit record for (sender.account_id, amount) exists in the ledger (i.e. record_debit was called), then a corresponding credit record for (receiver.account_id, amount) must also exist after the transfer attempt finishes.\" The current execute_transfer can produce ledger entries where a debit is present without a matching credit because of the transient failure branch between debit and credit.",
+  "fix_strategy": "I extracted the pure balance operations into small helpers (_debit_account and _credit_account) so the core business logic (mutating sender.balance and receiver.balance) is isolated and contains no observability calls. All ledger and audit calls remain in the execute_transfer wrapper. This separation makes it clear what is the pure state mutation and what are side effects (records/alerts), which simplifies reasoning and makes it straightforward to add transactional/compensation logic later. The change does not change the runtime ordering of steps (debit, possible transient failure, then credit) but centralizes all observability in the wrapper and keeps the helpers clean.",
+  "files": {
+    "code_snippets_v2/invariant_partial_fail/models.py": "UNCHANGED",
+    "code_snippets_v2/invariant_partial_fail/ledger.py": "UNCHANGED",
+    "code_snippets_v2/invariant_partial_fail/transfer_service.py": "import random\nfrom models import Account\nfrom ledger import record_debit, record_credit, record_transfer_attempt\nfrom audit import emit_transfer_event, emit_failure_alert\n\n\ndef validate_transfer(sender, amount):\n    if amount <= 0:\n        raise ValueError(\"amount must be positive\")\n    if sender.balance < amount:\n        raise ValueError(\"insufficient funds\")\n\n\n# Core state-modification helpers (no observability calls here)\ndef _debit_account(account, amount):\n    account.balance -= amount\n\n\ndef _credit_account(account, amount):\n    account.balance += amount\n\n\n# Convenience helper that composes the core operations (also contains no observability)\ndef _core_transfer(sender, receiver, amount):\n    _debit_account(sender, amount)\n    _credit_account(receiver, amount)\n\n\n# Wrapper that performs validation and all observability (ledger + audit)\ndef execute_transfer(sender, receiver, amount):\n    validate_transfer(sender, amount)\n\n    record_transfer_attempt(sender.account_id, receiver.account_id, amount)\n\n    # apply debit (core state change) and record it\n    _debit_account(sender, amount)\n    record_debit(sender.account_id, amount)\n\n    # simulate a transient failure that can occur during the credit phase\n    if random.random() < 0.3:\n        emit_failure_alert(\n            sender.account_id, receiver.account_id, amount,\n            \"connection reset during credit phase\",\n        )\n        raise RuntimeError(\"transient failure during credit\")\n\n    # apply credit (core state change) and record it\n    _credit_account(receiver, amount)\n    record_credit(receiver.account_id, amount)\n\n    emit_transfer_event(sender.account_id, receiver.account_id, amount)\n",
+    "code_snippets_v2/invariant_partial_fail/audit.py": "UNCHANGED"
+  }
+}

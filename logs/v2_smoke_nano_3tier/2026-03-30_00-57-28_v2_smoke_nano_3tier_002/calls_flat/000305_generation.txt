@@ -1,0 +1,259 @@
+=== CALL 000305 ===
+MODEL: gpt-4.1-nano
+PHASE: generation
+CASE_ID: commit_gate
+CONDITION: leg_reduction_v2
+TRIAL: 1
+RUN_ID: v2_smoke_nano_3tier_002
+TRACE_ID: 7e476e0dc70e4777b0603ad332cf191d
+TIMESTAMP: 2026-03-30T01:47:53.475236
+LATENCY_MS: 3201
+
+--- PROMPT ---
+After simplifying the pipeline by removing commit() and freeze_view(), the system is broken. Restore the necessary steps. Return the updated code.
+
+## Codebase (5 files)
+
+### FILE 1/5: code_snippets_v2/commit_gate/state.py ###
+```python
+def make_state(entries):
+    return {
+        "raw": list(entries),
+        "pending": [],
+        "stable": [],
+        "view": [],
+        "meta": {"version": 0, "frozen": False},
+    }
+```
+
+### FILE 2/5: code_snippets_v2/commit_gate/reducers.py ###
+```python
+def normalize(raw):
+    return [dict(e) for e in raw]
+
+
+def collapse(entries):
+    merged = {}
+    for e in entries:
+        merged[e["id"]] = e
+    return list(merged.values())
+
+
+def stage(st, data):
+    st["pending"] = list(data)
+    st["view"] = list(data)
+    st["meta"]["version"] += 1
+
+
+def commit(st):
+    """Promote pending to stable. Sorts by id for canonical ordering. Sets frozen gate."""
+    st["stable"] = sorted(st["pending"], key=lambda e: e["id"])
+    st["meta"]["frozen"] = True
+
+
+def freeze_view(st):
+    """Rebuild view from committed (stable) data."""
+    st["view"] = list(st["stable"])
+
+
+def materialize(st):
+    return list(st["view"])
+```
+
+### FILE 3/5: code_snippets_v2/commit_gate/selectors.py ###
+```python
+def get_committed_total(st):
+    """Returns total only if state is committed (frozen). None otherwise."""
+    if not st["meta"]["frozen"]:
+        return None
+    return sum(e.get("val", 0) for e in st["stable"])
+
+
+def get_view_digest(st):
+    """Order-sensitive digest of view items."""
+    return "|".join(e["id"] for e in st["view"])
+
+
+def get_committed_digest(st):
+    """Order-sensitive digest of committed items."""
+    if not st["meta"]["frozen"]:
+        return None
+    return "|".join(e["id"] for e in st["stable"])
+```
+
+### FILE 4/5: code_snippets_v2/commit_gate/pipeline.py ###
+```python
+from state import make_state
+from reducers import normalize, collapse, stage, commit, freeze_view, materialize
+
+
+def process_batch(entries):
+    st = make_state(entries)
+    cleaned = normalize(st["raw"])
+    merged = collapse(cleaned)
+    stage(st, merged)
+    # commit(st)       — removed as "redundant"
+    # freeze_view(st)  — removed as "redundant"
+    return st, materialize(st)
+```
+
+### FILE 5/5: code_snippets_v2/commit_gate/api.py ###
+```python
+from pipeline import process_batch
+from selectors import get_committed_total, get_view_digest, get_committed_digest
+from reducers import stage
+from state import make_state
+
+
+def ingest(entries):
+    st, items = process_batch(entries)
+    total = get_committed_total(st)
+    return {"items": items, "total": total}
+
+
+def preview(entries):
+    from reducers import normalize, collapse
+    st = make_state(entries)
+    cleaned = normalize(st["raw"])
+    merged = collapse(cleaned)
+    stage(st, merged)
+    return {"items": list(st["view"]), "frozen": st["meta"]["frozen"]}
+
+
+def ingest_and_verify(entries):
+    """Full pipeline: ingest then verify view is consistent with committed data."""
+    st, items = process_batch(entries)
+    committed_total = get_committed_total(st)
+    view_digest = get_view_digest(st)
+    committed_digest = get_committed_digest(st)
+    return {
+        "items": items,
+        "committed_total": committed_total,
+        "consistent": view_digest == committed_digest,
+    }
+```
+
+You are fixing a bug using a structured reasoning-to-code process.
+
+Your goal is not just to describe the bug. Your goal is to make your diagnosis produce a concrete, checkable code fix.
+
+Follow this procedure exactly. Return a SINGLE valid JSON object.
+
+## STEP 1 — Diagnose the mechanism
+
+Identify the bug mechanism precisely.
+
+You MUST state:
+- the specific function, variable, or operation involved
+- the causal relationship that produces the failure
+- the bug mechanism, not just the symptom
+
+Good:
+- "create_config returns DEFAULTS directly, so later mutation aliases global state"
+- "update_product writes the database but does not invalidate cache, so reads return stale cached values"
+
+Bad:
+- "there is a state bug"
+- "cache is wrong"
+- "this function has an issue"
+
+## STEP 2 — State explicit fix commitments
+
+Convert your diagnosis into explicit, local, checkable commitments.
+
+A valid commitment MUST be:
+- LOCAL: names a specific function, variable, or operation
+- CHECKABLE: a reviewer could inspect the code and decide whether it is satisfied
+- DIRECTLY IMPLIED by your diagnosis
+
+Write 1–3 commitments.
+
+Each commitment MUST use this form:
+
+<scope> must <action>
+
+Examples:
+- "create_config must return a copy of DEFAULTS"
+- "update_product must invalidate cache after write"
+- "retry_send must stop retrying after success"
+
+Do NOT write vague commitments like:
+- "fix shared state"
+- "improve correctness"
+- "avoid bugs"
+
+## STEP 3 — Plan the fix
+
+Describe the concrete code change you will make and why it satisfies the commitments.
+
+Your fix strategy must:
+- name the file/function you will change
+- describe the exact operation you will add/remove/change
+- explain why that change addresses the mechanism
+
+## STEP 4 — Risk check (CRITICAL)
+
+Before finalizing code, answer:
+
+What is the most likely way this fix could still fail?
+
+Rules:
+- The risk must be specific and tied to the actual patch
+- If the risk is real, REVISE your fix before writing final code
+- If the risk is not real, explain specifically why the patch is safe
+- Do NOT give a generic answer like "there may be edge cases"
+
+Good:
+- "This could still fail if update_product invalidates one cache layer but api reads from a separate local cache"
+- "This is safe because create_config is the only constructor returning DEFAULTS and the patch replaces the direct shared reference"
+
+Bad:
+- "It might still fail in some cases"
+- "There could be bugs elsewhere"
+
+## STEP 5 — Return fixed code
+
+Return your response as JSON with this exact schema:
+
+{
+  "root_cause": "<specific mechanism with function/variable/causal relationship>",
+  "code_commitments": [
+    "<scope> must <action>",
+    "<scope> must <action>"
+  ],
+  "fix_strategy": "<concrete code change and why it satisfies the commitments>",
+  "risk_check": "<most likely residual failure mode, and whether you revised or why the patch is safe>",
+  "files": {
+    ""code_snippets_v2/commit_gate/state.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/commit_gate/reducers.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/commit_gate/selectors.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/commit_gate/pipeline.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/commit_gate/api.py": "<complete file contents or UNCHANGED>""
+  }
+}
+
+RULES:
+- ALL fields are REQUIRED and must be non-empty substantive content
+- "code_commitments" MUST contain 1–3 commitments
+- Each commitment MUST be atomic, local, and checkable
+- Do NOT include vague or generic commitments
+- "files" MUST contain one entry for EVERY file listed above
+- For files you did NOT modify, set the value to the exact string "UNCHANGED"
+- For files you DID modify, include the COMPLETE updated file contents
+- Do NOT include markdown formatting inside file values
+- Do NOT omit any file
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "The process_batch function in pipeline.py calls stage() to update the state but omits calling commit() and freeze_view(), which are necessary to set the 'frozen' flag and update the view from stable data, leading to inconsistent state where get_committed_total and get_committed_digest return None, breaking the verification logic.",
+  "code_commitments": [
+    "process_batch must call commit(st) after stage(st, merged)",
+    "process_batch must call freeze_view(st) after commit(st)"
+  ],
+  "fix_strategy": "In process_batch, after calling stage(st, merged), add calls to commit(st) and freeze_view(st). This ensures that the state is properly marked as frozen and the view is rebuilt from the stable data, restoring the consistency expected by the selectors and API functions.",
+  "risk_check": "This fix could still fail if commit() or freeze_view() are modified elsewhere to change state in unexpected ways, but given the current code structure, explicitly calling commit() and freeze_view() guarantees the state transitions needed. The fix is safe because it directly restores the missing steps that were previously removed, aligning the state with the expectations of the selectors.",
+  "files": {
+    "code_snippets_v2/commit_gate/state.py": "UNCHANGED",
+    "code_snippets_v2/commit_gate/reducers.py": "UNCHANGED",
+    "code_snippets_v2/commit_gate/selectors.py": "UNCHANGED",
+    "code_snippets_v2/commit_gate/pipeline.py": "from state import make_state\nfrom reducers import normalize, collapse, stage, commit, freeze_view, materialize\n\n\ndef process_batch(entries):\n    st = make_state(entries)\n    cleaned = normalize(st[\"raw\"])\n    merged = collapse(cleaned)\n    stage(st, merged)\n    commit(st)\n    freeze_view(st)\n    return st, materialize(st)",
+    "code_snippets_v2/commit_gate/api.py": "UNCHANGED"
+  }
+}

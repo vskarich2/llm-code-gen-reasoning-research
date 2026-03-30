@@ -1,0 +1,189 @@
+=== CALL 000010 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: alias_config_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:29:32.352547
+LATENCY_MS: 17847
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In config.create_config the local variable 'config' is assigned directly to the module-level DEFAULTS (config = DEFAULTS), so create_config returns the same dict object rather than a copy. ConfigMiddleware.__init__ then stores that returned object in self._base. In middleware.apply_config the code sets cfg = self._base and then calls cfg.update(request_overrides), which mutates the cached shared dict referenced by DEFAULTS and by self._base.
+
+## Failure Mechanism
+Sequence: handle_debug_request() -> handle_request({'debug': True}) constructs a ConfigMiddleware; its __init__ calls create_config() which returned the DEFAULTS dict object (not a copy), so self._base references DEFAULTS. apply_config receives {'debug': True}, sets cfg = self._base and calls cfg.update({'debug': True}) — this mutates the cached base (and DEFAULTS). A subsequent call to handle_request() without overrides returns a config containing debug=True even though no override was provided. Concretely: the first request's override persists into later requests because update() was applied to the shared dict returned by create_config.
+
+## Broken Invariant
+Calling handle_request() (or ConfigMiddleware.apply_config with no request_overrides) must return configuration that does not include overrides from previous requests. Equivalently, create_config() must return a fresh dict such that mutating the returned dict does not change DEFAULTS or other callers' cached base; and apply_config must not mutate the cached base stored on the middleware instance across requests.
+
+## Fix Strategy
+Make create_config return a shallow copy of DEFAULTS (dict(DEFAULTS)) so callers receive a distinct dict object. Additionally, ensure apply_config does not mutate the cached base by copying self._base into a fresh dict (cfg = dict(self._base)) before applying request_overrides. These changes prevent per-request updates from mutating the shared DEFAULTS or the middleware's cached base, so overrides affect only the returned per-request config.
+
+
+
+# Task Description
+Requests are seeing config from previous requests. Simplify the config flow. Return the updated code.
+
+# Code Produced
+```python
+DEFAULTS = {"timeout": 30, "retries": 3, "debug": False}
+
+
+def create_config(overrides=None):
+    """Return a config dict based on defaults, with optional overrides."""
+    # Return a copy so callers cannot mutate the module-level DEFAULTS
+    config = dict(DEFAULTS)
+    if overrides:
+        config.update(overrides)
+    return config
+
+
+def merge_overrides(base, overrides):
+    """Merge overrides into a copy of base. Used by admin tools.
+    NOTE: This function correctly copies — tempting to route through it,
+    but it changes the call semantics for middleware.
+    """
+    result = dict(base)
+    result.update(overrides)
+    return result
+
+
+def get_default(key):
+    """Read a single default value."""
+    return DEFAULTS.get(key)
+
+
+def reset_defaults():
+    """Restore defaults to factory values."""
+    global DEFAULTS
+    DEFAULTS = {"timeout": 30, "retries": 3, "debug": False}
+
+
+from config import create_config
+
+
+class ConfigMiddleware:
+    """Middleware that loads config once and applies per-request overrides."""
+
+    def __init__(self):
+        # create_config now returns a copy; keep a cached base for defaults
+        self._base = create_config()  # cached at init time
+
+    def apply_config(self, request_overrides=None):
+        """Return config for this request, applying any overrides.
+
+        Do not mutate the cached base; return a fresh dict each call.
+        """
+        # Copy the cached base so updates for this request do not persist
+        cfg = dict(self._base)
+        if request_overrides:
+            cfg.update(request_overrides)
+        return cfg
+
+    def get_timeout(self):
+        return self._base.get("timeout", 30)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: Removing the aliasing (so create_config returns a fresh dict and apply_config copies self._base before updating) would prevent per-request overrides from persisting and the failure would not occur.
+Evidence: - create_config now does config = dict(DEFAULTS) so callers don't get a reference to module DEFAULTS; - ConfigMiddleware.__init__ stores a copy in self._base (create_config()); - apply_config does cfg = dict(self._base) then cfg.update(...) so updates mutate only per-request dict; - previously cfg = self._base + cfg.update(...) would have mutated the shared DEFAULTS via the cached reference.
+Judgment: The developer's reasoning presents a valid causal chain from aliasing (config = DEFAULTS) → update() mutating the shared dict → later requests observing stale overrides, and the proposed fixes (copy at creation and copy before per-request update) directly and correctly address the root cause.

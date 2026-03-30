@@ -1,0 +1,182 @@
+=== CALL 000091 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: retry_dup_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:43:24.690126
+LATENCY_MS: 31559
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In send_with_retry function, the variable _attempt_count is not reset between retries, causing the function to incorrectly think a transient failure has occurred on subsequent attempts, and the lack of a break statement after a successful send causes duplicate messages.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Reset _attempt_count at the start of each retry attempt and add a break statement after a successful send to prevent further retries and duplicate messages. This ensures each send attempt is independent and stops retries upon success.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+The most likely failure is that resetting _attempt_count each attempt might interfere with tracking overall attempts if used elsewhere, but since _attempt_count is only used within send_with_retry, this is safe. The break after success prevents duplicate messages. No further revisions are needed.
+
+
+# Task Description
+Messages appearing twice in store. Fix the retry logic. Return the updated code.
+
+# Code Produced
+```python
+"""Message sender with retry and store integration."""
+
+from store import append, notify, get_messages, get_notifications
+
+_attempt_count = 0
+
+
+def reset():
+    global _attempt_count, _messages, _notifications
+    _attempt_count = 0
+    _messages = []
+    _notifications = []
+
+
+def send(msg, fail_first=False):
+    """Send a message: store it and notify.
+
+    If fail_first is True, raises on first call to simulate transient error.
+    """
+    global _attempt_count
+    _attempt_count += 1
+    if fail_first and _attempt_count == 1:
+        raise ConnectionError("transient failure")
+    append(msg)
+    notify(msg)
+    return True
+
+
+def send_with_retry(msg, max_retries=2, fail_first=False):
+    """Retry send on transient errors."""
+    for attempt in range(max_retries):
+        global _attempt_count
+        _attempt_count = 0  # Reset attempt count at each retry
+        try:
+            send(msg, fail_first=fail_first)
+            break  # Exit loop on success
+        except ConnectionError as e:
+            if attempt == max_retries - 1:
+                raise e
+            continue
+    return True
+
+
+def get_attempt_count():
+    return _attempt_count
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+PARTIAL;WRONG;PARTIAL;WRONG;CORRECT;RETRY_LOGIC_BUG
+HIGH
+Counterfactual: No — removing the developer's claimed _attempt_count issue alone would not prevent duplicate messages because the real duplicate symptom is caused by continuing to call send after a successful send (missing break).
+Evidence: _attempt_count is a module-global incremented in send() ("_attempt_count += 1"); send() raises only when fail_first and _attempt_count == 1 (so only the first invocation should fail); send() performs append(msg) and notify(msg) on success; produced send_with_retry resets _attempt_count = 0 at the top of each retry loop (so each retry appears as "first" attempt) and also adds a break after success; resetting to 0 inside the loop makes every retry trigger the fail_first==True failure, while the original duplicate-message symptom is explained by continuing to call send after success (no break).
+Judgment: The developer correctly pointed at retry logic around _attempt_count and the missing break as relevant, but mis-specified causality and left out a testable invariant; the proposed reset is actually harmful (it makes every retry look like the first attempt when fail_first is used), so the fix only partially aligns—while the code implements the stated fix, that fix is incorrect.

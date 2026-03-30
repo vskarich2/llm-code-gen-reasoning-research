@@ -1,0 +1,183 @@
+=== CALL 000209 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: commit_gate
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:57:05.860451
+LATENCY_MS: 15538
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+pipeline.process_batch: removal of calls to reducers.commit(st) and reducers.freeze_view(st) (the operations that set st['stable'] and st['meta']['frozen'] and rebuild st['view'] from committed data), causing st['meta']['frozen'] to remain False and st['stable'] to never be populated during normal batch processing.
+
+## Failure Mechanism
+Removed calls to commit() and freeze_view() → after stage(st, merged) only st['pending'] and st['view'] are set and st['meta']['version'] increments, but st['stable'] remains empty and st['meta']['frozen'] stays False → selectors.get_committed_total() and get_committed_digest() check st['meta']['frozen'] and return None when it's False → API functions (ingest, ingest_and_verify) receive None for committed totals/digests and report inconsistent or missing committed results.
+
+## Broken Invariant
+After process_batch(entries) completes, st['meta']['frozen'] must be True and st['stable'] must contain the canonical committed items (so that get_committed_total(st) returns a numeric total and get_committed_digest(st) equals get_view_digest(st)). This invariant is violated: process_batch returns st with st['meta']['frozen'] == False and st['stable'] == [].
+
+## Fix Strategy
+Reinstate the commit(st) and freeze_view(st) calls in pipeline.process_batch immediately after stage(st, merged) so that pending entries are promoted to stable, sorted, and the view is rebuilt from stable. Additionally, ensure stage() marks the state as not frozen when creating a new pending view (st['meta']['frozen'] = False) so preview operations (which call stage without committing) correctly report st['meta']['frozen'] == False and do not leave stale frozen=True across subsequent stages. This breaks the causal chain by (1) ensuring process_batch produces a committed snapshot (stable + frozen) and (2) ensuring stage always resets the frozen gate when opening a new pending change.
+
+
+## Self-Check
+{'failure_scenario': "If another caller reuses the same state object (st) created elsewhere and calls stage(st, data) expecting the state to remain frozen until they explicitly commit, our change to stage(st, ...) sets st['meta']['frozen'] = False whenever stage is called. This could 'unfreeze' a previously committed snapshot if callers intentionally reuse state across operations. However, in this codebase process_batch and preview create fresh state via make_state(entries) each time, so cross-call reuse is not part of the intended design.", 'edge_case': "Empty input entries: process_batch([]) should produce st['stable'] == [] and st['meta']['frozen'] == True and get_committed_total(st) == 0. With the fix, commit will set stable to [] (sorted empty list) and freeze_view will set view to [], so selectors return 0 for total and empty digest ''.", 'invariant_check': "Invariant: After process_batch(entries), st['meta']['frozen'] == True and get_view_digest(st) == get_committed_digest(st) and get_committed_total(st) is numeric.\n- Multiple calls: process_batch creates a fresh state with make_state(entries) each call, stage will open then commit+freeze will set frozen True per-call — invariant holds per-call.\n- Retries/loops: Re-running process_batch with same entries will re-create state and re-commit; stable is deterministically sorted by id in commit(), so digests match across retries.\n- State reuse: If external code reused the same st and only called stage(), stage now explicitly sets st['meta']['frozen']=False which is the correct semantic for opening a new pending set; commit must be called to re-freeze. This makes semantics explicit and avoids stale frozen==True after a stage.\nTherefore the invariant holds for the intended usage (new state per batch) and is robust across retries and empty inputs.", 'conclusion': "No flaw requiring further code changes was found for the intended design: reinstating commit() and freeze_view() in pipeline.process_batch restores committed snapshots and the added st['meta']['frozen'] = False in stage fixes preview semantics and prevents stale frozen state. The only potential issue is deliberate cross-call state reuse by external code; that would be an API contract violation (callers must not reuse the internal state object or must manage frozen semantics). Given the codebase patterns (make_state is called inside process_batch and preview creates its own state), this fix is safe."}
+
+
+# Task Description
+After simplifying the pipeline by removing commit() and freeze_view(), the system is broken. Restore the necessary steps. Return the updated code.
+
+# Code Produced
+```python
+def normalize(raw):
+    return [dict(e) for e in raw]
+
+
+def collapse(entries):
+    merged = {}
+    for e in entries:
+        merged[e["id"]] = e
+    return list(merged.values())
+
+
+def stage(st, data):
+    st["pending"] = list(data)
+    st["view"] = list(data)
+    st["meta"]["version"] += 1
+    # Opening a new stage should unfreeze any previously committed snapshot
+    st["meta"]["frozen"] = False
+
+
+def commit(st):
+    """Promote pending to stable. Sorts by id for canonical ordering. Sets frozen gate."""
+    st["stable"] = sorted(st["pending"], key=lambda e: e["id"])
+    st["meta"]["frozen"] = True
+
+
+def freeze_view(st):
+    """Rebuild view from committed (stable) data."""
+    st["view"] = list(st["stable"])
+
+
+def materialize(st):
+    return list(st["view"])
+
+
+from state import make_state
+from reducers import normalize, collapse, stage, commit, freeze_view, materialize
+
+
+def process_batch(entries):
+    st = make_state(entries)
+    cleaned = normalize(st["raw"])
+    merged = collapse(cleaned)
+    stage(st, merged)
+    # commit and freeze the view so committed selectors observe the snapshot
+    commit(st)
+    freeze_view(st)
+    return st, materialize(st)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL;INVARIANT_VIOLATION
+MEDIUM
+Counterfactual: If commit() and freeze_view() are restored in process_batch (and stage correctly resets frozen), the observed missing committed totals/digests would not occur.
+Evidence: process_batch creates st via make_state(entries) then stage(st, merged) — without commit/freeze_view st['stable'] stays empty and st['meta']['frozen'] remains False; selectors check st['meta']['frozen'] and return None when False; commit() (in code) sets st['stable']=sorted(st['pending'], key=id) and st['meta']['frozen']=True; freeze_view() copies st['stable'] into st['view']; BUT the file defines stage/commit/freeze_view locally THEN does "from reducers import normalize, collapse, stage, commit, freeze_view, materialize" which will overwrite the local implementations if reducers differ.
+Judgment: The developer's reasoning correctly identifies the precise mutated fields (st['stable'], st['meta']['frozen']), the propagation to selectors, and the appropriate fix; however the produced code has a real risk (import shadowing of the local functions) that partially undermines the fix and should be corrected.

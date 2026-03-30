@@ -1,0 +1,143 @@
+=== CALL 000057 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: mutable_default_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:41:54.841244
+LATENCY_MS: 17092
+
+--- PROMPT ---
+Scheduler history is shared across jobs. Fix. Return the updated code.
+
+## Codebase (3 files)
+
+### FILE 1/3: code_snippets_v2/mutable_default_c/queue.py ###
+```python
+"""Task queue module."""
+
+
+def create_task(name, priority=1):
+    """Create a task dict."""
+    return {"name": name, "priority": priority}
+
+
+def enqueue_all(tasks, queue=None):
+    """Enqueue multiple tasks. Returns the queue."""
+    if queue is None:
+        queue = []
+    queue.extend(tasks)
+    return queue
+
+
+def drain(queue):
+    """Remove and return all tasks from queue."""
+    items = list(queue)
+    queue.clear()
+    return items
+```
+
+### FILE 2/3: code_snippets_v2/mutable_default_c/scheduler.py ###
+```python
+"""Scheduler with decorator that tracks call history."""
+
+from worker import process, batch_process
+
+
+_shared_log = []
+
+
+def with_history(func, history=_shared_log):
+    """Decorator that records call history for a function.
+
+    Invariant: each decorated function must have its OWN
+    independent history list.
+    """
+    # BUG: history default is the module-level _shared_log list,
+    # so ALL decorated functions append to the SAME list.
+
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        history.append({"func": func.__name__, "args_count": len(args)})
+        return result
+
+    wrapper.get_history = lambda: list(history)
+    wrapper.clear_history = lambda: history.clear()
+    return wrapper
+
+
+@with_history
+def schedule_one(task):
+    """Schedule and process a single task."""
+    return process(task)
+
+
+@with_history
+def schedule_batch(tasks):
+    """Schedule and process a batch of tasks."""
+    return batch_process(tasks)
+
+
+def get_all_stats():
+    """Get combined stats (distractor)."""
+    return {
+        "one_calls": len(schedule_one.get_history()),
+        "batch_calls": len(schedule_batch.get_history()),
+    }
+```
+
+### FILE 3/3: code_snippets_v2/mutable_default_c/worker.py ###
+```python
+"""Worker module for processing tasks."""
+
+from queue import create_task
+
+
+def process(task):
+    """Process a single task and return a result."""
+    return {"name": task["name"], "status": "done"}
+
+
+def batch_process(tasks):
+    """Process a list of tasks."""
+    return [process(t) for t in tasks]
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/mutable_default_c/queue.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/mutable_default_c/scheduler.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/mutable_default_c/worker.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "The bug is in scheduler.with_history: the parameter history has a default value of the module-level list _shared_log (history=_shared_log). Because default argument values are evaluated once at function definition time, every function decorated with @with_history closes over the same list object (_shared_log) and therefore shares history state.",
+  "failure_mechanism": "When schedule_one and schedule_batch are decorated with @with_history they both receive the same history list. As a concrete scenario: calling schedule_one(task1) appends an entry to the shared list; then calling schedule_batch([t2, t3]) appends additional entries to the same list. As a result schedule_one.get_history() will include entries produced by schedule_batch and vice versa. Clearing the history on one wrapper (schedule_one.clear_history()) clears the combined history for both, since they reference the same list object.",
+  "broken_invariant": "Invariant violated: 'each decorated function must have its OWN independent history list.' Testable statement: after calling schedule_one(...) once and schedule_batch(...) zero times, len(schedule_one.get_history()) must equal 1 and all entries returned by schedule_one.get_history() must have 'func' == 'schedule_one'. Currently that statement can be false because histories are shared.",
+  "fix_strategy": "Change with_history so it does not default history to the module-level _shared_log. Instead use history=None and, when history is None, allocate a new list per decoration (history = []). This ensures each invocation of the decorator creates and closes over a unique list object for that specific wrapped function. The wrapper's get_history and clear_history continue to operate on that per-function list.",
+  "files": {
+    "code_snippets_v2/mutable_default_c/queue.py": "UNCHANGED",
+    "code_snippets_v2/mutable_default_c/scheduler.py": "\"\"\"Scheduler with decorator that tracks call history.\"\"\"\n\nfrom worker import process, batch_process\n\n\n_shared_log = []\n\n\ndef with_history(func, history=None):\n    \"\"\"Decorator that records call history for a function.\n\n    Invariant: each decorated function must have its OWN\n    independent history list.\n    \"\"\"\n    # Ensure each decorated function gets its own history list\n    if history is None:\n        history = []\n\n    def wrapper(*args, **kwargs):\n        result = func(*args, **kwargs)\n        history.append({\"func\": func.__name__, \"args_count\": len(args)})\n        return result\n\n    wrapper.get_history = lambda: list(history)\n    wrapper.clear_history = lambda: history.clear()\n    return wrapper\n\n\n@with_history\ndef schedule_one(task):\n    \"\"\"Schedule and process a single task.\"\"\"\n    return process(task)\n\n\n@with_history\ndef schedule_batch(tasks):\n    \"\"\"Schedule and process a batch of tasks.\"\"\"\n    return batch_process(tasks)\n\n\ndef get_all_stats():\n    \"\"\"Get combined stats (distractor).\"\"\"\n    return {\n        \"one_calls\": len(schedule_one.get_history()),\n        \"batch_calls\": len(schedule_batch.get_history()),\n    }\n",
+    "code_snippets_v2/mutable_default_c/worker.py": "UNCHANGED"
+  }
+}

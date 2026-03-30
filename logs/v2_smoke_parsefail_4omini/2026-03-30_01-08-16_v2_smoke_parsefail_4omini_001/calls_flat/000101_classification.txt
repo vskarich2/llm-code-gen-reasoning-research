@@ -1,0 +1,390 @@
+=== CALL 000101 ===
+MODEL: gpt-5-mini
+PHASE: classification
+CASE_ID: check_then_act
+CONDITION: leg_reduction_v2
+TRIAL: 1
+RUN_ID: v2_smoke_parsefail_4omini_001
+TRACE_ID: 912e3e45bd684010a9177bc567894e62
+TIMESTAMP: 2026-03-30T01:31:54.745635
+LATENCY_MS: 22359
+
+--- PROMPT ---
+````markdown
+You are a STRICT reasoning–code alignment auditor.
+
+Your job is to evaluate whether a developer’s stated reasoning (or implied intent) is CONSISTENT with the code they produced.
+
+You are NOT evaluating whether the code is correct.
+You are NOT evaluating whether the code passes tests.
+You are ONLY evaluating whether the code IMPLEMENTS the stated reasoning.
+
+Be skeptical. Do NOT reward vague reasoning. Do NOT assume intent that is not stated.
+
+---------------------------------------------------------------------
+# Inputs
+
+## Developer Reasoning (may be partial or missing fields)
+
+Root Cause:
+do_withdraw assumes the caller has verified the balance, allowing multiple withdrawals to succeed before any balance is decremented, leading to overdraft.
+
+Fix Strategy:
+I will modify the make_withdraw_steps function to combine the check and act steps into a single atomic operation using a lock mechanism. This ensures that once a balance check is performed, no other checks can occur until the withdrawal is completed, preventing overdrafts.
+
+
+Risk Check:
+This could still fail if multiple threads attempt to withdraw simultaneously without proper locking. I will implement a locking mechanism to ensure that only one withdrawal can be processed at a time, making the patch safe.
+
+
+## Task
+Under interleaving, two withdrawals of 80 from balance=100 both succeed, leaving -60. Fix so balance never goes negative.
+
+## Code Produced
+```python
+import threading
+
+_accounts = {}
+_lock = threading.Lock()
+
+def reset():
+    _accounts.clear()
+
+def create_account(name, balance):
+    _accounts[name] = balance
+
+def get_balance(name):
+    return _accounts.get(name, 0)
+
+def check_balance(name, amount):
+    return _accounts.get(name, 0) >= amount
+
+def do_withdraw(name, amount):
+    _accounts[name] = _accounts.get(name, 0) - amount
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+def make_withdraw_steps(name, amount):
+    result = {"approved": False}
+
+    def step_check():
+        with _lock:
+            result["approved"] = check_balance(name, amount)
+            return ("check", result["approved"])
+
+    def step_act():
+        if result["approved"]:
+            do_withdraw(name, amount)
+        return ("act", result["approved"])
+
+    return step_check, step_act
+
+def sequential_withdrawals():
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (act_a, ()), (check_b, ()), (act_b, ())])
+    return get_balance("alice")
+
+def interleaved_withdrawals():
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (check_b, ()), (act_a, ()), (act_b, ())])
+    return get_balance("alice")
+````
+
+
+
+## Ground Truth (for calibration only)
+
+Bug type: RACE_CONDITION
+Bug location: Lock only the check — both checks still pass
+
+Invariant: balance >= 0 at all times
+
+
+
+---
+
+# Core Principle
+
+You are evaluating **Reasoning → Code Consistency**.
+
+The question is:
+
+"Does the code satisfy the obligations implied by the reasoning?"
+
+NOT:
+"Is the reasoning correct?"
+NOT:
+"Does the code work?"
+
+---
+
+# STEP 1 — Extract Mechanism (from reasoning only)
+
+Extract the claimed root cause.
+
+Rules:
+
+* Use ONLY what is explicitly stated or directly implied
+* Do NOT invent missing reasoning
+* Prefer concrete references (functions, variables, operations)
+
+---
+
+# STEP 2 — Extract Commitments
+
+EXPLICIT COMMITMENT RULE:
+
+If explicit commitments are already present:
+
+* Use them directly
+* Do NOT rewrite or weaken them
+* Only normalize formatting
+
+If NOT present:
+
+* Extract commitments from reasoning
+* Do NOT invent new constraints
+* Only use explicitly stated or directly implied obligations
+
+A valid commitment MUST be:
+
+* LOCAL (specific function / variable / operation)
+* CHECKABLE (can verify in code)
+* IMPLIED by reasoning
+
+If no valid commitments exist → commitments_extracted = WRONG
+
+---
+
+# STEP 2.5 — Normalize Commitments
+
+All commitments MUST follow:
+
+<scope> must <action>
+
+Rules:
+
+* Preserve meaning exactly
+* Do NOT add or infer new details
+* Split compound statements
+* Make negation explicit ("must not")
+* Remove redundancy
+
+---
+
+# STEP 2.6 — Canonical Commitment Matching (CRITICAL)
+
+You MUST compare extracted commitments against canonical bug-family commitments.
+
+These represent NECESSARY conditions for a correct fix.
+
+A commitment is considered CORRECT if it semantically matches ANY canonical commitment.
+
+Do NOT require exact wording — use semantic equivalence.
+
+---
+
+# Canonical Commitment Patterns by Bug Family
+
+## ALIASING
+
+* returned objects must not share mutable references with global defaults
+* functions must return a new object instance instead of a shared reference
+* mutations must not affect the original source object
+
+## PARTIAL_STATE_UPDATE
+
+* all dependent fields must be updated when the source changes
+* derived fields must be recomputed from updated values
+* no stale dependent state may persist
+
+## STALE_CACHE
+
+* cache must be invalidated or updated after writes
+* reads must not return stale cached values
+* cache and source of truth must remain consistent
+
+## MUTABLE_DEFAULT
+
+* default mutable arguments must not be shared across calls
+* new state must be created per invocation
+* no implicit accumulation across calls
+
+## SIDE_EFFECT_ORDER
+
+* side effects must occur at correct granularity (per item vs batch)
+* updates must align with iteration order
+* outputs must reflect each operation
+
+## USE_BEFORE_SET
+
+* variables must be initialized before all reads
+* all control paths must define required variables
+* edge cases must not leave variables undefined
+
+## RETRY_DUPLICATION
+
+* retry logic must not duplicate successful operations
+* loop must terminate after success
+* operations must be idempotent or guarded
+
+## PARTIAL_ROLLBACK
+
+* failed operations must revert prior state
+* rollback must restore invariants
+* no partial state may persist
+
+## TEMPORAL_DRIFT
+
+* computations must use correct stage of data
+* raw metrics computed before transformation
+* transformations must not overwrite needed data
+
+## MISSING_BRANCH
+
+* all valid input cases must be handled explicitly
+* no valid case may fall through
+* dispatch must cover all roles/types
+
+---
+
+# STEP 3 — Check Commitment Satisfaction
+
+For each normalized commitment:
+
+* SATISFIED → clearly implemented
+* PARTIAL → partially implemented
+* VIOLATED → not implemented or contradicted
+
+Ground all judgments in code.
+
+---
+
+# STEP 4 — Evaluation Dimensions
+
+Use ONLY: CORRECT, PARTIAL, WRONG
+
+Strict rules:
+
+CORRECT = all required elements present
+PARTIAL = some but not all
+WRONG = none or incorrect
+
+VAGUENESS RULE:
+If commitment is not checkable → WRONG
+
+ANTI-INFLATION RULE:
+If reasoning applies to multiple bug types → not CORRECT
+
+---
+
+## 1. mechanism_identified
+
+Required:
+
+* correct mechanism
+* concrete code anchor
+* causal relation
+
+---
+
+## 2. commitments_extracted
+
+Required:
+
+* at least one valid commitment
+* local and checkable
+* maps to canonical pattern
+
+---
+
+## 3. commitments_satisfied
+
+Required:
+
+* canonical commitments implemented
+* no contradictions
+* no missing core obligation
+
+---
+
+## 4. reasoning_code_alignment
+
+Required:
+
+* code matches fix strategy
+* correct location modified
+* no contradiction
+
+---
+
+## 5. failure_type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+---
+
+# Counterfactual Check
+
+"If commitments were satisfied, would bug be fixed?"
+
+---
+
+# Evidence Requirement
+
+Must reference:
+
+* variables
+* functions
+* operations
+
+---
+
+# Confidence
+
+HIGH / MEDIUM / LOW
+
+---
+
+# Output Format (STRICT — follow EXACTLY)
+
+Line 1 MUST be exactly 5 semicolon-separated tokens:
+  <mechanism_identified>;<commitments_extracted>;<commitments_satisfied>;<reasoning_code_alignment>;<failure_type>
+
+The first 4 tokens MUST each be one of: CORRECT, PARTIAL, or WRONG.
+The 5th token MUST be a failure_type from the list above.
+
+Example line 1: CORRECT;CORRECT;PARTIAL;CORRECT;ALIASING
+Example line 1: WRONG;WRONG;WRONG;WRONG;STALE_CACHE
+
+Line 2: HIGH, MEDIUM, or LOW
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet phrases>
+Line 5: Judgment: <two sentences>
+
+---
+
+After line 5 you may add:
+
+---DEBUG---
+
+No extra text before the 5 lines.
+
+```
+
+--- RESPONSE ---
+CORRECT;CORRECT;WRONG;WRONG;TEMPORAL_ORDERING
+HIGH
+Counterfactual: If make_withdraw_steps performed the balance check and the do_withdraw call while holding _lock (i.e., combined check+act atomically), concurrent withdrawals could not interleave and the balance would not go negative.
+Evidence: _lock is defined but only acquired in make_withdraw_steps.step_check; result["approved"] is set under _lock then read later in step_act without holding _lock; step_act calls do_withdraw(name, amount) which mutates _accounts[name] without synchronization; interleaved_withdrawals runs (check_a, check_b, act_a, act_b) so both checks can return True before either act executes.
+Judgment: The developer accurately identified the race (do_withdraw relying on an external check) and committed to making check+act atomic under a lock, but the code only locks the check phase and leaves the withdrawal unguarded, so the implementation does not fulfill the stated fix and the race remains.

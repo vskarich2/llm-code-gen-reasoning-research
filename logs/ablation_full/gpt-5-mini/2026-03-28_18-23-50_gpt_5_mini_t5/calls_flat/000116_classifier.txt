@@ -1,0 +1,161 @@
+=== CALL 000116 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: temporal_drift_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:11:07.348193
+LATENCY_MS: 19953
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+pipeline.pipeline: the assignment raw_stats = compute_raw_stats(cleaned) passes the normalized list variable 'cleaned' into compute_raw_stats, causing raw_stats to be computed from transformed data instead of the original 'data'. The causal relationship: compute_raw_stats reads its argument to produce raw_max/raw_min/raw_sum, so supplying 'cleaned' (output of normalize) yields statistics of the normalized values instead of the pre-transform values.
+
+## Failure Mechanism
+Input 'data' → pipeline calls cleaned = normalize(data) producing a normalized list 'cleaned' → pipeline calls compute_raw_stats(cleaned) (mutation/event: wrong argument) → compute_raw_stats computes max/min/sum of normalized values → pipeline returns 'raw_stats' that reflect normalized numbers rather than original numbers → observable failure: callers expecting raw_max == max(original data) get a different value (e.g., raw_max == 1.0 instead of the original max).
+
+## Broken Invariant
+For any non-empty input list 'data', pipeline(data)['raw_stats']['raw_max'] must equal max(data) (and similarly raw_min == min(data), raw_sum == sum(data)). This property is violated because compute_raw_stats was called with the normalized list 'cleaned' instead of 'data'.
+
+## Fix Strategy
+Change the call to compute_raw_stats to pass the original 'data' rather than the normalized 'cleaned'. Concretely, replace raw_stats = compute_raw_stats(cleaned) with raw_stats = compute_raw_stats(data). This breaks the causal chain because compute_raw_stats will then read the untransformed input and produce raw_max/raw_min/raw_sum consistent with the invariant.
+
+
+## Self-Check
+{'failure_scenario': "If normalize were later changed in the codebase to mutate 'data' in-place, calling compute_raw_stats(data) would still produce transformed statistics. This fix assumes normalize does not mutate 'data'. To detect this, unit tests should assert that pipeline returns raw_stats matching max(data) for representative inputs.", 'edge_case': 'Empty or falsy inputs: pipeline currently calls normalize(data) and compute_raw_stats(data). Both functions treat falsy data (e.g., [] or None) by returning default zeroed summaries. A boundary condition is data == [] or data is None: compute_raw_stats(data) will see falsy and return zeros; normalize(data) returns [] so summarize_for_display(cleaned) returns display zeros. This behavior is retained. Another edge: all-equal values (hi == lo) — normalize returns [0.5]*len(data), but compute_raw_stats(data) with original equal values returns correct raw stats.', 'invariant_check': "Multiple calls: pipeline is stateless and uses only local variables ('data', 'cleaned', 'raw_stats', 'display'), so calling pipeline repeatedly does not change behavior across calls. Retries/loops: the functions do not rely on external or persistent state, so repeated calls with the same 'data' produce identical raw_stats and cleaned. State reuse: no global variables are modified. Therefore the invariant raw_stats == stats(original data) holds across multiple calls and retries given normalize does not mutate 'data'.", 'conclusion': 'No flaw found in this specific fix: changing compute_raw_stats(cleaned) to compute_raw_stats(data) corrects the broken invariant and does not introduce side effects because compute_raw_stats and normalize are pure (no in-place modifications). To be defensive, tests should be added to assert raw_stats reflect original inputs; if future changes make normalize mutate data in-place, then compute_raw_stats should be called on a shallow copy of the original input (e.g., compute_raw_stats(list(data))) or normalize should be audited to avoid in-place mutation. For the current code, the fix is safe.'}
+
+
+# Task Description
+Raw stats show normalized values instead of actual. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Data pipeline using transforms module."""
+
+from transforms import compute_raw_stats, normalize, summarize_for_display
+
+
+def pipeline(data):
+    """Process data: compute raw stats, normalize, summarize.
+
+    raw_stats MUST reflect the original data, not the normalized version.
+    """
+    cleaned = normalize(data)
+    # FIX: compute raw stats from the original input 'data', not from the normalized 'cleaned'
+    raw_stats = compute_raw_stats(data)
+    display = summarize_for_display(cleaned)
+    return {
+        "raw_stats": raw_stats,
+        "cleaned": cleaned,
+        "display": display,
+    }
+
+
+def quick_summary(data):
+    """Quick summary using display stats only. Unrelated to bug."""
+    cleaned = normalize(data)
+    return summarize_for_display(cleaned)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If compute_raw_stats is called with the original 'data' (removing the wrong-argument root cause), the failure (raw_stats reflecting normalized values) would not occur.
+Evidence: - pipeline sets cleaned = normalize(data); - original bug was raw_stats = compute_raw_stats(cleaned) which computes max/min/sum of normalized values; - fix changes to raw_stats = compute_raw_stats(data) so compute_raw_stats reads original values; - summarize_for_display(cleaned) still shows normalized display values (separation of concerns preserved); - remaining edge is if normalize mutates data in-place (developer noted tests/defensive copy).
+Judgment: The reasoning correctly identifies the causal chain, invariant, and appropriate fix, and the submitted code implements that fix; add tests or a defensive copy if there's any chance normalize mutates its input.

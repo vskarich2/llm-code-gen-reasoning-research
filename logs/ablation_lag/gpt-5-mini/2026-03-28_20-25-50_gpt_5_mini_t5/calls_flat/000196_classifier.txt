@@ -1,0 +1,227 @@
+=== CALL 000196 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: invariant_partial_fail
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:35:50.830699
+LATENCY_MS: 14907
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+execute_transfer function + sender.balance/receiver.balance variables + mixing observability (ledger.record_*/audit.emit_*) calls with business logic caused partial side-effects: when an exception is raised during the credit phase the sender's balance was already debited and no rollback occurred, leaving balances and recorded logs inconsistent.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Extract the pure business logic into a new helper _core_transfer(sender, receiver, amount) that performs validation and updates balances atomically (with an explicit rollback of the debit if the credit phase fails). Move all ledger and audit calls into the execute_transfer wrapper so they are only executed before/after the core transfer. The wrapper records a pending attempt, invokes the core transfer, and on success records debit/credit, marks the attempt completed and emits the transfer event; on failure it marks the attempt failed and emits a failure alert. Observability calls are wrapped in try/except to avoid leaving the core state inconsistent if an observability call raises.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure mode: observability functions (ledger.record_* or audit.emit_*) could raise exceptions after the business transfer completed (or while marking pending/failed) which would leave the balances correct but the logs/alerts inconsistent or cause additional exceptions to propagate. I mitigated this by catching exceptions around observability calls and attempting to emit a failure alert when possible; those emit calls are also guarded. This is a pragmatic mitigation — fully robust handling would require durable, transactional logging or retrying observability operations, which is out of scope here.
+
+
+# Task Description
+The execute_transfer function has too many logging calls mixed with business logic. Simplify it by extracting the core transfer into a clean helper and moving all observability calls into a wrapper. Return the updated code.
+
+# Code Produced
+```python
+import random
+from models import Account
+from ledger import record_debit, record_credit, record_transfer_attempt
+from audit import emit_transfer_event, emit_failure_alert
+
+
+def validate_transfer(sender, amount):
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    if sender.balance < amount:
+        raise ValueError("insufficient funds")
+
+
+def _core_transfer(sender, receiver, amount):
+    """Core business logic: validate and move balances.
+
+    This function performs the debit then attempts the credit. If the credit phase
+    fails it rolls back the debit to avoid leaving the system in a partially-applied
+    state.
+    """
+    validate_transfer(sender, amount)
+
+    # Apply debit first
+    sender.balance -= amount
+
+    try:
+        # Simulate a transient failure during the credit phase
+        if random.random() < 0.3:
+            raise RuntimeError("transient failure during credit")
+
+        # Apply credit
+        receiver.balance += amount
+
+    except Exception:
+        # Rollback debit to preserve invariants, then re-raise
+        sender.balance += amount
+        raise
+
+
+def execute_transfer(sender, receiver, amount):
+    """Observability wrapper around the core transfer.
+
+    Responsibilities:
+    - record an initial transfer attempt (pending)
+    - invoke the core transfer
+    - on success, record debit/credit, mark attempt completed and emit transfer event
+    - on failure, mark attempt failed and emit a failure alert
+
+    Observability calls are isolated from the core transfer and are guarded so
+    they don't leave the system in an inconsistent state if they themselves fail.
+    """
+    # Mark attempt pending
+    try:
+        record_transfer_attempt(sender.account_id, receiver.account_id, amount, status="pending")
+    except Exception:
+        # If recording the pending attempt fails, continue; do not block the transfer
+        pass
+
+    try:
+        _core_transfer(sender, receiver, amount)
+    except Exception as e:
+        # Core transfer failed: attempt to mark failed and emit an alert, then re-raise
+        try:
+            record_transfer_attempt(sender.account_id, receiver.account_id, amount, status="failed")
+        except Exception:
+            pass
+        try:
+            emit_failure_alert(sender.account_id, receiver.account_id, amount, str(e))
+        except Exception:
+            pass
+        raise
+
+    # Core transfer succeeded: record ledger entries and emit event
+    try:
+        record_debit(sender.account_id, amount)
+        record_credit(receiver.account_id, amount)
+        try:
+            record_transfer_attempt(sender.account_id, receiver.account_id, amount, status="completed")
+        except Exception:
+            pass
+        emit_transfer_event(sender.account_id, receiver.account_id, amount)
+    except Exception as obs_exc:
+        # Observability failed after a successful transfer. Try to emit an alert, but
+        # do not attempt to roll back balances (transfer succeeded).
+        try:
+            emit_failure_alert(sender.account_id, receiver.account_id, amount, f"observability failure: {obs_exc}")
+        except Exception:
+            pass
+        # Re-raise so callers know something went wrong with side-effects
+        raise
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;WRONG;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If the mixed observability/business logic causing an unrolled debit were removed (i.e., debit/credit done atomically or with rollback), the partial-debit failure would not occur.
+Evidence: sender.balance -= amount is applied in _core_transfer before attempting credit; the except block does sender.balance += amount to rollback; execute_transfer records pending attempts then calls _core_transfer and only records ledger entries (record_debit/record_credit) after success; observability calls are wrapped in try/except so their failures won't corrupt balances but can leave logs inconsistent.
+Judgment: The developer correctly identified the concrete function/variables causing the partial-state bug and proposed a fix that the code implements (atomic core transfer with rollback and an observability wrapper). However they failed to state the specific invariant violated (e.g., sum of balances preserved / no partial application), which weakens the diagnostic completeness.

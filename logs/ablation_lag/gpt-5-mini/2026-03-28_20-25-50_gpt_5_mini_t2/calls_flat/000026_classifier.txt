@@ -1,0 +1,189 @@
+=== CALL 000026 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: stale_cache_a
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:36:25.099333
+LATENCY_MS: 11802
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+The bug is in update_product: after calling _db[product_id].update(fields) the function does not update or invalidate the cached entry stored in the module-level variable _cache. Because _cache continues to hold the previous snapshot, subsequent calls to get_product can return the old data from _cache instead of the updated data in _db.
+
+## Failure Mechanism
+Example sequence: add_product('p1', 'Pen', 1.0) stores {'name':'Pen','price':1.0} in _db and also leaves that product absent from _cache until get_product is called. If get_product('p1') is called it caches a copy in _cache. Then update_product('p1', price=1.5) updates _db['p1'] to {'name':'Pen','price':1.5'} but does not change _cache['p1']. A subsequent get_product('p1') checks _cache, finds the stale entry (price 1.0) and returns it, so callers observe price 1.0 instead of the current 1.5.
+
+## Broken Invariant
+After a successful update_product(product_id, **fields) call, get_product(product_id) must return a product dict whose key/value pairs exactly match _db[product_id]. (Testable: call update_product, then assert get_product(...) == dict(_db[product_id]).)
+
+## Fix Strategy
+On every write that changes _db we now make the cache reflect the updated authoritative data. Concretely: add_product writes to _db and then writes a copied dict into _cache; update_product updates _db and then sets _cache[product_id] = dict(_db[product_id]). get_product always returns a fresh copy of the cached data (dict(...)) so callers cannot mutate the internal cache. These changes ensure get_product returns the current _db state and that external mutation of returned dicts cannot corrupt the cache.
+
+
+
+# Task Description
+Refactor this product catalog for clarity. Return the updated code.
+
+# Code Produced
+```python
+"""Product catalog with caching.
+
+This module stores products in an in-memory database and a read-through cache.
+Cache entries are kept in sync with the authoritative _db so get_product always
+returns current data.
+"""
+
+_db = {}
+_cache = {}
+
+
+def add_product(product_id, name, price):
+    """Add a product to the database and update the cache.
+
+    Parameters:
+    - product_id: hashable product identifier
+    - name: product name
+    - price: numeric price
+    """
+    _db[product_id] = {"name": name, "price": price}
+    # Keep the cache consistent with the database.
+    _cache[product_id] = dict(_db[product_id])
+
+
+def get_product(product_id):
+    """Return a copy of the product data for product_id or None if missing.
+
+    The function always returns a fresh dict so callers cannot mutate the
+    internal cache or database record.
+    """
+    if product_id in _cache:
+        return dict(_cache[product_id])
+    product = _db.get(product_id)
+    if product is None:
+        return None
+    _cache[product_id] = dict(product)
+    return dict(_cache[product_id])
+
+
+def update_product(product_id, **fields):
+    """Update product fields in the database and keep the cache in sync.
+
+    Returns True if the product existed and was updated, False otherwise.
+    """
+    if product_id not in _db:
+        return False
+    _db[product_id].update(fields)
+    # Update cache so subsequent get_product calls reflect the latest data.
+    _cache[product_id] = dict(_db[product_id])
+    return True
+
+
+def reset():
+    """Clear all data."""
+    _db.clear()
+    _cache.clear()
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If update_product updated or invalidated _cache after _db[product_id].update(...), the stale-cache return path would be closed and the failure would not occur.
+Evidence: original root cause cites _db[product_id].update(fields) without touching _cache; get_product reads _cache first and can return stale data; produced code adds _cache[product_id] = dict(_db[product_id]) in add_product and update_product; get_product now returns dict(_cache[product_id]) so callers receive a fresh copy matching _db.
+Judgment: The developer's reasoning correctly and precisely identifies the stale-cache causal chain and a testable invariant, and the submitted code implements the described fix by synchronizing _cache with _db and returning copies.

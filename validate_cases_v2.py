@@ -25,29 +25,13 @@ from types import ModuleType
 
 BASE = Path(__file__).parent
 
-# Canonical stdlib list — single source of truth
-from _stdlib import STDLIB_MODULES as _STDLIB
+from code_assembly import assemble_original, assemble_code
 
 
-def _strip_local_imports(code: str) -> str:
-    """Remove import lines that reference sibling modules (not stdlib)."""
-    lines = []
-    for line in code.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("from ") and " import " in stripped:
-            module = stripped.split()[1].split(".")[0]
-            if module not in _STDLIB:
-                continue
-        elif stripped.startswith("import "):
-            module = stripped.split()[1].split(".")[0]
-            if module not in _STDLIB:
-                continue
-        lines.append(line)
-    return "\n".join(lines)
-
-
-def load_module(code: str, name: str = "candidate") -> ModuleType:
-    cleaned = _strip_local_imports(code)
+def load_module(code: str, name: str, case: dict) -> ModuleType:
+    """Load code as a module through canonical assembly path. case is REQUIRED."""
+    asm = assemble_code(code, case)
+    cleaned = asm.code
     spec = importlib.util.spec_from_loader(name, loader=None)
     mod = importlib.util.module_from_spec(spec)
     mod.__dict__["__builtins__"] = __builtins__
@@ -109,7 +93,7 @@ def load_reference_code(case: dict) -> str | None:
 def check_loads(case: dict) -> tuple[bool, str]:
     try:
         code = load_case_code(case)
-        load_module(code, f"check_load_{case['id']}")
+        load_module(code, f"check_load_{case['id']}", case=case)
         return True, "loads"
     except Exception as e:
         return False, f"load error: {e}"
@@ -121,7 +105,7 @@ def check_fails_buggy(case: dict) -> tuple[bool, str]:
         return False, "test function not found"
     try:
         code = load_case_code(case)
-        mod = load_module(code, f"buggy_{case['id']}")
+        mod = load_module(code, f"buggy_{case['id']}", case=case)
         passed, reasons = test_fn(mod)
         if passed:
             return False, "test PASSES on buggy code — bug not real"
@@ -138,7 +122,7 @@ def check_passes_fixed(case: dict) -> tuple[bool, str]:
     if ref_code is None:
         return False, "reference fix not found"
     try:
-        mod = load_module(ref_code, f"fixed_{case['id']}")
+        mod = load_module(ref_code, f"fixed_{case['id']}", case=case)
         passed, reasons = test_fn(mod)
         if not passed:
             return False, f"test FAILS on reference fix: {reasons}"
@@ -188,7 +172,7 @@ def check_idempotent(case: dict) -> tuple[bool, str]:
         code = load_case_code(case)
         results = []
         for i in range(3):
-            mod = load_module(code, f"idemp_{case['id']}_{i}")
+            mod = load_module(code, f"idemp_{case['id']}_{i}", case=case)
             passed, reasons = test_fn(mod)
             results.append((passed, tuple(reasons)))
         if len(set(results)) != 1:

@@ -1,0 +1,228 @@
+=== CALL 000030 ===
+MODEL: gpt-4o-mini
+PHASE: generation
+CASE_ID: stale_cache_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:30:37.848010
+LATENCY_MS: 9082
+
+--- PROMPT ---
+Products show old prices after updates. Fix the catalog. Return the updated code.
+
+## Codebase (2 files)
+
+### FILE 1/2: code_snippets_v2/stale_cache_b/cache.py ###
+```python
+"""Simple key-value cache."""
+
+_store = {}
+
+
+def get(key):
+    """Return cached value or None."""
+    return _store.get(key)
+
+
+def put(key, value):
+    """Store a value in the cache."""
+    _store[key] = value
+
+
+def invalidate(key):
+    """Remove a key from the cache."""
+    _store.pop(key, None)
+
+
+def clear():
+    """Clear entire cache."""
+    _store.clear()
+```
+
+### FILE 2/2: code_snippets_v2/stale_cache_b/catalog.py ###
+```python
+"""Product catalog using external cache module."""
+
+from cache import get, put, invalidate
+
+_db = {}
+
+
+def add_product(product_id, name, price):
+    """Add a product to the database."""
+    _db[product_id] = {"name": name, "price": price}
+
+
+def get_product(product_id):
+    """Get product, checking cache first."""
+    cached = get(product_id)
+    if cached is not None:
+        return cached
+    product = _db.get(product_id)
+    if product is not None:
+        put(product_id, dict(product))
+    return _db.get(product_id)
+
+
+def update_product(product_id, **fields):
+    """Update product in DB.
+
+    Invariant: subsequent get_product() must reflect the update.
+    """
+    if product_id not in _db:
+        return False
+    _db[product_id].update(fields)
+    # BUG: should call invalidate(product_id) but doesn't
+    return True
+
+
+def reset():
+    """Clear DB and cache."""
+    _db.clear()
+    from cache import clear
+    clear()
+```
+
+You are implementing a STRICT reasoning + code generation procedure designed to REDUCE reasoning-execution mismatch.
+
+This is NOT a formatting task. This is a TWO-PASS reasoning process with adversarial verification.
+
+You MUST follow the procedure exactly.
+
+Return a SINGLE valid JSON object. No text outside JSON. No markdown fences.
+
+# GOAL
+
+Fix the bug AND ensure your reasoning is causally correct and robust to failure.
+
+You are required to:
+- identify the correct mechanism
+- challenge your own hypothesis
+- verify your fix against failure scenarios
+
+# PROCEDURE (MANDATORY)
+
+## STEP 1 — DIAGNOSE (PRIMARY HYPOTHESIS)
+
+Identify:
+
+- root_cause:
+  Name the exact function + variable + operation causing the bug.
+  Must describe a causal relationship (not just "missing X").
+
+- failure_mechanism:
+  Give a concrete scenario:
+  cause → mutation/event → propagation → observable failure
+
+- broken_invariant:
+  A specific, testable property that is violated.
+
+## STEP 2 — ALTERNATIVE HYPOTHESIS (CRITICAL)
+
+Propose ONE alternative explanation for the bug.
+
+- What else could plausibly be the cause?
+- Why might your primary hypothesis be wrong?
+
+Then explicitly reject it:
+
+- Why is your original diagnosis more correct?
+- What evidence in the code supports this?
+
+This step is REQUIRED. Do not skip.
+
+## STEP 3 — PLAN FIX
+
+Describe:
+
+- fix_strategy:
+  What exact change you will make
+  Why it breaks the causal chain
+
+Must reference actual code behavior.
+
+## STEP 4 — CODE
+
+Implement the fix.
+
+Rules:
+- Modify ONLY necessary files
+- Return COMPLETE contents for modified files
+- Use "UNCHANGED" for others
+
+## STEP 5 — ADVERSARIAL SELF-CHECK (MANDATORY)
+
+You must actively try to BREAK your own fix.
+
+Answer ALL:
+
+1. Failure Scenario:
+   Describe a concrete scenario where your fix might still fail.
+
+2. Edge Case:
+   Identify a boundary condition (e.g., retries, empty values, ordering).
+
+3. Invariant Check:
+   Verify your invariant holds under:
+   - multiple calls
+   - retries / loops
+   - state reuse
+
+4. Conclusion:
+   - If a flaw is found → REVISE your fix
+   - If no flaw → explain WHY it is safe
+
+Your answer MUST reference your actual code.
+
+# OUTPUT FORMAT (STRICT JSON)
+
+{
+  "root_cause": "<exact function + variable + causal relationship>",
+  "failure_mechanism": "<cause → mutation → propagation → observable failure>",
+  "broken_invariant": "<specific testable property that is violated>",
+  "alternative_hypothesis": "<one alternative explanation for the bug>",
+  "hypothesis_rejection": "<why primary hypothesis is correct, with code evidence>",
+  "fix_strategy": "<what change you will make and why it breaks the causal chain>",
+  "self_check": {
+    "failure_scenario": "<concrete scenario where fix might still fail>",
+    "edge_case": "<boundary condition to test>",
+    "invariant_check": "<verify invariant under multiple calls, retries, state reuse>",
+    "conclusion": "<flaw found → revise, or why it is safe>"
+  },
+  "files": {"<path>": "<complete file contents or UNCHANGED>"}
+}
+
+# RULES
+
+- All fields are REQUIRED and must be substantive
+- No generic statements — ground every claim in actual code
+- Must reference actual variables and behavior
+- Do NOT restate the task
+- Do NOT skip alternative hypothesis
+- Do NOT skip adversarial self-check
+- For files you did NOT modify, set value to "UNCHANGED"
+- Do NOT include markdown formatting (no ```python blocks) inside file values
+- File values must be raw Python source code, not markdown
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "update_product + product_id + missing invalidate call",
+  "failure_mechanism": "update_product is called → product details are updated in _db → cached value remains unchanged → subsequent get_product returns stale data",
+  "broken_invariant": "get_product must return the latest product details after an update",
+  "alternative_hypothesis": "The cache might be incorrectly storing the product data due to a bug in the cache module itself.",
+  "hypothesis_rejection": "The cache module functions correctly as it provides basic operations (get, put, invalidate). The issue lies in update_product not calling invalidate, which is evident from the lack of cache invalidation after updates.",
+  "fix_strategy": "Add a call to invalidate(product_id) in update_product to ensure the cache is cleared when a product is updated, breaking the causal chain of returning stale data.",
+  "self_check": {
+    "failure_scenario": "If update_product is called with an invalid product_id, the cache will not be invalidated, leading to stale data being returned.",
+    "edge_case": "Updating a product with an empty name or price to see if the cache still reflects the correct state.",
+    "invariant_check": "After multiple calls to update_product and get_product, the latest product details should always be returned, even after retries or state reuse.",
+    "conclusion": "No flaw found; the fix ensures that the cache is invalidated upon updates, maintaining the integrity of the data returned by get_product."
+  },
+  "files": {
+    "code_snippets_v2/stale_cache_b/catalog.py": "def add_product(product_id, name, price):\n    _db[product_id] = {\"name\": name, \"price\": price}\n\ndef get_product(product_id):\n    cached = get(product_id)\n    if cached is not None:\n        return cached\n    product = _db.get(product_id)\n    if product is not None:\n        put(product_id, dict(product))\n    return _db.get(product_id)\n\ndef update_product(product_id, **fields):\n    if product_id not in _db:\n        return False\n    _db[product_id].update(fields)\n    invalidate(product_id)  # Fix applied here\n    return True\n\ndef reset():\n    _db.clear()\n    from cache import clear\n    clear()",
+    "code_snippets_v2/stale_cache_b/cache.py": "UNCHANGED"
+  }
+}

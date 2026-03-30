@@ -1,0 +1,238 @@
+=== CALL 000331 ===
+MODEL: gpt-4.1-nano
+PHASE: generation
+CASE_ID: false_fix_deadlock
+CONDITION: leg_reduction_v2
+TRIAL: 1
+RUN_ID: v2_smoke_nano_3tier_002
+TRACE_ID: a8a722521ee2442b8810b88aded570ff
+TIMESTAMP: 2026-03-30T01:52:34.113009
+LATENCY_MS: 6545
+
+--- PROMPT ---
+Concurrent transfers deadlock. Fix the locking so transfers never deadlock under any interleaving.
+
+## Codebase (1 file)
+
+### FILE 1/1: code_snippets_v2/false_fix_deadlock/resources.py ###
+```python
+"""Resource transfers with lock-ordering deadlock, simulated via steps."""
+
+_locks = {}
+_state = {"A": 100, "B": 100}
+
+
+def reset():
+    _locks.clear()
+    _state["A"] = 100
+    _state["B"] = 100
+
+
+def acquire(resource):
+    """Simulate lock. Raises RuntimeError if already held (deadlock)."""
+    if _locks.get(resource):
+        raise RuntimeError(f"deadlock: {resource} already locked")
+    _locks[resource] = True
+
+
+def release(resource):
+    _locks[resource] = False
+
+
+def get_state():
+    return dict(_state)
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def make_transfer_a_to_b_steps(amount):
+    """Transfer A→B: lock A first, then B."""
+
+    def step_lock_a():
+        acquire("A")
+        return "locked_A"
+
+    def step_lock_b_and_transfer():
+        acquire("B")
+        _state["A"] -= amount
+        _state["B"] += amount
+        release("B")
+        release("A")
+        return "transferred_a_to_b"
+
+    return step_lock_a, step_lock_b_and_transfer
+
+
+def make_transfer_b_to_a_steps(amount):
+    """Transfer B→A: BUG — locks B first, then A (opposite order)."""
+
+    def step_lock_b():
+        acquire("B")
+        return "locked_B"
+
+    def step_lock_a_and_transfer():
+        acquire("A")  # DEADLOCK: A is held by the other transfer
+        _state["B"] -= amount
+        _state["A"] += amount
+        release("A")
+        release("B")
+        return "transferred_b_to_a"
+
+    return step_lock_b, step_lock_a_and_transfer
+
+
+def sequential_transfers():
+    """A→B then B→A. Sequential: works fine."""
+    reset()
+    lock_ab, do_ab = make_transfer_a_to_b_steps(10)
+    lock_ba, do_ba = make_transfer_b_to_a_steps(10)
+    run_steps([
+        (lock_ab, ()), (do_ab, ()),
+        (lock_ba, ()), (do_ba, ()),
+    ])
+    return get_state()
+
+
+def interleaved_transfers():
+    """A→B and B→A interleaved: DEADLOCK."""
+    reset()
+    lock_ab, do_ab = make_transfer_a_to_b_steps(10)
+    lock_ba, do_ba = make_transfer_b_to_a_steps(10)
+    try:
+        run_steps([
+            (lock_ab, ()),   # A→B locks A
+            (lock_ba, ()),   # B→A locks B
+            (do_ab, ()),     # A→B tries to lock B — DEADLOCK
+            (do_ba, ()),     # never reached
+        ])
+        return get_state()
+    except RuntimeError as e:
+        return {"error": str(e)}
+```
+
+You are fixing a bug using a structured reasoning-to-code process.
+
+Your goal is not just to describe the bug. Your goal is to make your diagnosis produce a concrete, checkable code fix.
+
+Follow this procedure exactly. Return a SINGLE valid JSON object.
+
+## STEP 1 — Diagnose the mechanism
+
+Identify the bug mechanism precisely.
+
+You MUST state:
+- the specific function, variable, or operation involved
+- the causal relationship that produces the failure
+- the bug mechanism, not just the symptom
+
+Good:
+- "create_config returns DEFAULTS directly, so later mutation aliases global state"
+- "update_product writes the database but does not invalidate cache, so reads return stale cached values"
+
+Bad:
+- "there is a state bug"
+- "cache is wrong"
+- "this function has an issue"
+
+## STEP 2 — State explicit fix commitments
+
+Convert your diagnosis into explicit, local, checkable commitments.
+
+A valid commitment MUST be:
+- LOCAL: names a specific function, variable, or operation
+- CHECKABLE: a reviewer could inspect the code and decide whether it is satisfied
+- DIRECTLY IMPLIED by your diagnosis
+
+Write 1–3 commitments.
+
+Each commitment MUST use this form:
+
+<scope> must <action>
+
+Examples:
+- "create_config must return a copy of DEFAULTS"
+- "update_product must invalidate cache after write"
+- "retry_send must stop retrying after success"
+
+Do NOT write vague commitments like:
+- "fix shared state"
+- "improve correctness"
+- "avoid bugs"
+
+## STEP 3 — Plan the fix
+
+Describe the concrete code change you will make and why it satisfies the commitments.
+
+Your fix strategy must:
+- name the file/function you will change
+- describe the exact operation you will add/remove/change
+- explain why that change addresses the mechanism
+
+## STEP 4 — Risk check (CRITICAL)
+
+Before finalizing code, answer:
+
+What is the most likely way this fix could still fail?
+
+Rules:
+- The risk must be specific and tied to the actual patch
+- If the risk is real, REVISE your fix before writing final code
+- If the risk is not real, explain specifically why the patch is safe
+- Do NOT give a generic answer like "there may be edge cases"
+
+Good:
+- "This could still fail if update_product invalidates one cache layer but api reads from a separate local cache"
+- "This is safe because create_config is the only constructor returning DEFAULTS and the patch replaces the direct shared reference"
+
+Bad:
+- "It might still fail in some cases"
+- "There could be bugs elsewhere"
+
+## STEP 5 — Return fixed code
+
+Return your response as JSON with this exact schema:
+
+{
+  "root_cause": "<specific mechanism with function/variable/causal relationship>",
+  "code_commitments": [
+    "<scope> must <action>",
+    "<scope> must <action>"
+  ],
+  "fix_strategy": "<concrete code change and why it satisfies the commitments>",
+  "risk_check": "<most likely residual failure mode, and whether you revised or why the patch is safe>",
+  "files": {
+    ""code_snippets_v2/false_fix_deadlock/resources.py": "<complete file contents or UNCHANGED>""
+  }
+}
+
+RULES:
+- ALL fields are REQUIRED and must be non-empty substantive content
+- "code_commitments" MUST contain 1–3 commitments
+- Each commitment MUST be atomic, local, and checkable
+- Do NOT include vague or generic commitments
+- "files" MUST contain one entry for EVERY file listed above
+- For files you did NOT modify, set the value to the exact string "UNCHANGED"
+- For files you DID modify, include the COMPLETE updated file contents
+- Do NOT include markdown formatting inside file values
+- Do NOT omit any file
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "The function make_transfer_b_to_a_steps acquires resource 'B' first, then resource 'A', creating a lock order opposite to make_transfer_a_to_b_steps which acquires 'A' first, leading to potential deadlock when concurrent transfers interleave and both hold one lock while waiting for the other.",
+  "code_commitments": [
+    "make_transfer_b_to_a_steps must acquire resource 'A' before resource 'B'",
+    "make_transfer_b_to_a_steps must acquire resources in the same order as make_transfer_a_to_b_steps"
+  ],
+  "fix_strategy": "In make_transfer_b_to_a_steps, swap the order of acquire calls so that 'A' is acquired before 'B', matching the lock order used in make_transfer_a_to_b_steps. This enforces a consistent lock acquisition order, preventing deadlock regardless of interleaving.",
+  "risk_check": "This fix could still fail if other parts of the code acquire locks in a different order, but within the current codebase, enforcing a consistent lock order between the two transfer functions ensures deadlock is eliminated. The fix is safe because it directly addresses the lock order inconsistency. No other code paths are introduced or modified.",
+  "files": {
+    "code_snippets_v2/false_fix_deadlock/resources.py": "'''Resource transfers with lock-ordering deadlock, simulated via steps.'''\n\n_locks = {}\n_state = {\"A\": 100, \"B\": 100}\n\n\ndef reset():\n    _locks.clear()\n    _state[\"A\"] = 100\n    _state[\"B\"] = 100\n\n\ndef acquire(resource):\n    '''Simulate lock. Raises RuntimeError if already held (deadlock).'''\n    if _locks.get(resource):\n        raise RuntimeError(f\"deadlock: {resource} already locked\")\n    _locks[resource] = True\n\n\ndef release(resource):\n    _locks[resource] = False\n\n\ndef get_state():\n    return dict(_state)\n\n\ndef run_steps(steps):\n    results = []\n    for fn, args in steps:\n        results.append(fn(*args))\n    return results\n\n\ndef make_transfer_a_to_b_steps(amount):\n    '''Transfer A→B: lock A first, then B.'''\n\n    def step_lock_a():\n        acquire(\"A\")\n        return \"locked_A\"\n\n    def step_lock_b_and_transfer():\n        acquire(\"B\")\n        _state[\"A\"] -= amount\n        _state[\"B\"] += amount\n        release(\"B\")\n        release(\"A\")\n        return \"transferred_a_to_b\"\n\n    return step_lock_a, step_lock_b_and_transfer\n\n\ndef make_transfer_b_to_a_steps(amount):\n    '''Transfer B→A: lock A first, then B (fixed order).'''\n\n    def step_lock_a():\n        acquire(\"A\")\n        return \"locked_A\"\n\n    def step_lock_b_and_transfer():\n        acquire(\"B\")  # Now acquiring B after A to prevent deadlock\n        _state[\"B\"] -= amount\n        _state[\"A\"] += amount\n        release(\"B\")\n        release(\"A\")\n        return \"transferred_b_to_a\"\n\n    return step_lock_b, step_lock_a\n\n\ndef sequential_transfers():\n    '''A→B then B→A. Sequential: works fine.'''\n    reset()\n    lock_ab, do_ab = make_transfer_a_to_b_steps(10)\n    lock_ba, do_ba = make_transfer_b_to_a_steps(10)\n    run_steps([\n        (lock_ab, ()), (do_ab, ()),\n        (lock_ba, ()), (do_ba, ()),\n    ])\n    return get_state()\n\n\ndef interleaved_transfers():\n    '''A→B and B→A interleaved: DEADLOCK.'''\n    reset()\n    lock_ab, do_ab = make_transfer_a_to_b_steps(10)\n    lock_ba, do_ba = make_transfer_b_to_a_steps(10)\n    try:\n        run_steps([\n            (lock_ab, ()),   # A→B locks A\n            (lock_ba, ()),   # B→A locks B\n            (do_ab, ()),     # A→B tries to lock B — deadlock\n            (do_ba, ()),     # never reached\n        ])\n        return get_state()\n    except RuntimeError as e:\n        return {\"error\": str(e)}\n"
+    }
+  }
+}

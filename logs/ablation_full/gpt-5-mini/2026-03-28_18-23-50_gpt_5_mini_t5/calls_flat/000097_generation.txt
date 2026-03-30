@@ -1,0 +1,92 @@
+=== CALL 000097 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: partial_rollback_a
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:01:23.056454
+LATENCY_MS: 25414
+
+--- PROMPT ---
+Refactor this order system for clarity. Return the updated code.
+
+## Codebase (1 file)
+
+### FILE 1/1: code_snippets_v2/partial_rollback_a/order.py ###
+```python
+"""Order fulfillment with inventory and wallet."""
+
+
+class Inventory:
+    def __init__(self, stock):
+        self.stock = stock
+        self.reserved = 0
+
+    def reserve(self, qty):
+        if qty > self.stock - self.reserved:
+            raise ValueError("insufficient stock")
+        self.reserved += qty
+
+    def release(self, qty):
+        self.reserved -= qty
+
+    def available(self):
+        return self.stock - self.reserved
+
+
+class Wallet:
+    def __init__(self, balance):
+        self.balance = balance
+
+    def charge(self, amount):
+        if amount > self.balance:
+            raise ValueError("insufficient funds")
+        self.balance -= amount
+
+
+def place_order(inventory, wallet, qty, price):
+    """Reserve inventory, then charge wallet. Release on failure."""
+    inventory.reserve(qty)
+    try:
+        wallet.charge(qty * price)
+    except ValueError:
+        raise  # BUG: re-raises without releasing inventory reservation
+    return {"status": "confirmed", "qty": qty, "total": qty * price}
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/partial_rollback_a/order.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "In place_order, the except block for wallet.charge re-raises the ValueError without calling inventory.release(qty). The causal chain is: place_order calls inventory.reserve(qty) which increments Inventory.reserved, then wallet.charge(...) raises ValueError, and the except block does 'raise' immediately, so Inventory.reserved remains incremented even though the order failed.",
+  "failure_mechanism": "Example: Inventory(stock=10) starts with reserved=0. place_order(inventory, wallet_with_balance=0, qty=5, price=10) calls inventory.reserve(5) which sets reserved to 5. wallet.charge(50) raises ValueError('insufficient funds'). The except in place_order re-raises without calling inventory.release(5), leaving reserved==5 even though the order failed. Subsequent calls to inventory.available() will return 5 instead of 10 and future reserve attempts may be incorrectly rejected.",
+  "broken_invariant": "If place_order raises (fails), inventory.reserved must be unchanged from its value before the call. Concretely: for any Inventory inv and qty q, calling place_order(inv, wallet, q, price) that raises an exception must leave inv.reserved equal to its original value (inv.reserved before the call).",
+  "fix_strategy": "Ensure reserved inventory is released when charging the wallet fails. I modified place_order to release the reserved qty on any exception from wallet.charge by wrapping wallet.charge in a try/except that calls inventory.release(qty) before re-raising. I also tightened Inventory.release to prevent accidentally driving reserved negative (raising ValueError if trying to release more than reserved). These changes guarantee that on failure the inventory.reserved returns to its prior value and make the contract explicit and safer.",
+  "files": {
+    "code_snippets_v2/partial_rollback_a/order.py": "    \"\"\"Order fulfillment with inventory and wallet.\"\"\"\n\n\nclass Inventory:\n    def __init__(self, stock):\n        self.stock = stock\n        self.reserved = 0\n\n    def reserve(self, qty):\n        if qty > self.stock - self.reserved:\n            raise ValueError(\"insufficient stock\")\n        self.reserved += qty\n\n    def release(self, qty):\n        # Prevent releasing more than was reserved to avoid corrupting state\n        if qty > self.reserved:\n            raise ValueError(\"release exceeds reserved quantity\")\n        self.reserved -= qty\n\n    def available(self):\n        return self.stock - self.reserved\n\n\nclass Wallet:\n    def __init__(self, balance):\n        self.balance = balance\n\n    def charge(self, amount):\n        if amount > self.balance:\n            raise ValueError(\"insufficient funds\")\n        self.balance -= amount\n\n\ndef place_order(inventory, wallet, qty, price):\n    \"\"\"Reserve inventory, then charge wallet. On any failure to charge, release the reservation.\n\n    Guarantees: if place_order raises, inventory.reserved is restored to its value before the call.\n    \"\"\"\n    inventory.reserve(qty)\n    try:\n        wallet.charge(qty * price)\n    except Exception:\n        # Ensure we don't leak the reservation when charging fails\n        inventory.release(qty)\n        raise\n    return {\"status\": \"confirmed\", \"qty\": qty, \"total\": qty * price}\n"
+  }
+}

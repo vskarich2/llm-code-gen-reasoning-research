@@ -1,0 +1,181 @@
+=== CALL 000032 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: stale_cache_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:38:45.990350
+LATENCY_MS: 22627
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+catalog.update_product: after modifying the in-memory DB entry _db[product_id], the function did not invalidate or update the cache for the same product_id, so the cached copy (in cache._store) could remain stale and subsequent get_product calls would return the old price.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Make get_product always return a fresh copy (dict) to avoid callers mutating DB/cache objects, and update update_product to refresh the cache with the new DB value (put(product_id, dict(_db[product_id]))) immediately after updating the DB. This ensures the cache reflects the DB update and prevents stale values being returned by subsequent get_product calls.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure mode is a race condition in concurrent scenarios: a concurrent get_product call might read the old cached value between the time update_product mutates _db and when update_product writes the new copy into the cache (or even before update_product runs). This fix reduces the window by writing the updated value into the cache, but it does not eliminate the possibility that another thread already received the old object. Eliminating that race would require synchronization (locks) around DB + cache accesses, which changes the module's concurrency model and is outside the scope of this simple fix. Given the codebase is single-process in-memory without concurrency primitives, this fix is safe and appropriate.
+
+
+# Task Description
+Products show old prices after updates. Fix the catalog. Return the updated code.
+
+# Code Produced
+```python
+"""Product catalog using external cache module."""
+
+from cache import get, put, invalidate
+
+_db = {}
+
+
+def add_product(product_id, name, price):
+    """Add a product to the database."""
+    _db[product_id] = {"name": name, "price": price}
+
+
+def get_product(product_id):
+    """Get product, checking cache first."""
+    cached = get(product_id)
+    if cached is not None:
+        # Return a fresh copy so callers cannot mutate the cached object
+        return dict(cached)
+    product = _db.get(product_id)
+    if product is not None:
+        # Store a copy in the cache and return a fresh copy to the caller
+        put(product_id, dict(product))
+        return dict(product)
+    return None
+
+
+def update_product(product_id, **fields):
+    """Update product in DB.
+
+    Invariant: subsequent get_product() must reflect the update.
+    """
+    if product_id not in _db:
+        return False
+    _db[product_id].update(fields)
+    # Ensure the cache reflects the updated DB value immediately
+    put(product_id, dict(_db[product_id]))
+    return True
+
+
+def reset():
+    """Clear DB and cache."""
+    _db.clear()
+    from cache import clear
+    clear()
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If update_product always refreshed or invalidated the cache (or if get_product never returned a cached stale copy), the stale-price symptom would not occur.
+Evidence: _db[product_id].update(fields) mutates the DB entry; get_product previously stored/returned cached dicts via get/put leading to an independent cached copy; fix adds put(product_id, dict(_db[product_id])) immediately after the DB update and makes get_product return dict(cached) so callers can't mutate cache; no synchronization remains so transient race window can still let a caller see old data.
+Judgment: The developer correctly identified the causal chain (DB update without cache refresh → stale cached copy → get_product returning old price) and the invariant (get_product must reflect DB updates); the supplied code implements the described fix, though concurrent race conditions noted by the developer are real and outside the current fix.

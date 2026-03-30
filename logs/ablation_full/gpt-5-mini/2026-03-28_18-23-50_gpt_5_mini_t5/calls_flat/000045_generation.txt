@@ -1,0 +1,139 @@
+=== CALL 000045 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: lazy_init_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:38:40.293015
+LATENCY_MS: 19954
+
+--- PROMPT ---
+Config reset doesn't propagate through client to handler. Fix. Return the updated code.
+
+## Codebase (3 files)
+
+### FILE 1/3: code_snippets_v2/lazy_init_c/config.py ###
+```python
+"""Configuration module."""
+
+_config = None
+
+
+def _load_config():
+    """Load default config."""
+    return {"api_key": "default-key", "base_url": "https://api.example.com"}
+
+
+def get_config():
+    """Lazy-load config."""
+    global _config
+    if _config is None:
+        _config = _load_config()
+    return _config
+
+
+def reset_config():
+    """Reset config for testing or reload."""
+    global _config
+    _config = None
+
+
+def set_config(key, value):
+    """Override a single config value."""
+    cfg = get_config()
+    cfg[key] = value
+```
+
+### FILE 2/3: code_snippets_v2/lazy_init_c/client.py ###
+```python
+"""API client that reads config at import time."""
+
+from config import get_config
+
+# BUG: captures config dict reference at import time.
+# After reset_config(), _config in config.py becomes a NEW dict,
+# but _client_cfg still points to the OLD one.
+_client_cfg = get_config()
+
+
+def get_api_key():
+    """Return the API key the client uses."""
+    return _client_cfg["api_key"]
+
+
+def get_base_url():
+    """Return the base URL the client uses."""
+    return _client_cfg["base_url"]
+
+
+def build_headers():
+    """Build request headers (distractor)."""
+    return {"Authorization": f"Bearer {get_api_key()}"}
+```
+
+### FILE 3/3: code_snippets_v2/lazy_init_c/handler.py ###
+```python
+"""Request handler that uses client."""
+
+from client import get_api_key, get_base_url
+
+
+def make_request(endpoint):
+    """Build a request dict using client config.
+
+    Invariant: must reflect current config, not stale import-time snapshot.
+    """
+    return {
+        "url": get_base_url() + "/" + endpoint,
+        "api_key": get_api_key(),
+    }
+
+
+def health_check():
+    """Health check endpoint (distractor)."""
+    return {"status": "ok", "base_url": get_base_url()}
+
+
+def format_endpoint(base, path):
+    """URL formatter (distractor)."""
+    return base.rstrip("/") + "/" + path.lstrip("/")
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/lazy_init_c/config.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/lazy_init_c/client.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/lazy_init_c/handler.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "In code_snippets_v2/lazy_init_c/client.py the module-level variable _client_cfg is set once at import with _client_cfg = get_config(). This captures a reference to the dictionary object returned by config.get_config() at import time. Meanwhile code_snippets_v2/lazy_init_c/config.py.reset_config() sets the module-level _config to None so that subsequent get_config() calls create and return a new dict. Because client._client_cfg was bound to the old dict, client functions continue to read from that stale dict rather than the new one created after reset_config().",
+  "failure_mechanism": "Example sequence: when the process starts, config.get_config() creates {'api_key': 'default-key', 'base_url': 'https://api.example.com'}; client._client_cfg is assigned to that dict at import. handler.make_request('ping') returns values based on client._client_cfg. If tests call config.reset_config() and then config.set_config('api_key', 'test-key') (which populates a newly created dict), the new config lives in config._config, but client._client_cfg still points to the original dict. As a result, handler.make_request('ping') continues to return the original api_key/base_url (e.g. 'default-key'), demonstrating stale configuration despite reset_config() and set_config() being called.",
+  "broken_invariant": "Handler-level calls must reflect the current configuration as returned from config.get_config(): after calling config.reset_config() and then updating configuration (e.g. via set_config), calling handler.make_request(endpoint) must return values equal to the current get_config() values (i.e. get_base_url() + '/' + endpoint and api_key == get_config()['api_key']). Currently this invariant is violated because client functions read from a snapshot dict captured at import time.",
+  "fix_strategy": "Remove the import-time capture of the config dict in client.py and instead fetch the current config at call time. Concretely, I removed the module-level _client_cfg = get_config() binding and updated get_api_key() and get_base_url() to call get_config() each time (via a small helper _get_client_cfg()). This ensures client functions always read the dict currently returned by config.get_config(), so a config.reset_config() that causes a fresh dict to be created will be observed by the client and therefore by handler.make_request().",
+  "files": {
+    "code_snippets_v2/lazy_init_c/config.py": "UNCHANGED",
+    "code_snippets_v2/lazy_init_c/client.py": "\"\"\"API client that reads config dynamically (no import-time snapshot).\"\"\"\n\nfrom config import get_config\n\n\ndef _get_client_cfg():\n    \"\"\"Always retrieve the current config dict from config.get_config().\"\"\"\n    return get_config()\n\n\ndef get_api_key():\n    \"\"\"Return the API key the client uses (reads config at call time).\"\"\"\n    return _get_client_cfg()[\"api_key\"]\n\n\ndef get_base_url():\n    \"\"\"Return the base URL the client uses (reads config at call time).\"\"\"\n    return _get_client_cfg()[\"base_url\"]\n\n\ndef build_headers():\n    \"\"\"Build request headers (distractor).\"\"\"\n    return {\"Authorization\": f\"Bearer {get_api_key()}\"}\n",
+    "code_snippets_v2/lazy_init_c/handler.py": "UNCHANGED"
+  }
+}

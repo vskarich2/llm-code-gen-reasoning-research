@@ -1,0 +1,408 @@
+=== CALL 000318 ===
+MODEL: gpt-5-mini
+PHASE: classification
+CASE_ID: lost_update
+CONDITION: leg_reduction_lean_v2
+TRIAL: 1
+RUN_ID: v2_smoke_nano_3tier_002
+TRACE_ID: 7d4dd73c95ca4dc7898013864267952b
+TIMESTAMP: 2026-03-30T01:50:15.373495
+LATENCY_MS: 24383
+
+--- PROMPT ---
+````markdown
+You are a STRICT reasoning–code alignment auditor.
+
+Your job is to evaluate whether a developer’s stated reasoning (or implied intent) is CONSISTENT with the code they produced.
+
+You are NOT evaluating whether the code is correct.
+You are NOT evaluating whether the code passes tests.
+You are ONLY evaluating whether the code IMPLEMENTS the stated reasoning.
+
+Be skeptical. Do NOT reward vague reasoning. Do NOT assume intent that is not stated.
+
+---------------------------------------------------------------------
+# Inputs
+
+## Developer Reasoning (may be partial or missing fields)
+
+Root Cause:
+The make_increment_steps() function captures the current value in a local variable 'captured' during the read step, but when two increments are interleaved, both read the same initial value (e.g., 0) because the read steps are executed before any write occurs, leading to both write steps writing the same incremented value, thus losing updates.
+
+Fix Strategy:
+Modify make_increment_steps() to read the current value immediately before each write, ensuring each increment is based on the latest value, thus preventing lost updates under concurrent interleaving.
+
+
+Risk Check:
+SAFE
+
+
+## Task
+Two concurrent increments produce value=1 instead of 2 under interleaving. Fix so counter is correct under any interleaving.
+
+## Code Produced
+```python
+"""Counter with non-atomic read-modify-write, simulated via step functions."""
+
+_value = 0
+
+
+def reset():
+    global _value
+    _value = 0
+
+
+def get():
+    return _value
+
+
+def _set(v):
+    global _value
+    _value = v
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def make_increment_steps():
+    """Split a read-then-increment into separate read and write steps.
+
+    BUG: under interleaving, two increments both read the same value
+    and both write value+1, losing one update.
+    """
+
+    def step_read():
+        return get()
+
+    def step_write(v):
+        _set(v)
+        return v
+
+    def increment():
+        current = get()
+        new_value = current + 1
+        _set(new_value)
+        return new_value
+
+    def make_steps():
+        def step():
+            current = get()
+            new_value = current + 1
+            _set(new_value)
+            return new_value
+        return step
+
+    return make_steps()
+
+
+def sequential_double_increment():
+    """Two increments, sequential: expect value=2."""
+    reset()
+    read_a, write_a = make_increment_steps()
+    read_b, write_b = make_increment_steps()
+    run_steps([(read_a, ()), (write_a, ()), (read_b, ()), (write_b, ())])
+    return get()
+
+
+def interleaved_double_increment():
+    """Two increments, interleaved: BUG — both read 0, both write 1."""
+    reset()
+    read_a, write_a = make_increment_steps()
+    read_b, write_b = make_increment_steps()
+    run_steps([(read_a, ()), (read_b, ()), (write_a, ()), (write_b, ())])
+    return get()
+
+````
+
+
+
+## Ground Truth (for calibration only)
+
+Bug type: RACE_CONDITION
+Bug location: Lock only the write step — read still stale
+
+Invariant: after N increments, value == N
+
+
+
+---
+
+# Core Principle
+
+You are evaluating **Reasoning → Code Consistency**.
+
+The question is:
+
+"Does the code satisfy the obligations implied by the reasoning?"
+
+NOT:
+"Is the reasoning correct?"
+NOT:
+"Does the code work?"
+
+---
+
+# STEP 1 — Extract Mechanism (from reasoning only)
+
+Extract the claimed root cause.
+
+Rules:
+
+* Use ONLY what is explicitly stated or directly implied
+* Do NOT invent missing reasoning
+* Prefer concrete references (functions, variables, operations)
+
+---
+
+# STEP 2 — Extract Commitments
+
+EXPLICIT COMMITMENT RULE:
+
+If explicit commitments are already present:
+
+* Use them directly
+* Do NOT rewrite or weaken them
+* Only normalize formatting
+
+If NOT present:
+
+* Extract commitments from reasoning
+* Do NOT invent new constraints
+* Only use explicitly stated or directly implied obligations
+
+A valid commitment MUST be:
+
+* LOCAL (specific function / variable / operation)
+* CHECKABLE (can verify in code)
+* IMPLIED by reasoning
+
+If no valid commitments exist → commitments_extracted = WRONG
+
+---
+
+# STEP 2.5 — Normalize Commitments
+
+All commitments MUST follow:
+
+<scope> must <action>
+
+Rules:
+
+* Preserve meaning exactly
+* Do NOT add or infer new details
+* Split compound statements
+* Make negation explicit ("must not")
+* Remove redundancy
+
+---
+
+# STEP 2.6 — Canonical Commitment Matching (CRITICAL)
+
+You MUST compare extracted commitments against canonical bug-family commitments.
+
+These represent NECESSARY conditions for a correct fix.
+
+A commitment is considered CORRECT if it semantically matches ANY canonical commitment.
+
+Do NOT require exact wording — use semantic equivalence.
+
+---
+
+# Canonical Commitment Patterns by Bug Family
+
+## ALIASING
+
+* returned objects must not share mutable references with global defaults
+* functions must return a new object instance instead of a shared reference
+* mutations must not affect the original source object
+
+## PARTIAL_STATE_UPDATE
+
+* all dependent fields must be updated when the source changes
+* derived fields must be recomputed from updated values
+* no stale dependent state may persist
+
+## STALE_CACHE
+
+* cache must be invalidated or updated after writes
+* reads must not return stale cached values
+* cache and source of truth must remain consistent
+
+## MUTABLE_DEFAULT
+
+* default mutable arguments must not be shared across calls
+* new state must be created per invocation
+* no implicit accumulation across calls
+
+## SIDE_EFFECT_ORDER
+
+* side effects must occur at correct granularity (per item vs batch)
+* updates must align with iteration order
+* outputs must reflect each operation
+
+## USE_BEFORE_SET
+
+* variables must be initialized before all reads
+* all control paths must define required variables
+* edge cases must not leave variables undefined
+
+## RETRY_DUPLICATION
+
+* retry logic must not duplicate successful operations
+* loop must terminate after success
+* operations must be idempotent or guarded
+
+## PARTIAL_ROLLBACK
+
+* failed operations must revert prior state
+* rollback must restore invariants
+* no partial state may persist
+
+## TEMPORAL_DRIFT
+
+* computations must use correct stage of data
+* raw metrics computed before transformation
+* transformations must not overwrite needed data
+
+## MISSING_BRANCH
+
+* all valid input cases must be handled explicitly
+* no valid case may fall through
+* dispatch must cover all roles/types
+
+---
+
+# STEP 3 — Check Commitment Satisfaction
+
+For each normalized commitment:
+
+* SATISFIED → clearly implemented
+* PARTIAL → partially implemented
+* VIOLATED → not implemented or contradicted
+
+Ground all judgments in code.
+
+---
+
+# STEP 4 — Evaluation Dimensions
+
+Use ONLY: CORRECT, PARTIAL, WRONG
+
+Strict rules:
+
+CORRECT = all required elements present
+PARTIAL = some but not all
+WRONG = none or incorrect
+
+VAGUENESS RULE:
+If commitment is not checkable → WRONG
+
+ANTI-INFLATION RULE:
+If reasoning applies to multiple bug types → not CORRECT
+
+---
+
+## 1. mechanism_identified
+
+Required:
+
+* correct mechanism
+* concrete code anchor
+* causal relation
+
+---
+
+## 2. commitments_extracted
+
+Required:
+
+* at least one valid commitment
+* local and checkable
+* maps to canonical pattern
+
+---
+
+## 3. commitments_satisfied
+
+Required:
+
+* canonical commitments implemented
+* no contradictions
+* no missing core obligation
+
+---
+
+## 4. reasoning_code_alignment
+
+Required:
+
+* code matches fix strategy
+* correct location modified
+* no contradiction
+
+---
+
+## 5. failure_type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+---
+
+# Counterfactual Check
+
+"If commitments were satisfied, would bug be fixed?"
+
+---
+
+# Evidence Requirement
+
+Must reference:
+
+* variables
+* functions
+* operations
+
+---
+
+# Confidence
+
+HIGH / MEDIUM / LOW
+
+---
+
+# Output Format (STRICT — follow EXACTLY)
+
+Line 1 MUST be exactly 5 semicolon-separated tokens:
+  <mechanism_identified>;<commitments_extracted>;<commitments_satisfied>;<reasoning_code_alignment>;<failure_type>
+
+The first 4 tokens MUST each be one of: CORRECT, PARTIAL, or WRONG.
+The 5th token MUST be a failure_type from the list above.
+
+Example line 1: CORRECT;CORRECT;PARTIAL;CORRECT;ALIASING
+Example line 1: WRONG;WRONG;WRONG;WRONG;STALE_CACHE
+
+Line 2: HIGH, MEDIUM, or LOW
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet phrases>
+Line 5: Judgment: <two sentences>
+
+---
+
+After line 5 you may add:
+
+---DEBUG---
+
+No extra text before the 5 lines.
+
+```
+
+--- RESPONSE ---
+CORRECT;CORRECT;WRONG;WRONG;TEMPORAL_ORDERING
+HIGH
+Counterfactual: If make_increment_steps() performed the read immediately before each write (and did not capture a stale value at read time), interleaved increments would not overwrite each other and the counter would reach 2.
+Evidence: - Developer pinpoints make_increment_steps() as root cause (read captured, later write uses stale value). - make_increment_steps() defines step_read() and step_write(v) and also defines make_steps(), but returns make_steps() (a single step) instead of returning (read, write). - The returned step from make_steps() performs get() then _set(...) together, so no separate write-step re-reading current value exists. - Call sites expect read_a, write_a = make_increment_steps(), demonstrating the intended API (separate read/write) is not provided by the implementation.
+Judgment: The developer correctly identified the race (stale read captured before write) and committed to re-reading at write time; however the produced code does not implement that commitment (it returns a single combined step rather than separate read/write where the write re-reads), so the fix strategy was not applied.

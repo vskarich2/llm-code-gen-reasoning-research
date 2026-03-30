@@ -1,0 +1,175 @@
+=== CALL 000022 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: partial_update_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:31:09.755422
+LATENCY_MS: 21326
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In code_snippets_v2/partial_update_c/profile.py, the function update_profile fails to update the variables user['verified'] and user['cached_greeting'] when processing an email change. The branch for key == 'email' only assigns user['email'] = value and never clears user['cached_greeting'] nor sets user['verified'] = False, so old cached greeting and verification state persist after changing the email.
+
+## Failure Mechanism
+Example: create_user('Alice','alice@example.com') produces {'name': 'Alice', 'email': 'alice@example.com', 'verified': False, 'cached_greeting': 'Hello, Alice!'}. If the user is later verified (verified=True) and update_profile(user, {'email': 'alice_new@example.com'}) is called, validate_email passes and the code sets user['email'] = 'alice_new@example.com' but does not set user['verified'] = False or clear user['cached_greeting']. As a result, user['cached_greeting'] still contains 'Hello, Alice!' (stale greeting) and user['verified'] may remain True, violating expected behavior.
+
+## Broken Invariant
+After calling update_profile(user, {'email': NEW_EMAIL}) with NEW_EMAIL a valid email and representing a meaningful change (i.e., should_reverify(old_email, NEW_EMAIL) is True or the stored email differs), the user object must satisfy user['verified'] == False and user['cached_greeting'] == ''.
+
+## Fix Strategy
+Modify update_profile to detect when the email value actually changes, assign the new email, clear cached_greeting unconditionally for an email change, and use should_reverify(old_email, new_email) to decide whether to set user['verified'] = False. Concretely, added logic that checks old_email != value, sets user['email']=value, sets user['cached_greeting']='' and, if should_reverify(old_email, value) returns True, sets user['verified']=False. This ensures the stale greeting is cleared and verification state is reset when appropriate.
+
+
+# Task Description
+After changing email, old greeting still shows. Fix the update. Return the updated code.
+
+# Code Produced
+```python
+"""User profile with email verification and cached greeting."""
+
+from validation import validate_email, validate_name
+from notifications import build_greeting, should_reverify
+
+
+def create_user(name, email):
+    """Create a user with verified status and cached greeting."""
+    return {
+        "name": name,
+        "email": email,
+        "verified": False,
+        "cached_greeting": build_greeting({"name": name}),
+    }
+
+
+def verify_user(user):
+    """Mark user as verified."""
+    user["verified"] = True
+    return user
+
+
+def update_profile(user, changes):
+    """Update profile fields.
+
+    Invariant: changing email must set verified=False and clear cached_greeting.
+    Invariant: changing name must update cached_greeting.
+    """
+    for key, value in changes.items():
+        if key == "email" and validate_email(value):
+            old_email = user.get("email")
+            # Only apply updates when the email value actually changes
+            if old_email != value:
+                user["email"] = value
+                # Clear cached greeting whenever the email is changed
+                user["cached_greeting"] = ""
+                # If the change requires re-verification, mark verified = False
+                if should_reverify(old_email, value):
+                    user["verified"] = False
+        elif key == "name" and validate_name(value):
+            user["name"] = value
+            user["cached_greeting"] = build_greeting(user)
+    return user
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If update_profile also cleared cached_greeting and reset verification appropriately when the email actually changes, the stale greeting/verification failure would not occur.
+Evidence: - create_user sets "cached_greeting" via build_greeting and "verified" initial False; - update_profile email branch compares old_email != value then does user["email"] = value; - the new code clears user["cached_greeting"] = "" on email change; - the new code calls should_reverify(old_email, value) and sets user["verified"] = False when that returns True.
+Judgment: The developer correctly identifies the precise function and variables (user['email'], user['cached_greeting'], user['verified']), traces the mutation-to-failure chain, and proposes a targeted fix; the provided code implements that fix (clearing cached_greeting and conditionally resetting verified) and aligns with the reasoning (minor note: the original "Broken Invariant" claimed verified must always be False, but the developer's final strategy uses should_reverify to decide, which matches the implemented code).

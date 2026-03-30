@@ -1,0 +1,171 @@
+=== CALL 000094 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: retry_dup_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:58:38.880681
+LATENCY_MS: 20915
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In code_snippets_v2/retry_dup_c/pipeline.py the ingest() function omits a break after a successful call to send_with_retry. Specifically, the for-loop 'for attempt in range(max_pipeline_retries):' does 'send_with_retry(...)' but the commented '# BUG: no break — pipeline always retries, doubling sends' indicates the missing break. Because there is no break, the pipeline will call send_with_retry again even when the first call succeeded.
+
+## Failure Mechanism
+Concrete scenario: ingest(msg, max_pipeline_retries=2, fail_first=True) -> First pipeline iteration calls send_with_retry(msg, max_retries=2, fail_first=True). send_with_retry invokes send twice: first send raises ConnectionError, second send succeeds and append(msg) runs once. Because pipeline did not break, the pipeline loop runs a second iteration and calls send_with_retry again; this call now succeeds immediately (sender's transient failure condition only triggered on the first global attempt) and append(msg) runs a second time. Result: the same message appears twice in the store. If max_retries values differ or multiple retries occur, the missing break can cause 2–4 duplicate appends depending on how many times sender retried internally and how many pipeline iterations run.
+
+## Broken Invariant
+Ingesting a single message via pipeline.ingest(msg, max_pipeline_retries=N) results in at most one successful store.append(msg) per intended logical ingestion. (Testable: call reset(), then pipeline.ingest('x', max_pipeline_retries=2, fail_first=True) and assert store.get_messages() == ['x'] — this currently fails because the message may appear multiple times.)
+
+## Fix Strategy
+Stop the pipeline-level retry loop after a successful send_with_retry by adding a break when no exception occurs. Also fix reset() to call the proper module-level reset helpers rather than assigning to undefined variables: call reset_store() and reset_sender() so the store and sender state are cleared. These changes prevent duplicate sends by ensuring a successful send_with_retry isn't invoked again, and ensure reset() reliably clears state.
+
+
+
+# Task Description
+Messages appearing 3-4 times. Fix the retry logic. Return the updated code.
+
+# Code Produced
+```python
+"""Ingestion pipeline with its own retry around sender."""
+
+from sender import send_with_retry, reset_sender
+from store import get_messages, reset as reset_store
+
+_ingest_log = []
+
+
+def reset():
+    global _ingest_log
+    # Reset pipeline-local log and delegate resetting store and sender state
+    _ingest_log = []
+    reset_store()
+    reset_sender()
+
+
+def ingest(msg, max_pipeline_retries=2, fail_first=False):
+    """Ingest a message with pipeline-level retry."""
+    for attempt in range(max_pipeline_retries):
+        try:
+            send_with_retry(msg, max_retries=2, fail_first=fail_first)
+            # Stop retrying at the pipeline level once send_with_retry succeeds
+            break
+        except Exception:
+            continue
+    _ingest_log.append(msg)
+    return True
+
+
+def get_ingest_log():
+    return list(_ingest_log)
+
+
+def batch_ingest(messages):
+    """Ingest multiple messages. Legitimate batch — no retry needed."""
+    for msg in messages:
+        send_with_retry(msg, max_retries=1)
+    return len(messages)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;RETRY_LOGIC_BUG
+HIGH
+Counterfactual: If the missing break were added (i.e., the pipeline stops retrying after a successful send_with_retry), the duplicate appends would no longer occur.
+Evidence: ingest() loops "for attempt in range(max_pipeline_retries):" and calls send_with_retry(...) so without a break the pipeline invokes send_with_retry a second time; send_with_retry invokes sender.send which on success causes store.append(msg) so a second pipeline invocation produces a duplicate append; the submitted code adds "break" on success and replaces reset with calls to reset_store() and reset_sender().
+Judgment: The developer's reasoning is causally complete and well-grounded in the code: they identify the missing break as the root cause, show how send_with_retry's internal retries combined with the outer loop produce duplicates, and the provided code implements the intended fix (minor nit: ingest() appends _ingest_log unconditionally, but that does not affect the store-append duplication).

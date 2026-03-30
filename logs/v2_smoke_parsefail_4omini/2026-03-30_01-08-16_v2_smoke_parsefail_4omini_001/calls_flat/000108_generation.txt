@@ -1,0 +1,188 @@
+=== CALL 000108 ===
+MODEL: gpt-4o-mini
+PHASE: generation
+CASE_ID: false_fix_deadlock
+CONDITION: leg_reduction_lean_v2
+TRIAL: 1
+RUN_ID: v2_smoke_parsefail_4omini_001
+TRACE_ID: b68d8cae404949a1a88a66b8e8438beb
+TIMESTAMP: 2026-03-30T01:33:59.323172
+LATENCY_MS: 13422
+
+--- PROMPT ---
+Concurrent transfers deadlock. Fix the locking so transfers never deadlock under any interleaving.
+
+## Codebase (1 file)
+
+### FILE 1/1: code_snippets_v2/false_fix_deadlock/resources.py ###
+```python
+"""Resource transfers with lock-ordering deadlock, simulated via steps."""
+
+_locks = {}
+_state = {"A": 100, "B": 100}
+
+
+def reset():
+    _locks.clear()
+    _state["A"] = 100
+    _state["B"] = 100
+
+
+def acquire(resource):
+    """Simulate lock. Raises RuntimeError if already held (deadlock)."""
+    if _locks.get(resource):
+        raise RuntimeError(f"deadlock: {resource} already locked")
+    _locks[resource] = True
+
+
+def release(resource):
+    _locks[resource] = False
+
+
+def get_state():
+    return dict(_state)
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def make_transfer_a_to_b_steps(amount):
+    """Transfer A→B: lock A first, then B."""
+
+    def step_lock_a():
+        acquire("A")
+        return "locked_A"
+
+    def step_lock_b_and_transfer():
+        acquire("B")
+        _state["A"] -= amount
+        _state["B"] += amount
+        release("B")
+        release("A")
+        return "transferred_a_to_b"
+
+    return step_lock_a, step_lock_b_and_transfer
+
+
+def make_transfer_b_to_a_steps(amount):
+    """Transfer B→A: BUG — locks B first, then A (opposite order)."""
+
+    def step_lock_b():
+        acquire("B")
+        return "locked_B"
+
+    def step_lock_a_and_transfer():
+        acquire("A")  # DEADLOCK: A is held by the other transfer
+        _state["B"] -= amount
+        _state["A"] += amount
+        release("A")
+        release("B")
+        return "transferred_b_to_a"
+
+    return step_lock_b, step_lock_a_and_transfer
+
+
+def sequential_transfers():
+    """A→B then B→A. Sequential: works fine."""
+    reset()
+    lock_ab, do_ab = make_transfer_a_to_b_steps(10)
+    lock_ba, do_ba = make_transfer_b_to_a_steps(10)
+    run_steps([
+        (lock_ab, ()), (do_ab, ()),
+        (lock_ba, ()), (do_ba, ()),
+    ])
+    return get_state()
+
+
+def interleaved_transfers():
+    """A→B and B→A interleaved: DEADLOCK."""
+    reset()
+    lock_ab, do_ab = make_transfer_a_to_b_steps(10)
+    lock_ba, do_ba = make_transfer_b_to_a_steps(10)
+    try:
+        run_steps([
+            (lock_ab, ()),   # A→B locks A
+            (lock_ba, ()),   # B→A locks B
+            (do_ab, ()),     # A→B tries to lock B — DEADLOCK
+            (do_ba, ()),     # never reached
+        ])
+        return get_state()
+    except RuntimeError as e:
+        return {"error": str(e)}
+```
+
+Fix the bug by identifying the mechanism and making a concrete, correct code change.
+
+Return a SINGLE valid JSON object.
+
+## 1. Root cause
+
+State the bug mechanism precisely:
+- name the function / variable
+- explain the causal issue (not just symptoms)
+
+## 2. Commitments
+
+Write 1–2 explicit commitments your fix must satisfy.
+
+Each must follow:
+
+<scope> must <action>
+
+Examples:
+- "create_config must return a copy of DEFAULTS"
+- "update_product must invalidate cache after write"
+
+Rules:
+- MUST be local and checkable
+- NO vague statements
+
+## 3. Fix
+
+Describe the exact code change in 1–2 sentences.
+Explain briefly why it satisfies the commitments.
+
+## 4. Quick check
+
+If the fix could still fail, say how in one sentence.
+Otherwise write: SAFE
+
+## 5. Code
+
+Return JSON:
+
+{
+  "root_cause": "...",
+  "code_commitments": ["..."],
+  "fix_strategy": "...",
+  "risk_check": "...",
+  "files": {
+    ""code_snippets_v2/false_fix_deadlock/resources.py": "<complete file contents or UNCHANGED>""
+  }
+}
+
+RULES:
+- All fields REQUIRED
+- "code_commitments": 1–2 items
+- "files": must include ALL files
+- Use "UNCHANGED" where appropriate
+- Full file contents for modified files
+- NO markdown
+- ONLY JSON output
+
+--- RESPONSE ---
+{
+  "root_cause": "The function make_transfer_b_to_a_steps locks resource B before resource A, while make_transfer_a_to_b_steps locks A before B, leading to a potential deadlock when both transfers are interleaved.",
+  "code_commitments": [
+    "make_transfer_b_to_a_steps must lock A before locking B"
+  ],
+  "fix_strategy": "Change the order of locking in the make_transfer_b_to_a_steps function to match the order in make_transfer_a_to_b_steps, ensuring consistent lock ordering.",
+  "risk_check": "SAFE",
+  "files": {
+    "code_snippets_v2/false_fix_deadlock/resources.py": "```python\n\"\"\"Resource transfers with lock-ordering deadlock, simulated via steps.\"\"\"\n\n_locks = {}\n_state = {\"A\": 100, \"B\": 100}\n\n\ndef reset():\n    _locks.clear()\n    _state[\"A\"] = 100\n    _state[\"B\"] = 100\n\n\ndef acquire(resource):\n    \"\"\"Simulate lock. Raises RuntimeError if already held (deadlock).\"\"\"\n    if _locks.get(resource):\n        raise RuntimeError(f\"deadlock: {resource} already locked\")\n    _locks[resource] = True\n\n\ndef release(resource):\n    _locks[resource] = False\n\n\ndef get_state():\n    return dict(_state)\n\n\ndef run_steps(steps):\n    results = []\n    for fn, args in steps:\n        results.append(fn(*args))\n    return results\n\n\ndef make_transfer_a_to_b_steps(amount):\n    \"\"\"Transfer A→B: lock A first, then B.\"\"\"\n\n    def step_lock_a():\n        acquire(\"A\")\n        return \"locked_A\"\n\n    def step_lock_b_and_transfer():\n        acquire(\"B\")\n        _state[\"A\"] -= amount\n        _state[\"B\"] += amount\n        release(\"B\")\n        release(\"A\")\n        return \"transferred_a_to_b\"\n\n    return step_lock_a, step_lock_b_and_transfer\n\n\ndef make_transfer_b_to_a_steps(amount):\n    \"\"\"Transfer B→A: lock A first, then B (fixed order).\"\"\"\n\n    def step_lock_a():\n        acquire(\"A\")\n        return \"locked_A\"\n\n    def step_lock_b_and_transfer():\n        acquire(\"B\")\n        _state[\"B\"] -= amount\n        _state[\"A\"] += amount\n        release(\"B\")\n        release(\"A\")\n        return \"transferred_b_to_a\"\n\n    return step_lock_a, step_lock_b_and_transfer\n\n\ndef sequential_transfers():\n    \"\"\"A→B then B→A. Sequential: works fine.\"\"\"\n    reset()\n    lock_ab, do_ab = make_transfer_a_to_b_steps(10)\n    lock_ba, do_ba = make_transfer_b_to_a_steps(10)\n    run_steps([\n        (lock_ab, ()), (do_ab, ()),\n        (lock_ba, ()), (do_ba, ()),\n    ])\n    return get_state()\n\n\ndef interleaved_transfers():\n    \"\"\"A→B and B→A interleaved: DEADLOCK.\"\"\"\n    reset()\n    lock_ab, do_ab = make_transfer_a_to_b_steps(10)\n    lock_ba, do_ba = make_transfer_b_to_a_steps(10)\n    try:\n        run_steps([\n            (lock_ab, ()),   # A→B locks A\n            (lock_ba, ()),   # B→A locks A\n            (do_ab, ()),     # A→B tries to lock B — DEADLOCK\n            (do_ba, ()),     # never reached\n        ])\n        return get_state()\n    except RuntimeError as e:\n        return {\"error\": str(e)}\n```"
+  }
+}

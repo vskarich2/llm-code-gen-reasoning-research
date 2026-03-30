@@ -1,0 +1,109 @@
+=== CALL 000161 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: index_misalign_b
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:30:49.587676
+LATENCY_MS: 28668
+
+--- PROMPT ---
+Report columns are misaligned after deletion. Fix. Return the updated code.
+
+## Codebase (2 files)
+
+### FILE 1/2: code_snippets_v2/index_misalign_b/data.py ###
+```python
+"""Data storage for tabular reports."""
+
+
+def make_row(*values):
+    """Create a row from positional values."""
+    return list(values)
+
+
+def validate_row(row, expected_cols):
+    """Check that a row has the expected number of columns."""
+    return len(row) == expected_cols
+```
+
+### FILE 2/2: code_snippets_v2/index_misalign_b/report.py ###
+```python
+"""Tabular report with headers and rows."""
+
+from data import make_row
+
+
+class Report:
+    """A simple table with column headers and data rows."""
+
+    def __init__(self, headers):
+        self.headers = list(headers)
+        self.rows = []
+
+    def add_row(self, *values):
+        """Add a row of data."""
+        self.rows.append(make_row(*values))
+
+    def delete_column(self, index):
+        """Remove a column by index from headers and all rows.
+
+        Must remove the header AND the corresponding element
+        from every row to keep them aligned.
+        """
+        # BUG: removes header but does NOT remove from rows
+        del self.headers[index]
+
+    def render(self):
+        """Render the table as a list of dicts keyed by header."""
+        result = []
+        for row in self.rows:
+            result.append(dict(zip(self.headers, row)))
+        return result
+
+    def get_column(self, index):
+        """Return all values in a given column."""
+        return [row[index] for row in self.rows]
+
+    def column_count(self):
+        """Return the number of columns based on headers."""
+        return len(self.headers)
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/index_misalign_b/data.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/index_misalign_b/report.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "In Report.delete_column the code only executes 'del self.headers[index]' and never removes the corresponding element from each list in self.rows. Concretely, the function in report.py mutates self.headers but leaves the per-row lists unchanged, so headers and row element positions diverge.",
+  "failure_mechanism": "Example: headers = ['a','b','c'] and rows = [[1,2,3]]. Calling Report.delete_column(1) executes del self.headers[1] -> headers becomes ['a','c'] but rows remains [[1,2,3]]. Later render() builds dict(zip(self.headers, row)) -> dict(zip(['a','c'], [1,2,3])) yields {'a':1, 'c':2} which maps the wrong value for column 'c' (2 instead of 3). The cause is that the header at index 1 was removed while the second element in each row was not removed, so subsequent zips pair headers with the wrong row elements.",
+  "broken_invariant": "After any delete_column(i) call, every row must have the same length as the headers list: for all row in report.rows, len(row) == report.column_count(). The current code violates this invariant when delete_column removes a header but not the corresponding row element.",
+  "fix_strategy": "Validate the requested index against the current headers (preserving the original IndexError behavior for out-of-range header indices), normalize negative indices, then remove the element at that index from every row before removing the header. This ensures each row's length is decremented in lockstep with headers and restores the invariant used by render() and get_column(). The change modifies Report.delete_column to perform these steps and raises clear IndexError if a row is missing the column.",
+  "files": {
+    "code_snippets_v2/index_misalign_b/data.py": "UNCHANGED",
+    "code_snippets_v2/index_misalign_b/report.py": "\"\"\"Tabular report with headers and rows.\"\"\"\n\nfrom data import make_row\n\n\nclass Report:\n    \"\"\"A simple table with column headers and data rows.\"\"\"\n\n    def __init__(self, headers):\n        self.headers = list(headers)\n        self.rows = []\n\n    def add_row(self, *values):\n        \"\"\"Add a row of data.\"\"\"\n        self.rows.append(make_row(*values))\n\n    def delete_column(self, index):\n        \"\"\"Remove a column by index from headers and all rows.\n\n        Must remove the header AND the corresponding element\n        from every row to keep them aligned.\n        \"\"\"\n        # Validate index against headers (preserve original IndexError behavior)\n        n = len(self.headers)\n        if n == 0:\n            raise IndexError(\"Column index out of range\")\n        # Normalize negative indices\n        if index < 0:\n            index += n\n        if not (0 <= index < n):\n            raise IndexError(\"Column index out of range\")\n\n        # Remove the element at `index` from every row. If a row is shorter\n        # than expected, raise IndexError so callers see the problem.\n        for row in self.rows:\n            if index >= len(row):\n                raise IndexError(\"Row does not have a column at the specified index\")\n            del row[index]\n\n        # Finally remove the header\n        del self.headers[index]\n\n    def render(self):\n        \"\"\"Render the table as a list of dicts keyed by header.\"\"\"\n        result = []\n        for row in self.rows:\n            result.append(dict(zip(self.headers, row)))\n        return result\n\n    def get_column(self, index):\n        \"\"\"Return all values in a given column.\"\"\"\n        return [row[index] for row in self.rows]\n\n    def column_count(self):\n        \"\"\"Return the number of columns based on headers.\"\"\"\n        return len(self.headers)\n"
+  }
+}

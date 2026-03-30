@@ -1,0 +1,224 @@
+=== CALL 000103 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: partial_rollback_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:05:27.897564
+LATENCY_MS: 31020
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+order_service.place_order: the except ValueError: block re-raises the caught exception without calling inventory.release(product_id, qty), so the reservation made by reserve(product_id, qty) is never undone on payment failure.
+
+## Failure Mechanism
+set_gateway_fail(True) → place_order calls reserve(product_id, qty) which increments inventory._reserved[product_id] → _process_payment raises ValueError('payment declined') → except block re-raises immediately without calling release(product_id, qty) → _reserved retains the reserved amount → available(product_id) becomes permanently reduced (stock - reserved) causing inventory to be stuck as reserved and failing later orders.
+
+## Broken Invariant
+For any product_id, available(product_id) == _stock.get(product_id,0) - _reserved.get(product_id,0) must be >= 0 and reservations must not remain after a failed payment; specifically, after place_order fails with a payment error, _reserved.get(product_id,0) should be decreased by qty (i.e., reservation rolled back). This invariant is violated when payment fails because _reserved is not decremented.
+
+## Fix Strategy
+Ensure that when payment processing fails we explicitly roll back the reservation. Change place_order to catch exceptions from payment processing, call release(product_id, qty) to undo the prior reserve, then re-raise the exception. Also harden inventory.release so it cannot make _reserved negative (use max(0,...)). This breaks the causal chain: reserve increments _reserved → payment fails → we now call release to decrement _reserved (never going below zero) → invariant restored.
+
+
+## Self-Check
+{'failure_scenario': 'If _process_payment raises an unexpected exception type (not ValueError), the try/except must still release. The fix catches Exception during payment and releases; however, if an exception is thrown after payment succeeded but before notifications are appended (for example, if _notifications.append raises), we must not release because payment succeeded. The code only releases on exceptions thrown during payment (the try covers only the payment call), so this scenario is handled correctly.', 'edge_case': 'If release is called more times than reserve (e.g., duplicate rollback on retry), inventory.release now clamps reserved to zero via max(0, ...). This prevents negative _reserved values. Also, calling release for a product_id that was never reserved will simply leave reserved at 0.', 'invariant_check': "Multiple calls: Repeated successful place_order calls will reserve and keep reservations; invariant reserved <= stock holds because reserve checks available before incrementing. Retries / loops: If payment fails repeatedly, each failure triggers a release which cancels the corresponding reserve, so repeated failures won't accumulate reserved amounts. State reuse: reset() functions remain available; inventory.release prevents negative reserved across state reuse. Therefore after a failed payment the invariant that available(product_id) == stock - reserved >= 0 holds, and reserved does not remain stuck.", 'conclusion': 'No remaining flaw found for the original bug (reservations stuck after payment failure). The fix explicitly undoes reservations on any exception from payment processing and hardens release to prevent negative reserved counts. This preserves intended behavior (do not release after successful payment) because only exceptions during payment trigger rollback.'}
+
+
+# Task Description
+Inventory stuck as reserved after payment failure. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Inventory management with reservation tracking."""
+
+_stock = {}
+_reserved = {}
+
+
+def reset():
+    global _stock, _reserved
+    _stock = {}
+    _reserved = {}
+
+
+def add_product(product_id, quantity):
+    _stock[product_id] = _stock.get(product_id, 0) + quantity
+    _reserved.setdefault(product_id, 0)
+
+
+def reserve(product_id, qty):
+    avail = _stock.get(product_id, 0) - _reserved.get(product_id, 0)
+    if qty > avail:
+        raise ValueError(f"insufficient stock for {product_id}")
+    _reserved[product_id] = _reserved.get(product_id, 0) + qty
+
+
+def release(product_id, qty):
+    # Prevent _reserved from becoming negative if release is called
+    # more times than reserve (defensive programming).
+    _reserved[product_id] = max(0, _reserved.get(product_id, 0) - qty)
+
+
+def available(product_id):
+    return _stock.get(product_id, 0) - _reserved.get(product_id, 0)
+
+
+def get_reserved(product_id):
+    return _reserved.get(product_id, 0)
+
+
+"""Order service coordinating inventory and payment."""
+
+from inventory import reserve, release
+
+_notifications = []
+_gateway_fail = False
+
+
+def reset():
+    global _notifications, _gateway_fail, _stock, _reserved
+    _notifications = []
+    _gateway_fail = False
+    _stock = {}
+    _reserved = {}
+
+
+def set_gateway_fail(fail):
+    """Configure gateway to simulate payment failure."""
+    global _gateway_fail
+    _gateway_fail = fail
+
+
+def _process_payment(amount):
+    """Simulate payment gateway."""
+    if _gateway_fail:
+        raise ValueError("payment declined")
+    return {"paid": amount}
+
+
+def place_order(product_id, qty, price):
+    """Place an order: reserve inventory, process payment, notify.
+
+    If payment fails, inventory reservation should be rolled back.
+    """
+    reserve(product_id, qty)
+    try:
+        # Limit the try to payment processing so we only rollback when
+        # payment did not complete. Catch all exceptions from payment
+        # to ensure we don't leave a reservation when payment fails.
+        result = _process_payment(qty * price)
+    except Exception:
+        # Roll back the reservation on any payment error.
+        release(product_id, qty)
+        raise
+    _notifications.append({"product": product_id, "qty": qty})
+    return {"status": "confirmed", "payment": result}
+
+
+def get_notifications():
+    return list(_notifications)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If the exception path in place_order always called release(product_id, qty) (i.e., the root cause removed), the stuck reservation failure would not occur.
+Evidence: reserve() does "_reserved[product_id] = _reserved.get(...)+qty" so a fail increments state; _process_payment raises ValueError when _gateway_fail is True causing the exception path; the fix wraps only the payment call in try/except and the except calls release(product_id, qty) so the mutation is undone; inventory.release now clamps with max(0, ...) preventing negative _reserved; however order_service.reset assigns to _stock/_reserved (inventory internals) without importing them — a module-boundary/reset inconsistency remains.
+Judgment: The developer correctly identifies the causal chain and invariant and proposes a fix that matches the described mechanism; the produced code implements the rollback and clamping, but there is a remaining code-level mismatch around reset/module boundaries (so code alignment is only partial).

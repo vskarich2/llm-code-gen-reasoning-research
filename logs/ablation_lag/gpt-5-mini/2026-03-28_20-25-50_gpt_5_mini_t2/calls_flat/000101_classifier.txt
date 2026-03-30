@@ -1,0 +1,184 @@
+=== CALL 000101 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: partial_rollback_b
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:01:38.464863
+LATENCY_MS: 11034
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In order_service.place_order the except block for _process_payment re-raises the ValueError without releasing the inventory reservation. Concretely, reserve(product_id, qty) increments the inventory module's _reserved, but the code never calls release(product_id, qty) when _process_payment raises, leaving inventory._reserved elevated for that product.
+
+## Failure Mechanism
+Example: inventory.add_product('sku1', 5) makes _stock['sku1']==5. set_gateway_fail(True) causes _process_payment to raise. Calling place_order('sku1', 2, price) executes reserve('sku1',2) which sets inventory._reserved['sku1'] == 2, then _process_payment raises. place_order's except re-raises without calling release, so inventory._reserved['sku1'] remains 2. Subsequent calls to available('sku1') return 3 (5 - 2) even though payment failed and the reservation should have been rolled back, causing incorrect availability and potential persistent reservation leakage.
+
+## Broken Invariant
+If place_order raises a payment error, the inventory reservation must be rolled back. Formally: for any product_id and qty, if place_order(product_id, qty, price) raises ValueError due to payment, then inventory.get_reserved(product_id) after the call equals the value before the call (i.e., no net increase in _reserved).
+
+## Fix Strategy
+On payment failure, call release(product_id, qty) before re-raising so the reservation is undone. Also ensure order_service.reset clears the inventory state by invoking inventory.reset() instead of attempting to clear _stock/_reserved locally. The changes add a release(...) call in the except block and replace the incorrect reset logic with a call to the inventory reset function, guaranteeing reservations are reverted when payment fails and that reset actually clears inventory state.
+
+
+
+# Task Description
+Inventory stuck as reserved after payment failure. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Order service coordinating inventory and payment."""
+
+from inventory import reserve, release, reset as inventory_reset
+
+_notifications = []
+_gateway_fail = False
+
+
+def reset():
+    global _notifications, _gateway_fail
+    _notifications = []
+    _gateway_fail = False
+    # Ensure inventory module state is reset as well
+    inventory_reset()
+
+
+def set_gateway_fail(fail):
+    """Configure gateway to simulate payment failure."""
+    global _gateway_fail
+    _gateway_fail = fail
+
+
+def _process_payment(amount):
+    """Simulate payment gateway."""
+    if _gateway_fail:
+        raise ValueError("payment declined")
+    return {"paid": amount}
+
+
+def place_order(product_id, qty, price):
+    """Place an order: reserve inventory, process payment, notify.
+
+    If payment fails, inventory reservation should be rolled back.
+    """
+    reserve(product_id, qty)
+    try:
+        result = _process_payment(qty * price)
+    except ValueError:
+        # Roll back the inventory reservation before propagating the error
+        try:
+            release(product_id, qty)
+        except Exception:
+            # release should not fail under normal conditions; if it does,
+            # do not mask the payment error.
+            pass
+        raise
+    _notifications.append({"product": product_id, "qty": qty})
+    return {"status": "confirmed", "payment": result}
+
+
+def get_notifications():
+    return list(_notifications)
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If place_order always called release when payment failed (i.e., the root cause removed), the stuck-reservation failure would not occur.
+Evidence: place_order calls reserve(product_id, qty) which increments inventory._reserved; _process_payment raises ValueError when _gateway_fail is True; previously the except re-raised without calling release so inventory._reserved stayed increased; the provided fix adds release(product_id, qty) in the except and replaces local reset logic with inventory_reset(), directly undoing the reservation and clearing module state.
+Judgment: The developer's reasoning forms a complete causal chain from reserve → payment exception → missing release → observable reduced availability; the proposed code implements the described rollback and reset changes and aligns with the stated invariant.

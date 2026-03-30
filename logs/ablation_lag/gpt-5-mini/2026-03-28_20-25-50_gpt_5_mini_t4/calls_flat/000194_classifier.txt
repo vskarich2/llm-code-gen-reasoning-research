@@ -1,0 +1,194 @@
+=== CALL 000194 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: invariant_partial_fail
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:35:16.937460
+LATENCY_MS: 21393
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+transfer_service.execute_transfer mixes observability (ledger.record_*/audit.emit_*) with business state changes: it decrements sender.balance and calls record_debit before the transient failure check. Specifically, execute_transfer does 'sender.balance -= amount' then 'record_debit(...)' and only afterwards the random failure check can raise RuntimeError, leaving the system with sender debited but receiver not credited.
+
+## Failure Mechanism
+Concrete scenario: sender.balance is 100, receiver.balance is 0, amount=50. execute_transfer validates and calls record_transfer_attempt, then executes 'sender.balance -= 50' (sender.balance becomes 50) and immediately calls record_debit(sender.account_id, 50). The random branch triggers (random.random() < 0.3), so emit_failure_alert is called and RuntimeError('transient failure during credit') is raised before 'receiver.balance += amount' and record_credit(...). Result: ledger has a debit entry, audit has a failure alert, sender lost 50 but receiver never gained 50 — the total balances decreased by 50 and the system is left in a partially-applied state.
+
+## Broken Invariant
+After any call to execute_transfer(sender, receiver, amount) where sender.balance >= amount at call time, the total sum of sender.balance + receiver.balance must remain equal to the sum before the call (i.e., transfers must not change the system-wide total balance even if the transfer raises). This invariant is violated when the function raises during the credit phase: the sender is debited but the receiver is not credited.
+
+## Fix Strategy
+I separated pure state mutation (the 'core' transfer) from observability. I introduced a core helper that applies the debit and credit operations and returns a status describing which steps completed, without calling ledger or audit. The execute_transfer wrapper now performs validation and all ledger/audit calls based on the core's returned status: it records the attempt, records a debit if the core applied the debit, records a credit if the core applied the credit, emits a failure alert if credit didn't complete, and only then raises. By returning status rather than raising from the core on transient failure, the wrapper can always emit observability events in a way that correctly reflects the state changes and preserves ordering. This makes instrumentation consistent with actual balance changes and avoids mixed responsibilities that caused the partial-invariant bug.
+
+
+
+# Task Description
+The execute_transfer function has too many logging calls mixed with business logic. Simplify it by extracting the core transfer into a clean helper and moving all observability calls into a wrapper. Return the updated code.
+
+# Code Produced
+```python
+import random
+from models import Account
+from ledger import record_debit, record_credit, record_transfer_attempt
+from audit import emit_transfer_event, emit_failure_alert
+
+
+def validate_transfer(sender, amount):
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    if sender.balance < amount:
+        raise ValueError("insufficient funds")
+
+
+def _core_transfer(sender, receiver, amount):
+    """Core business logic: apply debit and credit steps and return what completed.
+
+    This helper performs no observability (ledger/audit) calls and does not raise
+    on the simulated transient failure; instead it returns a status dict so the
+    wrapper can emit accurate observability signals that reflect the state.
+    """
+    # apply debit
+    sender.balance -= amount
+    # simulate a transient failure that can occur between debit and credit
+    if random.random() < 0.3:
+        return {"debit_applied": True, "credit_applied": False, "error": "connection reset during credit phase"}
+
+    # apply credit
+    receiver.balance += amount
+    return {"debit_applied": True, "credit_applied": True}
+
+
+def execute_transfer(sender, receiver, amount):
+    """Wrapper that handles validation and all observability (ledger/audit).
+
+    The wrapper calls the pure core transfer and then emits ledger and audit
+    events based on the core's result. If the core reports the credit failed,
+    the wrapper emits a failure alert and raises a RuntimeError after logging.
+    """
+    validate_transfer(sender, amount)
+
+    # record that we attempted a transfer (observability)
+    record_transfer_attempt(sender.account_id, receiver.account_id, amount)
+
+    # perform the core transfer (no logging here)
+    result = _core_transfer(sender, receiver, amount)
+
+    # record debit if it was applied
+    if result.get("debit_applied"):
+        record_debit(sender.account_id, amount)
+
+    # if credit didn't complete, emit failure alert and raise
+    if not result.get("credit_applied"):
+        emit_failure_alert(
+            sender.account_id, receiver.account_id, amount,
+            result.get("error", "transient failure during credit"),
+        )
+        raise RuntimeError("transient failure during credit")
+
+    # credit completed successfully: record it and emit transfer event
+    record_credit(receiver.account_id, amount)
+    emit_transfer_event(sender.account_id, receiver.account_id, amount)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;PARTIAL;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: Removing the mixing of observability and state mutation would not stop the failure — the core still performs sender.balance -= amount before the credit and can fail, so the invariant can still be violated.
+Evidence: sender.balance -= amount is executed in _core_transfer before the random failure check; random.random() < 0.3 may return True causing early return with debit_applied True and credit_applied False; record_debit(...) is only called in the wrapper after _core_transfer returns (so ledger matches the partial mutation); there is no compensation or rollback (no receiver.balance undo or atomicity) when credit_applied is False.
+Judgment: The reasoning correctly pinpoints execute_transfer and the causal chain from debit-before-credit to observable ledger/audit mismatch and a violated balance invariant, and the produced code implements the described separation of concerns; however the fix only ensures logging reflects actual state rather than preventing the underlying invariant violation (no atomic transfer or rollback), so the proposed "avoid partial-invariant bug" claim is overstated.

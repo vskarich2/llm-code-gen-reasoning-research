@@ -1,0 +1,288 @@
+=== CALL 000106 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: partial_rollback_c
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:07:19.926853
+LATENCY_MS: 55910
+
+--- PROMPT ---
+Inventory and audit corrupted after payment failure. Fix. Return the updated code.
+
+## Codebase (3 files)
+
+### FILE 1/3: code_snippets_v2/partial_rollback_c/inventory.py ###
+```python
+"""Inventory management with reservation tracking."""
+
+_stock = {}
+_reserved = {}
+
+
+def reset():
+    global _stock, _reserved
+    _stock = {}
+    _reserved = {}
+
+
+def add_product(product_id, quantity):
+    _stock[product_id] = _stock.get(product_id, 0) + quantity
+    _reserved.setdefault(product_id, 0)
+
+
+def reserve(product_id, qty):
+    avail = _stock.get(product_id, 0) - _reserved.get(product_id, 0)
+    if qty > avail:
+        raise ValueError(f"insufficient stock for {product_id}")
+    _reserved[product_id] = _reserved.get(product_id, 0) + qty
+
+
+def release(product_id, qty):
+    _reserved[product_id] = _reserved.get(product_id, 0) - qty
+
+
+def available(product_id):
+    return _stock.get(product_id, 0) - _reserved.get(product_id, 0)
+
+
+def get_reserved(product_id):
+    return _reserved.get(product_id, 0)
+```
+
+### FILE 2/3: code_snippets_v2/partial_rollback_c/order_service.py ###
+```python
+"""Order service: reserve -> reasoning_evaluator_audit -> pay -> notify."""
+
+from inventory import reserve, release
+from payment import process, add_audit_entry, remove_audit_entry
+from payment import get_audit_log, set_gateway_fail
+
+_notifications = []
+
+
+def reset():
+    global _notifications, _stock, _reserved, _gateway_fail, _audit_log
+    _notifications = []
+    _stock = {}
+    _reserved = {}
+    _gateway_fail = False
+    _audit_log = []
+
+
+def place_order(product_id, qty, price):
+    """Place order: reserve inventory, log reasoning_evaluator_audit, process payment, notify.
+
+    If payment fails, must release inventory AND remove reasoning_evaluator_audit entry.
+    """
+    order_id = f"ORD-{product_id}-{qty}"
+    reserve(product_id, qty)
+    add_audit_entry({"order_id": order_id, "product": product_id, "qty": qty})
+    try:
+        result = process(qty * price, order_id)
+    except ValueError:
+        raise  # BUG: re-raises without rolling back reservation or reasoning_evaluator_audit entry
+    _notifications.append({"order_id": order_id, "status": "confirmed"})
+    return {"status": "confirmed", "payment": result}
+
+
+def retry_payment(product_id, qty, price):
+    """Trap: adding retry on payment makes partial state worse."""
+    order_id = f"ORD-{product_id}-{qty}"
+    for attempt in range(3):
+        try:
+            return process(qty * price, order_id)
+        except ValueError:
+            continue
+    return None
+
+
+def get_notifications():
+    return list(_notifications)
+```
+
+### FILE 3/3: code_snippets_v2/partial_rollback_c/payment.py ###
+```python
+"""Payment gateway simulation."""
+
+_gateway_fail = False
+_audit_log = []
+
+
+def reset():
+    global _gateway_fail, _audit_log
+    _gateway_fail = False
+    _audit_log = []
+
+
+def set_gateway_fail(fail):
+    global _gateway_fail
+    _gateway_fail = fail
+
+
+def process(amount, order_id):
+    """Process payment. Raises on failure."""
+    if _gateway_fail:
+        raise ValueError("payment declined")
+    return {"paid": amount, "order_id": order_id}
+
+
+def add_audit_entry(entry):
+    """Add an entry to the payment reasoning_evaluator_audit log."""
+    _audit_log.append(entry)
+
+
+def remove_audit_entry(order_id):
+    """Remove reasoning_evaluator_audit entries for a given order."""
+    global _audit_log
+    _audit_log = [e for e in _audit_log if e.get("order_id") != order_id]
+
+
+def get_audit_log():
+    return list(_audit_log)
+```
+
+You are implementing a STRICT reasoning + code generation procedure designed to REDUCE reasoning-execution mismatch.
+
+This is NOT a formatting task. This is a TWO-PASS reasoning process with adversarial verification.
+
+You MUST follow the procedure exactly.
+
+Return a SINGLE valid JSON object. No text outside JSON. No markdown fences.
+
+# GOAL
+
+Fix the bug AND ensure your reasoning is causally correct and robust to failure.
+
+You are required to:
+- identify the correct mechanism
+- challenge your own hypothesis
+- verify your fix against failure scenarios
+
+# PROCEDURE (MANDATORY)
+
+## STEP 1 — DIAGNOSE (PRIMARY HYPOTHESIS)
+
+Identify:
+
+- root_cause:
+  Name the exact function + variable + operation causing the bug.
+  Must describe a causal relationship (not just "missing X").
+
+- failure_mechanism:
+  Give a concrete scenario:
+  cause → mutation/event → propagation → observable failure
+
+- broken_invariant:
+  A specific, testable property that is violated.
+
+## STEP 2 — ALTERNATIVE HYPOTHESIS (CRITICAL)
+
+Propose ONE alternative explanation for the bug.
+
+- What else could plausibly be the cause?
+- Why might your primary hypothesis be wrong?
+
+Then explicitly reject it:
+
+- Why is your original diagnosis more correct?
+- What evidence in the code supports this?
+
+This step is REQUIRED. Do not skip.
+
+## STEP 3 — PLAN FIX
+
+Describe:
+
+- fix_strategy:
+  What exact change you will make
+  Why it breaks the causal chain
+
+Must reference actual code behavior.
+
+## STEP 4 — CODE
+
+Implement the fix.
+
+Rules:
+- Modify ONLY necessary files
+- Return COMPLETE contents for modified files
+- Use "UNCHANGED" for others
+
+## STEP 5 — ADVERSARIAL SELF-CHECK (MANDATORY)
+
+You must actively try to BREAK your own fix.
+
+Answer ALL:
+
+1. Failure Scenario:
+   Describe a concrete scenario where your fix might still fail.
+
+2. Edge Case:
+   Identify a boundary condition (e.g., retries, empty values, ordering).
+
+3. Invariant Check:
+   Verify your invariant holds under:
+   - multiple calls
+   - retries / loops
+   - state reuse
+
+4. Conclusion:
+   - If a flaw is found → REVISE your fix
+   - If no flaw → explain WHY it is safe
+
+Your answer MUST reference your actual code.
+
+# OUTPUT FORMAT (STRICT JSON)
+
+{
+  "root_cause": "<exact function + variable + causal relationship>",
+  "failure_mechanism": "<cause → mutation → propagation → observable failure>",
+  "broken_invariant": "<specific testable property that is violated>",
+  "alternative_hypothesis": "<one alternative explanation for the bug>",
+  "hypothesis_rejection": "<why primary hypothesis is correct, with code evidence>",
+  "fix_strategy": "<what change you will make and why it breaks the causal chain>",
+  "self_check": {
+    "failure_scenario": "<concrete scenario where fix might still fail>",
+    "edge_case": "<boundary condition to test>",
+    "invariant_check": "<verify invariant under multiple calls, retries, state reuse>",
+    "conclusion": "<flaw found → revise, or why it is safe>"
+  },
+  "files": {"<path>": "<complete file contents or UNCHANGED>"}
+}
+
+# RULES
+
+- All fields are REQUIRED and must be substantive
+- No generic statements — ground every claim in actual code
+- Must reference actual variables and behavior
+- Do NOT restate the task
+- Do NOT skip alternative hypothesis
+- Do NOT skip adversarial self-check
+- For files you did NOT modify, set value to "UNCHANGED"
+- Do NOT include markdown formatting (no ```python blocks) inside file values
+- File values must be raw Python source code, not markdown
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "order_service.place_order: the except ValueError: block re-raises the caught exception without calling release(product_id, qty) and remove_audit_entry(order_id), causing reserved inventory and the payment audit log to remain mutated after payment failure.",
+  "failure_mechanism": "reserve(product_id, qty) → inventory._reserved[product_id] increased by qty; add_audit_entry(...) → payment._audit_log gains an entry for order_id; process(...) raises ValueError (e.g. gateway failure) → except ValueError re-raises immediately without calling release(...) or remove_audit_entry(...); propagation: reserved count and audit log remain mutated; observable failure: inventory.available(product_id) is reduced by qty and payment.get_audit_log() contains an orphaned entry for order_id after a payment failure.",
+  "broken_invariant": "After a failed payment attempt for order_id, the system must not retain any side effects of the attempted order: specifically, get_reserved(product_id) must equal its pre-order value (i.e., reserved was released) AND payment.get_audit_log() must NOT contain an entry with order_id. This invariant is violated (reserved increased by qty and audit entry present) when process raises and place_order re-raises without rollback.",
+  "alternative_hypothesis": "The corruption could be caused by the payment.remove_audit_entry implementation failing silently (e.g., using a different order_id format or filtering incorrectly), so even if place_order attempted a rollback it would not remove the audit entry.",
+  "hypothesis_rejection": "The primary hypothesis (missing rollback in place_order) is more likely because the code actually never calls remove_audit_entry on the failure path. Evidence: place_order calls add_audit_entry(...) immediately after reserve(...), then wraps process(...) in try/except and the except block is 'except ValueError: raise' (i.e., it re-raises without calling remove_audit_entry or release). Thus a rollback action is never invoked. The remove_audit_entry function in payment.py exists and correctly filters entries by 'order_id' (see payment.remove_audit_entry implementation), so the absence of a call is the direct cause, not a faulty remove function.",
+  "fix_strategy": "Ensure place_order performs compensating actions when payment processing fails: specifically, in the except path call release(product_id, qty) and remove_audit_entry(order_id) before re-raising the original exception. Also fix reset() in order_service to call the module-level resets (inventory.reset() and payment.reset()) so tests or callers that call order_service.reset() get a clean state. This breaks the causal chain because on process failure the code will now explicitly undo the two mutations (inventory._reserved and payment._audit_log) that were made prior to attempting payment.",
+  "self_check": {
+    "failure_scenario": "If release(product_id, qty) or remove_audit_entry(order_id) themselves raise an exception during rollback, the original exception could be lost or rollback incomplete. For example, if inventory._reserved is concurrently changed to a lower value before rollback (in a multi-threaded environment), release may make reserved negative or raise in a different implementation. In the provided codebase release simply subtracts without validation, so it won't raise, but it could produce an inconsistent negative value if concurrent modifications occur.",
+    "edge_case": "A caller that uses retry_payment instead of place_order will leave the reservation and audit entry in place if they call add_audit_entry separately — retry_payment only attempts payment without performing reservation/audit/rollback logic. Also, if place_order is modified to perform retries around process() (i.e., call process multiple times inside place_order), care must be taken to rollback only after exhausting attempts. Current fix rolls back on any exception thrown from process during place_order's single attempt.",
+    "invariant_check": "Under the modified code: \n- multiple calls: calling place_order that fails will release the reserved qty and remove audit entry; repeated failing calls do not accumulate reserved qty or audit entries because each failed call performs the same compensations. \n- retries / loops: place_order itself performs a single process attempt; if process fails and raises, the code will call release(...) and remove_audit_entry(...) once and then re-raise. If a future call tries again (a new place_order), it will create a new order_id and proceed. \n- state reuse: order_service.reset() now calls inventory.reset() and payment.reset(), clearing module-level state for inventory and payment so subsequent tests/calls start from a clean state. \nThese behaviors follow from the code: reserve() then add_audit_entry(...) are explicitly compensated by release(...) and remove_audit_entry(...) in the except handler, and reset() now delegates to inventory.reset() and payment.reset().",
+    "conclusion": "No flaw requiring further code changes was found for the single-attempt place_order flow: the fix deterministically undoes both mutations (inventory reservation and audit entry) on any payment exception, preserving the invariant. The remaining risk is concurrent modification or different call patterns (e.g., retry logic inside place_order or other modules that manipulate inventory/audit concurrently). Those are outside the scope of the current single-threaded code; if concurrency is required, further synchronization or transactional mechanisms are needed. Given the current code, the fix is safe."
+  },
+  "files": {
+    "code_snippets_v2/partial_rollback_c/order_service.py": "\"\"\"Order service: reserve -> reasoning_evaluator_audit -> pay -> notify.\"\"\"\n\nimport inventory\nimport payment\nfrom inventory import reserve, release\nfrom payment import process, add_audit_entry, remove_audit_entry\n\n_notifications = []\n\n\ndef reset():\n    global _notifications\n    _notifications = []\n    # Ensure module-level state in inventory and payment is reset\n    inventory.reset()\n    payment.reset()\n\n\ndef place_order(product_id, qty, price):\n    \"\"\"Place order: reserve inventory, log reasoning_evaluator_audit, process payment, notify.\n\n    If payment fails, must release inventory AND remove reasoning_evaluator_audit entry.\n    \"\"\"\n    order_id = f\"ORD-{product_id}-{qty}\"\n    reserve(product_id, qty)\n    add_audit_entry({\"order_id\": order_id, \"product\": product_id, \"qty\": qty})\n    try:\n        result = process(qty * price, order_id)\n    except Exception:\n        # Roll back the side effects of reserve and add_audit_entry on any payment error.\n        # Attempt both rollbacks even if one raises; preserve original exception by re-raising.\n        try:\n            release(product_id, qty)\n        except Exception:\n            # Suppress rollback errors to avoid masking the original payment exception.\n            pass\n        try:\n            remove_audit_entry(order_id)\n        except Exception:\n            pass\n        raise\n    _notifications.append({\"order_id\": order_id, \"status\": \"confirmed\"})\n    return {\"status\": \"confirmed\", \"payment\": result}\n\n\ndef retry_payment(product_id, qty, price):\n    \"\"\"Trap: adding retry on payment makes partial state worse.\"\"\"\n    order_id = f\"ORD-{product_id}-{qty}\"\n    for attempt in range(3):\n        try:\n            return process(qty * price, order_id)\n        except ValueError:\n            continue\n    return None\n\n\ndef get_notifications():\n    return list(_notifications)\n",
+    "code_snippets_v2/partial_rollback_c/inventory.py": "UNCHANGED",
+    "code_snippets_v2/partial_rollback_c/payment.py": "UNCHANGED"
+  }
+}

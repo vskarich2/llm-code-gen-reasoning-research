@@ -1,0 +1,158 @@
+=== CALL 000144 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: wrong_condition_c
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:25:33.986220
+LATENCY_MS: 18732
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+limiter.should_allow: the return expression uses 'not expired and under_limit or exempt' where the boolean operator precedence causes 'exempt' to be OR'ed with the left-hand expression rather than being grouped with 'under_limit'. This lets exempt=True short-circuit the whole expression even when expired=True.
+
+## Failure Mechanism
+Cause → The return expression is written as: not expired and under_limit or exempt. Mutation/Event → Python evaluates 'and' before 'or', so the expression is parsed as ((not expired) and under_limit) or exempt. Propagation → When expired is True and exempt is True, ((not expired) and under_limit) evaluates to False but 'or exempt' yields True. Observable failure → An expired token for an exempt client is allowed (should be rejected), causing requests with expired timestamps from exempt clients to be permitted.
+
+## Broken Invariant
+For any client: if is_expired(timestamp, now, window_seconds) == True then should_allow(...) must be False. This invariant is violated when an exempt client with an expired token is allowed (returns True).
+
+## Fix Strategy
+Change the boolean expression in limiter.should_allow to enforce the intended grouping: (not expired) and (under_limit or exempt). This ensures expiration is evaluated as a required condition (if expired then False) and exemption only affects the rate-limit check, not expiration. The change is limited to replacing the return expression with an explicit parenthesized expression to break the causal chain that allowed exempt clients to bypass expiration.
+
+
+## Self-Check
+{'failure_scenario': "If future edits change the semantics of is_expired (for example flipping sign or returning non-boolean values), the explicit grouping (not expired) and (under_limit or exempt) might behave unexpectedly. Concretely, if is_expired starts returning integers (0/1) or None, 'not expired' could yield booleans opposite to intent.", 'edge_case': "Boundary condition where now - timestamp == window_seconds. Current is_expired uses (now - timestamp) > window_seconds (strictly greater). If equal, token is considered not expired. This is a policy decision and not changed by this fix, but should be tested (requests at exactly window end). Also test exempt_list being empty or None; is_exempt expects an iterable, passing None would raise TypeError in 'client_id in exempt_list'. Middleware currently passes a set so it's fine.", 'invariant_check': "Invariant: if expired==True then should_allow returns False. Tests: multiple calls — middleware only increments count when should_allow is True. For exempt client with unexpired token: under_limit may be False but exempt True → result True, and middleware will increment count. For exempt client with expired token: expired True → not expired == False → False and (...) == False → middleware will NOT increment count and request rejected. Retries: repeated calls within same window behave consistently because first_seen and count are used consistently; state reuse: client_states is updated only on allowed paths, so blocked requests don't mutate state. The updated expression enforces the invariant across these sequences.", 'conclusion': "No flaw found in the specific fix: changing the return to 'return (not expired) and (under_limit or exempt)' directly addresses the operator-precedence bug and enforces the required invariant that expired tokens are always rejected regardless of exemption. The remaining risks are external (changes to is_expired return type or middleware passing None for exempt_list). If desired, additional hardening could validate input types or coerce booleans, but that is outside the scope of this targeted fix."}
+
+
+# Task Description
+Expired tokens still allowed for exempt users. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Core rate limiter logic."""
+
+from policy import is_expired, is_under_limit, is_exempt
+
+
+def should_allow(client_id, count, limit, timestamp, now,
+                 window_seconds, exempt_list):
+    """Decide whether to allow a request.
+
+    Allow if:
+      - token is not expired AND (under limit OR exempt)
+
+    Exempt clients bypass the rate limit even if over it,
+    but expired tokens are always rejected.
+    """
+    expired = is_expired(timestamp, now, window_seconds)
+    under_limit = is_under_limit(count, limit)
+    exempt = is_exempt(client_id, exempt_list)
+
+    # Enforce the intended grouping explicitly: expiration is required,
+    # exemption only affects the under_limit check.
+    return (not expired) and (under_limit or exempt)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;CONFOUNDING_LOGIC
+HIGH
+Counterfactual: If the operator-precedence grouping were fixed (expiration required before exemption), expired tokens would no longer be allowed for exempt clients.
+Evidence: expired = is_expired(...) assigned from policy; under_limit = is_under_limit(...); exempt = is_exempt(...); Python precedence: 'and' binds tighter than 'or', so original "not expired and under_limit or exempt" parsed as ((not expired) and under_limit) or exempt allowing exempt=True to short-circuit; updated return "(not expired) and (under_limit or exempt)" enforces expiration as a gating condition.
+Judgment: The developer's reasoning is precise, fully traces cause→evaluation→observable failure, and the proposed parenthesized fix is correctly implemented in code; the self-check notes sensible edge cases but do not change the correctness of this targeted fix.

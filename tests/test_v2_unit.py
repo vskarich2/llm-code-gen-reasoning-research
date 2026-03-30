@@ -129,7 +129,7 @@ def test_parse_fenced_json():
 def test_parse_empty_response():
     result = parse_generation_v2("", "baseline_v2")
     assert result.parse_status == "failed"
-    assert result.parse_error == "empty response"
+    assert result.parse_error == "empty_response"
 
 
 def test_parse_missing_files():

@@ -1,0 +1,213 @@
+=== CALL 000217 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: check_then_act
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:59:26.369990
+LATENCY_MS: 22593
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+In make_withdraw_steps, the step_act closure relied on the cached result['approved'] value set earlier by step_check and unconditionally called do_withdraw when that cached flag was True. The causal relationship is: step_check sets result['approved'] based on a moment-in-time check_balance(name, amount); step_act then uses that stale result['approved'] instead of re-checking the account, so an interleaving of two step_check calls can set result['approved'] True for both withdrawals and both step_act calls will withdraw using the stale flag.
+
+## Failure Mechanism
+Concrete scenario using the code: sequentially run run_steps([(check_a, ()), (check_b, ()), (act_a, ()), (act_b, ())]) with alice starting at 100. check_a sets result['approved']=True (100 >= 80). check_b then sets its own result['approved']=True (still 100 >= 80). act_a reads its result['approved'] (True) and calls do_withdraw('alice', 80), leaving balance 20. act_b then reads its cached result['approved'] (also True) and calls do_withdraw('alice', 80) again, leaving balance -60. The bug manifests because step_act used the earlier cached approval rather than consulting the current _accounts state via check_balance before debiting.
+
+## Broken Invariant
+After any sequence of check/act steps produced by make_withdraw_steps for withdrawals, get_balance(name) must never be negative. Specifically: for any account name and non-negative amount, executing any interleaving of the check and act steps returned by make_withdraw_steps must preserve get_balance(name) >= 0.
+
+## Fix Strategy
+I changed the step_act closure so it does not act on the stale result['approved'] flag; instead it re-evaluates the current account state by calling check_balance(name, amount) immediately before calling do_withdraw. This ensures the ACT consults the current balance and only debits when there are sufficient funds. The modification prevents the interleaving scenario where two checks both see sufficient funds but only the first debit should succeed.
+
+
+# Task Description
+Under interleaving, two withdrawals of 80 from balance=100 both succeed, leaving -60. Fix so balance never goes negative.
+
+# Code Produced
+```python
+ """Bank with non-atomic check-then-act withdrawal, simulated via steps."""
+
+_accounts = {}
+
+
+def reset():
+    _accounts.clear()
+
+
+def create_account(name, balance):
+    _accounts[name] = balance
+
+
+def get_balance(name):
+    return _accounts.get(name, 0)
+
+
+def check_balance(name, amount):
+    """CHECK: is balance sufficient?"""
+    return _accounts.get(name, 0) >= amount
+
+
+def do_withdraw(name, amount):
+    """ACT: decrement balance. Assumes caller verified."""
+    _accounts[name] = _accounts.get(name, 0) - amount
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def make_withdraw_steps(name, amount):
+    """Split withdrawal into separate check and act steps.
+
+    The ACT must consult current state before debiting to avoid acting on
+    a stale approval from a prior CHECK.
+    """
+    # keep an approval flag for the CHECK step to report, but do not let
+    # the ACT blindly trust that cached flag
+    result = {"approved": False}
+
+    def step_check():
+        result["approved"] = check_balance(name, amount)
+        return ("check", result["approved"])
+
+    def step_act():
+        # Re-check current balance immediately before withdrawing so
+        # the ACT uses up-to-date state instead of any previously cached
+        # approval that may be stale due to interleaving.
+        allowed = check_balance(name, amount)
+        if allowed:
+            do_withdraw(name, amount)
+            result["approved"] = True
+        else:
+            result["approved"] = False
+        return ("act", result["approved"])
+
+    return step_check, step_act
+
+
+def sequential_withdrawals():
+    """Two withdrawals of 80 from balance=100. Sequential: second denied."""
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (act_a, ()), (check_b, ()), (act_b, ())])
+    return get_balance("alice")
+
+
+def interleaved_withdrawals():
+    """Two withdrawals of 80, interleaved: fixed — second denied."""
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (check_b, ()), (act_a, ()), (act_b, ())])
+    return get_balance("alice")
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;TEMPORAL_ORDERING
+HIGH
+Counterfactual: If the ACT did not rely on a cached/stale result['approved'] (i.e., rechecked balance at act time), the double-withdraw interleaving would not allow the second withdrawal to proceed and the failure would not occur.
+Evidence: step_check sets result["approved"] = check_balance(name, amount); original failure arises because ACT previously used that cached result to call do_withdraw(name, amount); do_withdraw mutates _accounts[name] by subtracting amount; run_steps([(check_a,()),(check_b,()),(act_a,()),(act_b,())]) shows both checks can read True then both acts withdraw; fixed code replaces trust in result with allowed = check_balance(name, amount) in step_act and only calls do_withdraw when allowed.
+Judgment: The developer gives a precise, code-grounded causal chain from the stale cached approval to the negative balance and specifies a targeted fix (re-check before acting) that the produced code implements; reasoning and fix are correct and aligned.

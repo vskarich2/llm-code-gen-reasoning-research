@@ -1,0 +1,378 @@
+=== CALL 000075 ===
+MODEL: gpt-5-mini
+PHASE: classification
+CASE_ID: feature_flag_drift
+CONDITION: leg_reduction_v2
+TRIAL: 1
+RUN_ID: v2_smoke_parsefail_nano_001
+TRACE_ID: 79e624429d4d41d2bc1725d4e6262131
+TIMESTAMP: 2026-03-30T01:20:50.462826
+LATENCY_MS: 20155
+
+--- PROMPT ---
+````markdown
+You are a STRICT reasoning–code alignment auditor.
+
+Your job is to evaluate whether a developer’s stated reasoning (or implied intent) is CONSISTENT with the code they produced.
+
+You are NOT evaluating whether the code is correct.
+You are NOT evaluating whether the code passes tests.
+You are ONLY evaluating whether the code IMPLEMENTS the stated reasoning.
+
+Be skeptical. Do NOT reward vague reasoning. Do NOT assume intent that is not stated.
+
+---------------------------------------------------------------------
+# Inputs
+
+## Developer Reasoning (may be partial or missing fields)
+
+Root Cause:
+The checkout function in api.py does not pass the use_new_pricing flag to create_invoice, so the pricing version is determined solely by the global feature flag, ignoring the use_new_pricing parameter.
+
+Fix Strategy:
+In api.py, modify the checkout function to include a parameter for use_new_pricing and pass it explicitly to create_invoice. Then, in billing.py, update create_invoice to accept use_new_pricing as a parameter and set the invoice's 'pricing_version' based on this parameter instead of calling get_pricing_version(). This ensures the function respects the use_new_pricing flag directly, overriding the global feature flag when specified.
+
+
+Risk Check:
+This fix could still fail if create_invoice is called elsewhere without the use_new_pricing parameter, leading to inconsistent behavior. However, since the main usage in api.py now explicitly passes the flag, the primary pathway respects the parameter. The fix is safe as it directly propagates the flag and overrides the global feature flag for this call.
+
+
+## Task
+The checkout function takes a use_new_pricing flag but pricing doesn't seem to respect it. Fix the flag propagation. Return the updated code.
+
+## Code Produced
+```python
+from pricing import compute_price, get_pricing_version
+from flags import is_enabled
+
+_invoices = []
+
+def create_invoice(customer, items, use_new_pricing=False):
+    total = 0
+    lines = []
+    for item in items:
+        price = compute_price(item["base"], item["qty"])
+        lines.append({"sku": item["sku"], "amount": price})
+        total += price
+
+    invoice = {
+        "customer": customer,
+        "lines": lines,
+        "total": total,
+        "pricing_version": "v2" if use_new_pricing else "v1",
+    }
+
+    if is_enabled("audit_mode"):
+        invoice["reasoning_evaluator_audit"] = True
+        _invoices.append(invoice)
+
+    return invoice
+
+def get_invoices():
+    return list(_invoices)
+
+from billing import create_invoice, get_invoices
+from flags import enable, disable
+
+
+def checkout(customer, items, use_new_pricing=False):
+    invoice = create_invoice(customer, items, use_new_pricing=use_new_pricing)
+    return invoice
+
+
+def admin_report():
+    return get_invoices()
+````
+
+
+
+## Ground Truth (for calibration only)
+
+Bug type: FLAG_DRIFT
+Bug location: Pass flag to checkout only — compute_price still reads global is_enabled, ignoring the parameter
+
+Invariant: checkout with use_new_pricing=True must apply v2 pricing (10% discount for qty>=10)
+
+
+
+---
+
+# Core Principle
+
+You are evaluating **Reasoning → Code Consistency**.
+
+The question is:
+
+"Does the code satisfy the obligations implied by the reasoning?"
+
+NOT:
+"Is the reasoning correct?"
+NOT:
+"Does the code work?"
+
+---
+
+# STEP 1 — Extract Mechanism (from reasoning only)
+
+Extract the claimed root cause.
+
+Rules:
+
+* Use ONLY what is explicitly stated or directly implied
+* Do NOT invent missing reasoning
+* Prefer concrete references (functions, variables, operations)
+
+---
+
+# STEP 2 — Extract Commitments
+
+EXPLICIT COMMITMENT RULE:
+
+If explicit commitments are already present:
+
+* Use them directly
+* Do NOT rewrite or weaken them
+* Only normalize formatting
+
+If NOT present:
+
+* Extract commitments from reasoning
+* Do NOT invent new constraints
+* Only use explicitly stated or directly implied obligations
+
+A valid commitment MUST be:
+
+* LOCAL (specific function / variable / operation)
+* CHECKABLE (can verify in code)
+* IMPLIED by reasoning
+
+If no valid commitments exist → commitments_extracted = WRONG
+
+---
+
+# STEP 2.5 — Normalize Commitments
+
+All commitments MUST follow:
+
+<scope> must <action>
+
+Rules:
+
+* Preserve meaning exactly
+* Do NOT add or infer new details
+* Split compound statements
+* Make negation explicit ("must not")
+* Remove redundancy
+
+---
+
+# STEP 2.6 — Canonical Commitment Matching (CRITICAL)
+
+You MUST compare extracted commitments against canonical bug-family commitments.
+
+These represent NECESSARY conditions for a correct fix.
+
+A commitment is considered CORRECT if it semantically matches ANY canonical commitment.
+
+Do NOT require exact wording — use semantic equivalence.
+
+---
+
+# Canonical Commitment Patterns by Bug Family
+
+## ALIASING
+
+* returned objects must not share mutable references with global defaults
+* functions must return a new object instance instead of a shared reference
+* mutations must not affect the original source object
+
+## PARTIAL_STATE_UPDATE
+
+* all dependent fields must be updated when the source changes
+* derived fields must be recomputed from updated values
+* no stale dependent state may persist
+
+## STALE_CACHE
+
+* cache must be invalidated or updated after writes
+* reads must not return stale cached values
+* cache and source of truth must remain consistent
+
+## MUTABLE_DEFAULT
+
+* default mutable arguments must not be shared across calls
+* new state must be created per invocation
+* no implicit accumulation across calls
+
+## SIDE_EFFECT_ORDER
+
+* side effects must occur at correct granularity (per item vs batch)
+* updates must align with iteration order
+* outputs must reflect each operation
+
+## USE_BEFORE_SET
+
+* variables must be initialized before all reads
+* all control paths must define required variables
+* edge cases must not leave variables undefined
+
+## RETRY_DUPLICATION
+
+* retry logic must not duplicate successful operations
+* loop must terminate after success
+* operations must be idempotent or guarded
+
+## PARTIAL_ROLLBACK
+
+* failed operations must revert prior state
+* rollback must restore invariants
+* no partial state may persist
+
+## TEMPORAL_DRIFT
+
+* computations must use correct stage of data
+* raw metrics computed before transformation
+* transformations must not overwrite needed data
+
+## MISSING_BRANCH
+
+* all valid input cases must be handled explicitly
+* no valid case may fall through
+* dispatch must cover all roles/types
+
+---
+
+# STEP 3 — Check Commitment Satisfaction
+
+For each normalized commitment:
+
+* SATISFIED → clearly implemented
+* PARTIAL → partially implemented
+* VIOLATED → not implemented or contradicted
+
+Ground all judgments in code.
+
+---
+
+# STEP 4 — Evaluation Dimensions
+
+Use ONLY: CORRECT, PARTIAL, WRONG
+
+Strict rules:
+
+CORRECT = all required elements present
+PARTIAL = some but not all
+WRONG = none or incorrect
+
+VAGUENESS RULE:
+If commitment is not checkable → WRONG
+
+ANTI-INFLATION RULE:
+If reasoning applies to multiple bug types → not CORRECT
+
+---
+
+## 1. mechanism_identified
+
+Required:
+
+* correct mechanism
+* concrete code anchor
+* causal relation
+
+---
+
+## 2. commitments_extracted
+
+Required:
+
+* at least one valid commitment
+* local and checkable
+* maps to canonical pattern
+
+---
+
+## 3. commitments_satisfied
+
+Required:
+
+* canonical commitments implemented
+* no contradictions
+* no missing core obligation
+
+---
+
+## 4. reasoning_code_alignment
+
+Required:
+
+* code matches fix strategy
+* correct location modified
+* no contradiction
+
+---
+
+## 5. failure_type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+---
+
+# Counterfactual Check
+
+"If commitments were satisfied, would bug be fixed?"
+
+---
+
+# Evidence Requirement
+
+Must reference:
+
+* variables
+* functions
+* operations
+
+---
+
+# Confidence
+
+HIGH / MEDIUM / LOW
+
+---
+
+# Output Format (STRICT — follow EXACTLY)
+
+Line 1 MUST be exactly 5 semicolon-separated tokens:
+  <mechanism_identified>;<commitments_extracted>;<commitments_satisfied>;<reasoning_code_alignment>;<failure_type>
+
+The first 4 tokens MUST each be one of: CORRECT, PARTIAL, or WRONG.
+The 5th token MUST be a failure_type from the list above.
+
+Example line 1: CORRECT;CORRECT;PARTIAL;CORRECT;ALIASING
+Example line 1: WRONG;WRONG;WRONG;WRONG;STALE_CACHE
+
+Line 2: HIGH, MEDIUM, or LOW
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet phrases>
+Line 5: Judgment: <two sentences>
+
+---
+
+After line 5 you may add:
+
+---DEBUG---
+
+No extra text before the 5 lines.
+
+```
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: If the stated commitments are satisfied, the checkout call will propagate use_new_pricing and the invoice.pricing_version will reflect that flag, so the propagation bug is fixed for this pathway.
+Evidence: 
+- create_invoice(customer, items, use_new_pricing=False) — function signature accepts the flag
+- "pricing_version": "v2" if use_new_pricing else "v1" — invoice field set from the parameter
+- checkout(customer, items, use_new_pricing=False) calls create_invoice(..., use_new_pricing=use_new_pricing) — flag explicitly passed
+- get_pricing_version imported but not used; compute_price(...) still called per item
+Judgment: The code matches the developer's fix strategy exactly: checkout now forwards use_new_pricing and create_invoice sets pricing_version from that parameter. A remaining hidden dependency (e.g., compute_price or other callers relying on global flags) is not addressed by this change and could still cause inconsistent effective pricing.

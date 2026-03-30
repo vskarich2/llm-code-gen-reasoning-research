@@ -1,0 +1,213 @@
+=== CALL 000112 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: check_then_act
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:14:47.153359
+LATENCY_MS: 15638
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+check_balance (function) reading _accounts (variable) without modifying state: make_withdraw_steps.step_check calls check_balance which only observes _accounts, so two interleaved step_check calls both see the original balance and both return approved before any debit occurs — the check-then-act sequence is non-atomic and allows double-approval.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Introduce a reservation (hold) mechanism: add a module-level _reserved mapping and a try_reserve(name, amount) helper that checks available funds (balance - reserved) and, on success, increments the reserved amount. Modify make_withdraw_steps.step_check to call try_reserve instead of the pure check_balance, so an approved check immediately reserves the funds and prevents a subsequent interleaved check from approving. On act, finalize the withdrawal by subtracting from the real balance and releasing the matching reservation. This breaks the race: after the first check reserves 80, the second check sees reduced available balance and will be denied.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure mode: if a check reserves funds but the corresponding act is never executed, the reservation will block those funds indefinitely (a leaked hold). In this codebase/run_steps simulation both check and act steps are always executed in the scenarios shown, so leakage does not occur for the demonstrated cases. I considered adding reservation expiry or explicit cancel semantics, but that would add complexity and is unnecessary for the current tests; therefore I did not revise the fix further.
+
+
+# Task Description
+Under interleaving, two withdrawals of 80 from balance=100 both succeed, leaving -60. Fix so balance never goes negative.
+
+# Code Produced
+```python
+"""Bank with non-atomic check-then-act withdrawal, simulated via steps.
+
+Fixed: checks now reserve funds so interleaved checks cannot both approve the same balance.
+"""
+
+_accounts = {}
+_reserved = {}
+
+
+def reset():
+    _accounts.clear()
+    _reserved.clear()
+
+
+def create_account(name, balance):
+    _accounts[name] = balance
+    _reserved[name] = 0
+
+
+def get_balance(name):
+    return _accounts.get(name, 0)
+
+
+def get_reserved(name):
+    return _reserved.get(name, 0)
+
+
+def check_balance(name, amount):
+    """CHECK: is balance sufficient? (pure read)
+
+    This remains a pure predicate for compatibility; use try_reserve to
+    perform a check that also reserves funds.
+    """
+    return _accounts.get(name, 0) >= amount
+
+
+def try_reserve(name, amount):
+    """Attempt to reserve 'amount' from name's available balance.
+
+    Returns True and increments _reserved[name] on success; returns False
+    and does nothing on failure.
+    """
+    available = _accounts.get(name, 0) - _reserved.get(name, 0)
+    if available >= amount:
+        _reserved[name] = _reserved.get(name, 0) + amount
+        return True
+    return False
+
+
+def do_withdraw(name, amount):
+    """ACT: decrement balance and release corresponding reservation.
+    Assumes caller verified (or reserved) the amount.
+    """
+    # Subtract from real balance
+    _accounts[name] = _accounts.get(name, 0) - amount
+    # Release the reserved amount if present (prevent negative reserved)
+    reserved = _reserved.get(name, 0)
+    release = amount if reserved >= amount else reserved
+    _reserved[name] = max(0, reserved - release)
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def make_withdraw_steps(name, amount):
+    """Split withdrawal into separate check and act steps.
+
+    Fixed: the check step now reserves funds (via try_reserve). This prevents
+    another interleaved check from approving the same funds.
+    """
+    result = {"approved": False}
+
+   
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;PARTIAL;CORRECT;CORRECT;PARTIAL;TEMPORAL_ORDERING
+HIGH
+Counterfactual: If the non-atomic check-then-act (i.e., check_balance doing only reads) were removed (checks became atomic with reservation), the double-approval interleaving would not produce negative balances.
+Evidence: check_balance(name,amount) reads _accounts and returns pure predicate; two interleaved calls can both return True before any subtraction; try_reserve(name,amount) computes available = _accounts.get(name,0) - _reserved.get(name,0) and increments _reserved on success (implements reservation); do_withdraw subtracts from _accounts and then reduces _reserved (finalizes); make_withdraw_steps is claimed to call try_reserve but the provided code for make_withdraw_steps is incomplete/absent so the reservation is not shown wired into the steps.
+Judgment: The developer correctly pinpoints the non-atomic check-then-act on _accounts as the root cause and the reservation approach directly addresses that race, but they failed to state the broken invariant explicitly and the submitted code snippet does not fully show the step_check using try_reserve, so the code/reasoning alignment is only partial.

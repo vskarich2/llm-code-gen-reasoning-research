@@ -1,0 +1,188 @@
+=== CALL 000032 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: effect_order_a
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:44:12.314496
+LATENCY_MS: 21539
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+process_batch() + _snapshots: snapshot() is only called once after the processing loop (snapshot() placed after the for-loop), so _snapshots is appended a single time instead of once per item.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Call snapshot logic for each item processed. Concretely, update process_batch() to append a snapshot after every increment inside the loop (instead of once after the loop). Add a re-entrant lock (threading.RLock) and guard accesses to the shared globals (_counter and _snapshots) to make behavior deterministic and avoid race conditions.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure mode is concurrent access to the module globals causing race conditions. I addressed this by using a re-entrant lock (RLock) and acquiring it around all reads/writes to _counter and _snapshots (including reset, snapshot, get_snapshots, process_batch, and verify_consistency). Another possible issue is non-numeric items in 'items' causing TypeError; that is an input validation issue outside the scope of this fix. Because the locking covers all shared-state accesses, the fix is safe for single-threaded and common multi-threaded use; no further revision was required.
+
+
+# Task Description
+Refactor this event processor for clarity. Return the updated code.
+
+# Code Produced
+```python
+"""Batch processor with per-item snapshots (thread-safe)."""
+
+import threading
+
+_counter = 0
+_snapshots = []
+_lock = threading.RLock()
+
+
+def reset():
+    """Reset counter and snapshots to initial state."""
+    global _counter, _snapshots
+    with _lock:
+        _counter = 0
+        _snapshots = []
+
+
+def snapshot():
+    """Record the current counter value as a snapshot."""
+    with _lock:
+        _snapshots.append(_counter)
+
+
+def get_snapshots():
+    """Return a copy of the recorded snapshots."""
+    with _lock:
+        return list(_snapshots)
+
+
+def process_batch(items):
+    """Process each item: increment counter and snapshot after each item.
+
+    For each item in 'items' the counter is increased by the item value and a snapshot
+    of the new counter value is recorded. Returns the final counter value.
+    """
+    global _counter
+    for item in items:
+        with _lock:
+            _counter += item
+            _snapshots.append(_counter)
+    with _lock:
+        return _counter
+
+
+def verify_consistency():
+    """Return the number of snapshots recorded.
+
+    Intended to be used to confirm that snapshots were recorded per-item.
+    """
+    with _lock:
+        return len(_snapshots)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;WRONG;WRONG;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If snapshot() had been invoked (or _snapshots appended) inside the per-item loop originally, the missing-per-item snapshot failure would not occur.
+Evidence: - process_batch now iterates items and does "_counter += item; _snapshots.append(_counter)" inside the loop, addressing the claimed single-append placement; - snapshot(), reset(), get_snapshots(), verify_consistency all acquire _lock, and process_batch uses _lock for each increment/append, fixing concurrency concerns; - verify_consistency returns len(_snapshots) so the observable failure is a snapshot-count invariant; - developer left "Failure Mechanism" and "Broken Invariant" blank, so propagation to observable failure wasn't documented.
+Judgment: The developer correctly located the misplaced snapshot append and the proposed locking; however they failed to state the testable invariant and the intermediate propagation steps (how a single append turns into the observed mismatch), so the causal chain is incomplete even though the code implements the intended fix.

@@ -132,6 +132,7 @@ class TokenBudgetConfig:
 @dataclass
 class ExecutionConfig:
     num_workers: int = 1
+    worker_stagger_seconds: int = 3
     token_budgets: TokenBudgetConfig = field(default_factory=TokenBudgetConfig)
     import_summary: bool = False
     file_ordering: str = "dependency"
@@ -392,6 +393,7 @@ def _parse_config(raw: dict) -> ExperimentConfig:
     v3_raw = exec_raw.get("v3_pipeline", {})
     execution = ExecutionConfig(
         num_workers=exec_raw.get("num_workers", 1),
+        worker_stagger_seconds=exec_raw.get("worker_stagger_seconds", 3),
         token_budgets=token_budgets,
         import_summary=v3_raw.get("import_summary", False),
         file_ordering=v3_raw.get("file_ordering", "dependency"),

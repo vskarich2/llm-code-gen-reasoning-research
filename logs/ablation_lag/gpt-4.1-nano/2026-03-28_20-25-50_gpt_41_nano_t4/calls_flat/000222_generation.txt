@@ -1,0 +1,143 @@
+=== CALL 000222 ===
+MODEL: gpt-4.1-nano
+PHASE: generation
+CASE_ID: false_fix_deadlock
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:07:13.557814
+LATENCY_MS: 2383
+
+--- PROMPT ---
+Concurrent transfers deadlock. Fix the locking so transfers never deadlock under any interleaving.
+
+## Codebase (1 file)
+
+### FILE 1/1: code_snippets_v2/false_fix_deadlock/resources.py ###
+```python
+"""Resource transfers with lock-ordering deadlock, simulated via steps."""
+
+_locks = {}
+_state = {"A": 100, "B": 100}
+
+
+def reset():
+    _locks.clear()
+    _state["A"] = 100
+    _state["B"] = 100
+
+
+def acquire(resource):
+    """Simulate lock. Raises RuntimeError if already held (deadlock)."""
+    if _locks.get(resource):
+        raise RuntimeError(f"deadlock: {resource} already locked")
+    _locks[resource] = True
+
+
+def release(resource):
+    _locks[resource] = False
+
+
+def get_state():
+    return dict(_state)
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def make_transfer_a_to_b_steps(amount):
+    """Transfer A→B: lock A first, then B."""
+
+    def step_lock_a():
+        acquire("A")
+        return "locked_A"
+
+    def step_lock_b_and_transfer():
+        acquire("B")
+        _state["A"] -= amount
+        _state["B"] += amount
+        release("B")
+        release("A")
+        return "transferred_a_to_b"
+
+    return step_lock_a, step_lock_b_and_transfer
+
+
+def make_transfer_b_to_a_steps(amount):
+    """Transfer B→A: BUG — locks B first, then A (opposite order)."""
+
+    def step_lock_b():
+        acquire("B")
+        return "locked_B"
+
+    def step_lock_a_and_transfer():
+        acquire("A")  # DEADLOCK: A is held by the other transfer
+        _state["B"] -= amount
+        _state["A"] += amount
+        release("A")
+        release("B")
+        return "transferred_b_to_a"
+
+    return step_lock_b, step_lock_a_and_transfer
+
+
+def sequential_transfers():
+    """A→B then B→A. Sequential: works fine."""
+    reset()
+    lock_ab, do_ab = make_transfer_a_to_b_steps(10)
+    lock_ba, do_ba = make_transfer_b_to_a_steps(10)
+    run_steps([
+        (lock_ab, ()), (do_ab, ()),
+        (lock_ba, ()), (do_ba, ()),
+    ])
+    return get_state()
+
+
+def interleaved_transfers():
+    """A→B and B→A interleaved: DEADLOCK."""
+    reset()
+    lock_ab, do_ab = make_transfer_a_to_b_steps(10)
+    lock_ba, do_ba = make_transfer_b_to_a_steps(10)
+    try:
+        run_steps([
+            (lock_ab, ()),   # A→B locks A
+            (lock_ba, ()),   # B→A locks B
+            (do_ab, ()),     # A→B tries to lock B — DEADLOCK
+            (do_ba, ()),     # never reached
+        ])
+        return get_state()
+    except RuntimeError as e:
+        return {"error": str(e)}
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/false_fix_deadlock/resources.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{"root_cause": "The function make_transfer_b_to_a_steps locks resource B first, then resource A, which is the opposite order of make_transfer_a_to_b_steps that locks A first, then B. When concurrent transfers execute in interleaved steps, one thread may lock A while the other locks B, and then each attempts to lock the resource held by the other, causing a deadlock.", "failure_mechanism": "In interleaved_transfers, the first transfer locks A, then the second transfer locks B. When the first transfer proceeds to lock B, it is blocked because B is already locked by the second transfer. Conversely, the second transfer attempts to lock A, which is held by the first transfer, leading both to wait indefinitely for each other, resulting in a deadlock.", "broken_invariant": "The sequence of acquiring locks in transfer steps must always follow a consistent global order to prevent deadlocks, specifically, either always lock A before B or always lock B before A, regardless of transfer direction.", "fix_strategy": "Change make_transfer_b_to_a_steps to acquire resource A before resource B, aligning the lock order with make_transfer_a_to_b_steps. This ensures that both transfer functions acquire locks in the same order, preventing circular wait conditions and thus eliminating deadlocks during concurrent execution.", "files": {"code_snippets_v2/false_fix_deadlock/resources.py": "def make_transfer_b_to_a_steps(amount):\n    \"\"\"Transfer B→A: lock A first, then B.\"\"\"\n\n    def step_lock_a():\n        acquire(\"A\")\n        return \"locked_A\"\n\n    def step_lock_b_and_transfer():\n        acquire(\"B\")\n        _state[\"B\"] -= amount\n        _state[\"A\"] += amount\n        release(\"B\")\n        release(\"A\")\n        return \"transferred_b_to_a\"\n\n    return step_lock_a, step_lock_b_and_transfer\n"}}

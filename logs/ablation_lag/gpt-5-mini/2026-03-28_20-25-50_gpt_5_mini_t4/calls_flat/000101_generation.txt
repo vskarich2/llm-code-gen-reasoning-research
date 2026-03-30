@@ -1,0 +1,138 @@
+=== CALL 000101 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: partial_rollback_b
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:01:21.493860
+LATENCY_MS: 18109
+
+--- PROMPT ---
+Inventory stuck as reserved after payment failure. Fix. Return the updated code.
+
+## Codebase (2 files)
+
+### FILE 1/2: code_snippets_v2/partial_rollback_b/inventory.py ###
+```python
+"""Inventory management with reservation tracking."""
+
+_stock = {}
+_reserved = {}
+
+
+def reset():
+    global _stock, _reserved
+    _stock = {}
+    _reserved = {}
+
+
+def add_product(product_id, quantity):
+    _stock[product_id] = _stock.get(product_id, 0) + quantity
+    _reserved.setdefault(product_id, 0)
+
+
+def reserve(product_id, qty):
+    avail = _stock.get(product_id, 0) - _reserved.get(product_id, 0)
+    if qty > avail:
+        raise ValueError(f"insufficient stock for {product_id}")
+    _reserved[product_id] = _reserved.get(product_id, 0) + qty
+
+
+def release(product_id, qty):
+    _reserved[product_id] = _reserved.get(product_id, 0) - qty
+
+
+def available(product_id):
+    return _stock.get(product_id, 0) - _reserved.get(product_id, 0)
+
+
+def get_reserved(product_id):
+    return _reserved.get(product_id, 0)
+```
+
+### FILE 2/2: code_snippets_v2/partial_rollback_b/order_service.py ###
+```python
+"""Order service coordinating inventory and payment."""
+
+from inventory import reserve, release
+
+_notifications = []
+_gateway_fail = False
+
+
+def reset():
+    global _notifications, _gateway_fail, _stock, _reserved
+    _notifications = []
+    _gateway_fail = False
+    _stock = {}
+    _reserved = {}
+
+
+def set_gateway_fail(fail):
+    """Configure gateway to simulate payment failure."""
+    global _gateway_fail
+    _gateway_fail = fail
+
+
+def _process_payment(amount):
+    """Simulate payment gateway."""
+    if _gateway_fail:
+        raise ValueError("payment declined")
+    return {"paid": amount}
+
+
+def place_order(product_id, qty, price):
+    """Place an order: reserve inventory, process payment, notify.
+
+    If payment fails, inventory reservation should be rolled back.
+    """
+    reserve(product_id, qty)
+    try:
+        result = _process_payment(qty * price)
+    except ValueError:
+        raise  # BUG: re-raises without releasing inventory reservation
+    _notifications.append({"product": product_id, "qty": qty})
+    return {"status": "confirmed", "payment": result}
+
+
+def get_notifications():
+    return list(_notifications)
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/partial_rollback_b/inventory.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/partial_rollback_b/order_service.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "In order_service.place_order, after calling reserve(product_id, qty) (which increments inventory._reserved for that product), the except ValueError block simply re-raises the payment exception instead of calling release(product_id, qty). Because the code never calls release in the payment-failure path, inventory._reserved remains incremented and the reservation is not rolled back.",
+  "failure_mechanism": "Concrete scenario: add_product('A', 10) sets _stock['A']=10. place_order('A', 2, price) calls reserve('A', 2) which sets inventory._reserved['A'] += 2. If _process_payment raises ValueError (payment declined), the except ValueError: raise path in place_order re-raises without calling release('A', 2). As a result get_reserved('A') still returns 2 and available('A') returns 8 less 2 reserved (i.e. 8 - 2 depending on prior state), leaving inventory permanently reserved for a failed order.",
+  "broken_invariant": "If place_order(product_id, qty, price) raises a payment-related ValueError, then the reservation count must be unchanged from before the call (i.e., inventory.get_reserved(product_id) after the exception must equal inventory.get_reserved(product_id) before the call). The current code violates this: after a payment failure the reserved count is increased by qty and not rolled back.",
+  "fix_strategy": "Call release(product_id, qty) when payment fails so the inventory reservation is rolled back before re-raising the payment exception. This directly undoes the earlier reserve(product_id, qty) side-effect on inventory._reserved, restoring the invariant that a failed order does not leave reservations in place. The change is localized to order_service.place_order: on catching ValueError from _process_payment we call release(product_id, qty) and then re-raise.",
+  "files": {
+    "code_snippets_v2/partial_rollback_b/inventory.py": "UNCHANGED",
+    "code_snippets_v2/partial_rollback_b/order_service.py": "\"\"\"Order service coordinating inventory and payment.\"\"\"\n\nfrom inventory import reserve, release\n\n_notifications = []\n_gateway_fail = False\n\n\ndef reset():\n    global _notifications, _gateway_fail, _stock, _reserved\n    _notifications = []\n    _gateway_fail = False\n    _stock = {}\n    _reserved = {}\n\n\ndef set_gateway_fail(fail):\n    \"\"\"Configure gateway to simulate payment failure.\"\"\"\n    global _gateway_fail\n    _gateway_fail = fail\n\n\ndef _process_payment(amount):\n    \"\"\"Simulate payment gateway.\"\"\"\n    if _gateway_fail:\n        raise ValueError(\"payment declined\")\n    return {\"paid\": amount}\n\n\ndef place_order(product_id, qty, price):\n    \"\"\"Place an order: reserve inventory, process payment, notify.\n\n    If payment fails, inventory reservation should be rolled back.\n    \"\"\"\n    reserve(product_id, qty)\n    try:\n        result = _process_payment(qty * price)\n    except ValueError:\n        # Roll back the inventory reservation before propagating the payment error.\n        release(product_id, qty)\n        raise\n    _notifications.append({\"product\": product_id, \"qty\": qty})\n    return {\"status\": \"confirmed\", \"payment\": result}\n\n\ndef get_notifications():\n    return list(_notifications)\n"
+  }
+}

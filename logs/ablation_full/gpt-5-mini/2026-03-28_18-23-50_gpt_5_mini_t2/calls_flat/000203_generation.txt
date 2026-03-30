@@ -1,0 +1,197 @@
+=== CALL 000203 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: config_shadowing
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:55:32.675455
+LATENCY_MS: 27967
+
+--- PROMPT ---
+The background job uses the wrong timeout (5 instead of 30). Fix the configuration. Return the updated code.
+
+## Codebase (3 files)
+
+### FILE 1/3: code_snippets_v2/config_shadowing/defaults.py ###
+```python
+DEFAULTS = {"timeout": 5, "retries": 3}  # BUG: timeout should be 30
+
+
+def get_defaults():
+    return dict(DEFAULTS)
+```
+
+### FILE 2/3: code_snippets_v2/config_shadowing/env_config.py ###
+```python
+_OVERRIDES = {"timeout": 30}
+
+
+def get_config():
+    from defaults import get_defaults
+    cfg = get_defaults()
+    cfg.update(_OVERRIDES)
+    return cfg
+```
+
+### FILE 3/3: code_snippets_v2/config_shadowing/service.py ###
+```python
+from env_config import get_config
+from defaults import get_defaults
+
+
+def handle_request():
+    return {"timeout": get_config()["timeout"], "source": "request"}
+
+
+def run_background_job():
+    return {"timeout": get_defaults()["timeout"], "source": "background"}
+
+
+def run_system_check():
+    return {"request": handle_request(), "background": run_background_job()}
+```
+
+You are implementing a STRICT reasoning + code generation procedure designed to REDUCE reasoning-execution mismatch.
+
+This is NOT a formatting task. This is a TWO-PASS reasoning process with adversarial verification.
+
+You MUST follow the procedure exactly.
+
+Return a SINGLE valid JSON object. No text outside JSON. No markdown fences.
+
+# GOAL
+
+Fix the bug AND ensure your reasoning is causally correct and robust to failure.
+
+You are required to:
+- identify the correct mechanism
+- challenge your own hypothesis
+- verify your fix against failure scenarios
+
+# PROCEDURE (MANDATORY)
+
+## STEP 1 — DIAGNOSE (PRIMARY HYPOTHESIS)
+
+Identify:
+
+- root_cause:
+  Name the exact function + variable + operation causing the bug.
+  Must describe a causal relationship (not just "missing X").
+
+- failure_mechanism:
+  Give a concrete scenario:
+  cause → mutation/event → propagation → observable failure
+
+- broken_invariant:
+  A specific, testable property that is violated.
+
+## STEP 2 — ALTERNATIVE HYPOTHESIS (CRITICAL)
+
+Propose ONE alternative explanation for the bug.
+
+- What else could plausibly be the cause?
+- Why might your primary hypothesis be wrong?
+
+Then explicitly reject it:
+
+- Why is your original diagnosis more correct?
+- What evidence in the code supports this?
+
+This step is REQUIRED. Do not skip.
+
+## STEP 3 — PLAN FIX
+
+Describe:
+
+- fix_strategy:
+  What exact change you will make
+  Why it breaks the causal chain
+
+Must reference actual code behavior.
+
+## STEP 4 — CODE
+
+Implement the fix.
+
+Rules:
+- Modify ONLY necessary files
+- Return COMPLETE contents for modified files
+- Use "UNCHANGED" for others
+
+## STEP 5 — ADVERSARIAL SELF-CHECK (MANDATORY)
+
+You must actively try to BREAK your own fix.
+
+Answer ALL:
+
+1. Failure Scenario:
+   Describe a concrete scenario where your fix might still fail.
+
+2. Edge Case:
+   Identify a boundary condition (e.g., retries, empty values, ordering).
+
+3. Invariant Check:
+   Verify your invariant holds under:
+   - multiple calls
+   - retries / loops
+   - state reuse
+
+4. Conclusion:
+   - If a flaw is found → REVISE your fix
+   - If no flaw → explain WHY it is safe
+
+Your answer MUST reference your actual code.
+
+# OUTPUT FORMAT (STRICT JSON)
+
+{
+  "root_cause": "<exact function + variable + causal relationship>",
+  "failure_mechanism": "<cause → mutation → propagation → observable failure>",
+  "broken_invariant": "<specific testable property that is violated>",
+  "alternative_hypothesis": "<one alternative explanation for the bug>",
+  "hypothesis_rejection": "<why primary hypothesis is correct, with code evidence>",
+  "fix_strategy": "<what change you will make and why it breaks the causal chain>",
+  "self_check": {
+    "failure_scenario": "<concrete scenario where fix might still fail>",
+    "edge_case": "<boundary condition to test>",
+    "invariant_check": "<verify invariant under multiple calls, retries, state reuse>",
+    "conclusion": "<flaw found → revise, or why it is safe>"
+  },
+  "files": {"<path>": "<complete file contents or UNCHANGED>"}
+}
+
+# RULES
+
+- All fields are REQUIRED and must be substantive
+- No generic statements — ground every claim in actual code
+- Must reference actual variables and behavior
+- Do NOT restate the task
+- Do NOT skip alternative hypothesis
+- Do NOT skip adversarial self-check
+- For files you did NOT modify, set value to "UNCHANGED"
+- Do NOT include markdown formatting (no ```python blocks) inside file values
+- File values must be raw Python source code, not markdown
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "service.run_background_job uses get_defaults()[\"timeout\"] which reads defaults.DEFAULTS (value 5) directly, bypassing env_config._OVERRIDES; the operation 'call get_defaults and index \"timeout\"' causally returns the wrong value.",
+  "failure_mechanism": "caller → service.run_background_job calls get_defaults() → get_defaults returns a copy of defaults.DEFAULTS (which is 5) → env_config._OVERRIDES (which sets timeout to 30) is never consulted for the background path → the background result propagates a timeout of 5 to callers (e.g., run_system_check), producing the incorrect observable behavior (background timeout = 5 instead of 30).",
+  "broken_invariant": "For the same process-wide configuration, both request and background handlers must report the same effective timeout: run_system_check()[\"request\"][\"timeout\"] == run_system_check()[\"background\"][\"timeout\"]. Currently this invariant is false (request=30, background=5).",
+  "alternative_hypothesis": "The bug could be due to an incorrect DEFAULTS value in defaults.py (DEFAULTS = {\"timeout\": 5, ...}) and the intended fix might be to change that constant to 30 instead of changing service behavior.",
+  "hypothesis_rejection": "Changing DEFAULTS to 30 would fix the observed outputs but would mask the design intent where env_config.get_config is supposed to layer overrides on top of defaults. The code evidence shows env_config._OVERRIDES exists and get_config() is used by handle_request (service.handle_request calls get_config()), so the discrepancy is due to run_background_job explicitly calling get_defaults() instead of get_config(). The direct call in service.run_background_job is the explicit causal source (see service.py: run_background_job returns get_defaults()[\"timeout\"]). Thus the primary hypothesis (wrong function call in run_background_job) is the more precise root cause than a bad literal in defaults.py.",
+  "fix_strategy": "Modify service.run_background_job to use get_config()[\"timeout\"] (same as handle_request) so it receives defaults layered with env overrides. This breaks the causal chain by ensuring background jobs also consult env_config._OVERRIDES (30) rather than the raw defaults (5). Concrete change: replace get_defaults()[\"timeout\"] with get_config()[\"timeout\"] in service.py.",
+  "self_check": {
+    "failure_scenario": "If env_config.get_config() raises an ImportError or fails to compute cfg (for example, if env_config.py is changed to import defaults using an incorrect path), then calling get_config() from run_background_job would fail where previously get_defaults() worked. For example, if env_config.py's 'from defaults import get_defaults' no longer resolves in the runtime package layout, get_config() will raise and background job will error.",
+    "edge_case": "If _OVERRIDES does not include 'timeout' (e.g., _OVERRIDES = {}), get_config() will return the timeout from defaults; the code relies on get_defaults() returning a fresh dict (it does via dict(DEFAULTS)). Also test when _OVERRIDES['timeout'] is None or 0: get_config().update will set that value and the background will reflect it — this is intended behavior but should be validated.",
+    "invariant_check": "Under the new code: get_config() is called each time in handle_request() and run_background_job(). get_config() internally calls get_defaults(), which returns dict(DEFAULTS) (a fresh copy), then cfg.update(_OVERRIDES) and returns cfg. Therefore:\n- multiple calls: each call gets an independent dict (no shared mutation), so repeated calls produce consistent results.\n- retries/loops: calling run_background_job() repeatedly will always read the current defaults and overrides; changes to env_config._OVERRIDES at runtime will be reflected on subsequent calls.\n- state reuse: there is no module-level mutation in get_config() or get_defaults(), so state is not reused across calls except the immutable DEFAULTS mapping; dict(DEFAULTS) ensures isolation.\nThese properties ensure the invariant (request timeout == background timeout) holds across multiple calls and loops when _OVERRIDES contains a timeout entry.",
+    "conclusion": "No flaw found in the applied fix for the intended configuration layering: changing run_background_job to call get_config() aligns it with handle_request() and restores the invariant. The only remaining risk is environmental: if env_config.get_config becomes unavailable due to import path changes or exceptions, the background job would fail where previously it returned a default. That is an acceptable trade-off because the correct behavior is to honor env overrides; if desired, additional resiliency could be added (e.g., a fallback to get_defaults() on exception), but it was not required by the bug report. Therefore the fix is safe and correct."
+  },
+  "files": {
+    "code_snippets_v2/config_shadowing/defaults.py": "UNCHANGED",
+    "code_snippets_v2/config_shadowing/env_config.py": "UNCHANGED",
+    "code_snippets_v2/config_shadowing/service.py": "from env_config import get_config\nfrom defaults import get_defaults\n\n\ndef handle_request():\n    return {\"timeout\": get_config()[\"timeout\"], \"source\": \"request\"}\n\n\ndef run_background_job():\n    return {\"timeout\": get_config()[\"timeout\"], \"source\": \"background\"}\n\n\ndef run_system_check():\n    return {\"request\": handle_request(), \"background\": run_background_job()}\n"
+  }
+}

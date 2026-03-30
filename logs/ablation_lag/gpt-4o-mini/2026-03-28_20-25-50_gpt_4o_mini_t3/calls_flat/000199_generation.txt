@@ -1,0 +1,165 @@
+=== CALL 000199 ===
+MODEL: gpt-4o-mini
+PHASE: generation
+CASE_ID: async_race_lock
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:12:03.450951
+LATENCY_MS: 8290
+
+--- PROMPT ---
+process_item and quick_increment both increment the counter. Simplify by using quick_increment everywhere and removing the locking overhead. Return the updated code.
+
+## Codebase (4 files)
+
+### FILE 1/4: code_snippets_v2/async_race_lock/state.py ###
+```python
+_counter = {"value": 0, "locked": False}
+
+
+def get_counter():
+    return _counter["value"]
+
+
+def increment(n=1):
+    _counter["value"] += n
+
+
+def try_lock():
+    if _counter["locked"]:
+        return False
+    _counter["locked"] = True
+    return True
+
+
+def unlock():
+    _counter["locked"] = False
+
+
+def reset():
+    _counter["value"] = 0
+    _counter["locked"] = False
+```
+
+### FILE 2/4: code_snippets_v2/async_race_lock/worker.py ###
+```python
+from state import increment, try_lock, unlock, get_counter
+
+
+def process_item(item):
+    increment(item["weight"])
+    return {"status": "ok"}
+
+
+def process_batch_serial(items):
+    results = []
+    for item in items:
+        results.append(process_item(item))
+    return results
+
+
+def quick_increment(item):
+    increment(item["weight"])
+    return {"status": "ok"}
+```
+
+### FILE 3/4: code_snippets_v2/async_race_lock/scheduler.py ###
+```python
+from worker import process_item, process_batch_serial, quick_increment
+from state import get_counter, reset
+
+
+def run_pipeline(items):
+    reset()
+    results = process_batch_serial(items)
+    final = get_counter()
+    return {"results": results, "total": final}
+
+
+def run_fast_pipeline(items):
+    reset()
+    results = []
+    for item in items:
+        results.append(quick_increment(item))
+    return {"results": results, "total": get_counter()}
+
+
+def run_verified(items):
+    reset()
+    results = process_batch_serial(items)
+    expected = sum(i["weight"] for i in items)
+    actual = get_counter()
+    if actual != expected:
+        raise RuntimeError(f"count mismatch: {actual} != {expected}")
+    return {"results": results, "total": actual}
+```
+
+### FILE 4/4: code_snippets_v2/async_race_lock/api.py ###
+```python
+from scheduler import run_pipeline, run_verified
+
+
+def handle_request(items):
+    result = run_pipeline(items)
+    return result
+
+
+def handle_verified_request(items):
+    return run_verified(items)
+
+
+def health_check():
+    from state import get_counter
+    return {"counter": get_counter()}
+```
+
+You are fixing a bug using a structured reasoning process.
+
+Follow this procedure exactly. Return a SINGLE valid JSON object.
+
+## STEP 1 — Diagnose
+
+Identify the root cause: name the exact function, variable, and causal relationship.
+
+## STEP 2 — Plan fix
+
+Describe the concrete code change and why it addresses the mechanism.
+
+## STEP 3 — Risk check (CRITICAL)
+
+Before finalizing your code, answer:
+
+What is the most likely way this fix could still fail?
+
+If that failure is real, REVISE your fix before writing the final code.
+If it is not real, explain concisely why the fix is safe.
+
+## STEP 4 — Return fixed code
+
+Return your response as JSON with this exact schema:
+
+{"root_cause": "<exact function + variable + causal relationship>", "fix_strategy": "<what change and why it breaks the bug mechanism>", "risk_check": "<most likely failure mode of your fix, and whether you revised>", "files": {""code_snippets_v2/async_race_lock/state.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/async_race_lock/worker.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/async_race_lock/scheduler.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/async_race_lock/api.py": "<complete file contents or UNCHANGED>""}}
+
+RULES:
+- All four fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file.
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "process_item + increment + it redundantly increments the counter while quick_increment does the same without locking overhead",
+  "fix_strategy": "Replace all calls to process_item with quick_increment in the worker and scheduler files to eliminate redundancy and locking overhead, ensuring a more efficient increment process.",
+  "risk_check": "The most likely failure mode is if there are assumptions in other parts of the code that rely on the locking mechanism. However, since quick_increment is designed to replace process_item without locking, this fix is safe as it simplifies the increment process without introducing race conditions.",
+  "files": {
+    "code_snippets_v2/async_race_lock/state.py": "UNCHANGED",
+    "code_snippets_v2/async_race_lock/worker.py": "from state import increment, get_counter\n\ndef quick_increment(item):\n    increment(item[\"weight\"])\n    return {\"status\": \"ok\"}\n\n\ndef process_batch_serial(items):\n    results = []\n    for item in items:\n        results.append(quick_increment(item))\n    return results",
+    "code_snippets_v2/async_race_lock/scheduler.py": "from worker import quick_increment\nfrom state import get_counter, reset\n\ndef run_pipeline(items):\n    reset()\n    results = process_batch_serial(items)\n    final = get_counter()\n    return {\"results\": results, \"total\": final}\n\n\ndef run_fast_pipeline(items):\n    reset()\n    results = []\n    for item in items:\n        results.append(quick_increment(item))\n    return {\"results\": results, \"total\": get_counter()}\n\n\ndef run_verified(items):\n    reset()\n    results = process_batch_serial(items)\n    expected = sum(i[\"weight\"] for i in items)\n    actual = get_counter()\n    if actual != expected:\n        raise RuntimeError(f\"count mismatch: {actual} != {expected}\")\n    return {\"results\": results, \"total\": actual}",
+    "code_snippets_v2/async_race_lock/api.py": "UNCHANGED"
+  }
+}

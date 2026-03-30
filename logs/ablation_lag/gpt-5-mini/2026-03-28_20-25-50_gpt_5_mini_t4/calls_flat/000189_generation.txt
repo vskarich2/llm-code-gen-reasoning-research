@@ -1,0 +1,136 @@
+=== CALL 000189 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: feature_flag_drift
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:32:43.435692
+LATENCY_MS: 14332
+
+--- PROMPT ---
+The checkout function takes a use_new_pricing flag but pricing doesn't seem to respect it. Fix the flag propagation. Return the updated code.
+
+## Codebase (4 files)
+
+### FILE 1/4: code_snippets_v2/feature_flag_drift/flags.py ###
+```python
+_flags = {"new_pricing": False, "v2_api": False, "audit_mode": True}
+
+
+def is_enabled(flag):
+    return _flags.get(flag, False)
+
+
+def enable(flag):
+    _flags[flag] = True
+
+
+def disable(flag):
+    _flags[flag] = False
+
+
+def get_all_flags():
+    return dict(_flags)
+```
+
+### FILE 2/4: code_snippets_v2/feature_flag_drift/pricing.py ###
+```python
+from flags import is_enabled
+
+
+def compute_price(base, qty):
+    if is_enabled("new_pricing"):
+        return _v2_price(base, qty)
+    return _v1_price(base, qty)
+
+
+def _v1_price(base, qty):
+    return base * qty
+
+
+def _v2_price(base, qty):
+    discount = 0.1 if qty >= 10 else 0
+    return base * qty * (1 - discount)
+
+
+def get_pricing_version():
+    return "v2" if is_enabled("new_pricing") else "v1"
+```
+
+### FILE 3/4: code_snippets_v2/feature_flag_drift/billing.py ###
+```python
+from pricing import compute_price, get_pricing_version
+from flags import is_enabled
+
+_invoices = []
+
+
+def create_invoice(customer, items):
+    total = 0
+    lines = []
+    for item in items:
+        price = compute_price(item["base"], item["qty"])
+        lines.append({"sku": item["sku"], "amount": price})
+        total += price
+
+    invoice = {
+        "customer": customer,
+        "lines": lines,
+        "total": total,
+        "pricing_version": get_pricing_version(),
+    }
+
+    if is_enabled("audit_mode"):
+        invoice["reasoning_evaluator_audit"] = True
+        _invoices.append(invoice)
+
+    return invoice
+
+
+def get_invoices():
+    return list(_invoices)
+```
+
+### FILE 4/4: code_snippets_v2/feature_flag_drift/api.py ###
+```python
+from billing import create_invoice, get_invoices
+from flags import enable, disable
+
+
+def checkout(customer, items, use_new_pricing=False):
+    invoice = create_invoice(customer, items)
+    return invoice
+
+
+def admin_report():
+    return get_invoices()
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/feature_flag_drift/flags.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/feature_flag_drift/pricing.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/feature_flag_drift/billing.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/feature_flag_drift/api.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{"root_cause":"In api.checkout the parameter use_new_pricing is accepted but never used. The function simply calls create_invoice(customer, items) without altering any feature flag. Because pricing.compute_price queries flags.is_enabled(\"new_pricing\"), the provided use_new_pricing boolean is ignored and never propagated to the flags system.","failure_mechanism":"If a caller invokes checkout(customer, items, use_new_pricing=True), api.checkout does not enable the \"new_pricing\" feature flag. create_invoice calls pricing.compute_price which calls is_enabled(\"new_pricing\"). Since the flag was not set, compute_price continues to use _v1_price, so invoice['pricing_version'] is \"v1\" and prices do not reflect the intended v2 logic. In short: use_new_pricing=True -> checkout does nothing -> flag remains False -> pricing uses v1 results.","broken_invariant":"Calling checkout(customer, items, use_new_pricing=True) must produce an invoice whose pricing_version is \"v2\" and whose line amounts are computed by pricing._v2_price. Conversely, calling checkout(..., use_new_pricing=False) must ensure pricing_version is \"v1\" and amounts use pricing._v1_price. This property is currently violated because checkout does not toggle the flag.","fix_strategy":"Make checkout temporarily set the global \"new_pricing\" flag according to use_new_pricing while creating the invoice, then restore the original flag state. I use flags.get_all_flags() to snapshot the current setting, then enable() or disable() for the requested mode before calling create_invoice, and finally restore the original flag value in a finally block to avoid leaving global state changed. This ensures compute_price and get_pricing_version observe the requested flag during invoice creation but does not leak the override to other callers.","files":{"code_snippets_v2/feature_flag_drift/flags.py":"UNCHANGED","code_snippets_v2/feature_flag_drift/pricing.py":"UNCHANGED","code_snippets_v2/feature_flag_drift/billing.py":"UNCHANGED","code_snippets_v2/feature_flag_drift/api.py":"from billing import create_invoice, get_invoices\nfrom flags import enable, disable, get_all_flags\n\n\ndef checkout(customer, items, use_new_pricing=False):\n    # Snapshot current flags so we can restore after creating the invoice\n    snapshot = get_all_flags()\n    try:\n        if use_new_pricing:\n            enable(\"new_pricing\")\n        else:\n            disable(\"new_pricing\")\n        invoice = create_invoice(customer, items)\n    finally:\n        # Restore the original new_pricing flag value\n        if snapshot.get(\"new_pricing\", False):\n            enable(\"new_pricing\")\n        else:\n            disable(\"new_pricing\")\n\n    return invoice\n\n\ndef admin_report():\n    return get_invoices()"} }

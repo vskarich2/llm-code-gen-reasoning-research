@@ -1,0 +1,175 @@
+=== CALL 000080 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: use_before_set_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:55:37.869781
+LATENCY_MS: 16394
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+loader.load: failure to set the module-level variable _status (and _data) in the branch when source is empty/None, causing the previous value of _status to be reused
+
+## Failure Mechanism
+call run_pipeline(source) → run_pipeline calls loader.load(source) → when source is empty or None the load function does not mutate _status/_data (it only mutates them on the truthy non-empty branch) → _status remains the value from a previous call (e.g. 'loaded') → get_status() returns stale status → pipeline returns an incorrect 'status' that reflects a prior call rather than the current call
+
+## Broken Invariant
+After load(source) returns, get_status() must equal either 'loaded' when source contained items, or 'empty' when source was empty/None. This invariant is violated when source is empty because _status can remain 'loaded' from a previous call.
+
+## Fix Strategy
+Ensure loader.load always sets both _status and _data to reflect the outcome of THIS call. Specifically, add an else branch that sets _data = [] and _status = 'empty' when the provided source is empty or None. This breaks the causal chain by preventing reuse of previous _status/_data values when the current source is empty.
+
+
+## Self-Check
+{'failure_scenario': 'If a caller passes a truthy non-iterable (e.g. an int like 5), the condition `if source and len(source) > 0:` will attempt len(source) and raise TypeError. This scenario was possible before the fix and remains possible after the fix because the fix intentionally preserves the original branch-order and semantics for non-iterables.', 'edge_case': "source is an empty string ''. The code treats '' as falsy and will set _data = [] and _status = 'empty' (which is the intended behavior). Another edge: source is a generator. `source` may be truthy but have len() undefined; since len(generator) raises TypeError, the original behavior would also raise; we left that unchanged to avoid changing semantics for iterables that don't support len().", 'invariant_check': "After the fix, for the following situations the invariant holds:\n- multiple calls: call load([1]) → _status becomes 'loaded'; call load([]) → the else branch sets _status to 'empty'. So get_status() after each call reflects that call's outcome.\n- retries/loops: repeated calls with alternating empty and non-empty sources will always update _status/_data in each call and therefore will not leak previous state.\n- state reuse: reset() in the loader module still sets _status = 'idle' and _data = None; even without explicit reset, load will overwrite _status/_data on each call as described above.\nTherefore the invariant (status reflects THIS call) holds for empty and non-empty inputs that behave like before (i.e., ones for which evaluating the condition does not raise).", 'conclusion': 'No flaw requiring a code revision was found relative to the original bug: the fix deterministically sets _status and _data for the empty/None branch and thus prevents stale statuses from propagating. The remaining potential failure (TypeError for truthy non-iterables or iterators without len) is a preexisting behavior and changing it would change semantics beyond the scope of the reported bug. Thus the fix is safe and targeted.'}
+
+
+# Task Description
+Pipeline crashes on empty data source. Fix. Return the updated code.
+
+# Code Produced
+```python
+﻿"""Data loader with status tracking."""
+
+_status = "idle"
+_data = None
+
+
+def reset():
+    global _status, _data
+    _status = "idle"
+    _data = None
+
+
+def load(source):
+    """Load data from source. Sets status on success only."""
+    global _status, _data
+    if source and len(source) > 0:
+        _data = [x for x in source]
+        _status = "loaded"
+    else:
+        # Ensure empty or None source updates state to reflect THIS call
+        _data = []
+        _status = "empty"
+    # BUG fixed: on empty/None source, _status and _data are explicitly set
+    return _data
+
+
+def get_status():
+    return _status
+
+
+def get_data():
+    return _data
+
+
+def validate_format(data):
+    """Distractor: checks data format, unrelated to bug."""
+    if data is None:
+        return False
+    return isinstance(data, list)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If load always set _status and _data for empty/None inputs, the stale-status misreporting would not occur.
+Evidence: _status/_data are module-level globals; load(source) only set them in the truthy branch before the fix; the produced code adds an else that sets _data = [] and _status = 'empty'; get_status() returns the module _status so failure was caused by missing assignment in the empty branch.
+Judgment: The developer's reasoning forms a complete causal chain and the fix directly addresses the root cause by ensuring per-call state updates; the remaining TypeError on truthy non-iterables is a preexisting edge case acknowledged but intentionally out of scope.

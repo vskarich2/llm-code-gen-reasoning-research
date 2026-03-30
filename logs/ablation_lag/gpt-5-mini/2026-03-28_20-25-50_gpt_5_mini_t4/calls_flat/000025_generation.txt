@@ -1,0 +1,91 @@
+=== CALL 000025 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: stale_cache_a
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:35:56.019242
+LATENCY_MS: 27908
+
+--- PROMPT ---
+Refactor this product catalog for clarity. Return the updated code.
+
+## Codebase (1 file)
+
+### FILE 1/1: code_snippets_v2/stale_cache_a/catalog.py ###
+```python
+"""Product catalog with caching."""
+
+_db = {}
+_cache = {}
+
+
+def add_product(product_id, name, price):
+    """Add a product to the database."""
+    _db[product_id] = {"name": name, "price": price}
+
+
+def get_product(product_id):
+    """Get product by ID, using cache for repeated lookups."""
+    if product_id in _cache:
+        return _cache[product_id]
+    product = _db.get(product_id)
+    if product is not None:
+        _cache[product_id] = dict(product)
+    return _cache.get(product_id)
+
+
+def update_product(product_id, **fields):
+    """Update product fields in the database.
+
+    Invariant: get_product() must return current data after update.
+    """
+    if product_id not in _db:
+        return False
+    _db[product_id].update(fields)
+    # BUG: cache not invalidated — get_product returns stale data
+    return True
+
+
+def reset():
+    """Clear all data."""
+    _db.clear()
+    _cache.clear()
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/stale_cache_a/catalog.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "The bug is in update_product: after _db[product_id].update(fields) the module does not modify the module-level variable _cache. Because get_product prefers values from _cache, leaving _cache unchanged causes later lookups to keep returning the old cached dict instead of the updated _db row.",
+  "failure_mechanism": "Concrete scenario: add_product('p1', 'Widget', 10.0) stores {'name': 'Widget', 'price': 10.0'} in _db. Calling get_product('p1') caches a copy in _cache['p1'] = {'name': 'Widget', 'price': 10.0}. Then update_product('p1', price=12.0) executes _db['p1'].update({'price': 12.0}) but does not touch _cache. A subsequent get_product('p1') checks 'p1' in _cache and returns the old cached dict showing price 10.0 even though _db['p1']['price'] == 12.0. Thus the stale _cache causes consumers to observe the old value.",
+  "broken_invariant": "After update_product(product_id, **fields) returns True for an existing product_id, a subsequent call to get_product(product_id) MUST return a dict whose keys and values reflect the updated fields (i.e., at least product['price'] == _db[product_id]['price'] and similarly for other updated keys).",
+  "fix_strategy": "update_product now updates the cache to reflect the new database state by assigning _cache[product_id] = dict(_db[product_id]) immediately after updating _db. Additionally add_product populates the cache on insert so subsequent get_product calls are consistent. Because get_product first checks _cache, keeping _cache synchronized with _db ensures get_product returns current data. The change is implemented by adding a single cache update line in update_product and populating _cache in add_product.",
+  "files": {
+    "code_snippets_v2/stale_cache_a/catalog.py": " \"\"\"Product catalog with caching.\n\nThis module provides a tiny in-memory product catalog with a simple cache\nfor repeated lookups. The cache is kept in sync with the database on\nwrites so that get_product() always returns current data for existing\nproducts.\n\"\"\"\n\n_db = {}\n_cache = {}\n\n\ndef add_product(product_id, name, price):\n    \"\"\"Add a product to the database and cache.\n\n    Ensures the cache is populated for immediate consistent reads.\n    \"\"\"\n    _db[product_id] = {\"name\": name, \"price\": price}\n    # Keep cache consistent with the DB so get_product can return current data\n    _cache[product_id] = dict(_db[product_id])\n\n\ndef get_product(product_id):\n    \"\"\"Get product by ID, using cache for repeated lookups.\n\n    Returns the cached dict (a copy stored internally) or None if not found.\n    \"\"\"\n    if product_id in _cache:\n        return _cache[product_id]\n    product = _db.get(product_id)\n    if product is not None:\n        # store a shallow copy in cache to decouple stored DB dicts\n        _cache[product_id] = dict(product)\n    return _cache.get(product_id)\n\n\ndef update_product(product_id, **fields):\n    \"\"\"Update product fields in the database.\n\n    Invariant: get_product() must return current data after update.\n    Returns True if the product existed and was updated, otherwise False.\n    \"\"\"\n    if product_id not in _db:\n        return False\n    _db[product_id].update(fields)\n    # Keep cache in sync so get_product() does not return stale data\n    _cache[product_id] = dict(_db[product_id])\n    return True\n\n\ndef reset():\n    \"\"\"Clear all data.\"\"\"\n    _db.clear()\n    _cache.clear()\n"
+  }
+}

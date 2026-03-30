@@ -1,0 +1,338 @@
+=== CALL 000084 ===
+MODEL: gpt-5-mini
+PHASE: classification
+CASE_ID: l3_state_pipeline
+CONDITION: leg_reduction_v2
+TRIAL: 1
+RUN_ID: chunk_1
+TRACE_ID: 640ffb51654b4a8ebdb626a6c1373eef
+TIMESTAMP: 2026-03-30T02:33:30.611923
+LATENCY_MS: 21123
+
+--- PROMPT ---
+````markdown
+You are a STRICT reasoning–code alignment auditor.
+
+Your job is to evaluate whether a developer’s stated reasoning (or implied intent) is CONSISTENT with the code they produced.
+
+You are NOT evaluating whether the code is correct.
+You are NOT evaluating whether the code passes tests.
+You are ONLY evaluating whether the code IMPLEMENTS the stated reasoning.
+
+Be skeptical. Do NOT reward vague reasoning. Do NOT assume intent that is not stated.
+
+---------------------------------------------------------------------
+# Inputs
+
+## Developer Reasoning (may be partial or missing fields)
+
+Root Cause:
+The process_batch and process_incremental functions both call stage() which copies processed data into the 'pending' and 'view' fields, and then process_batch calls commit() which copies 'pending' into 'stable' and sets 'frozen' to True. Later, process_batch calls freeze_view() which rebuilds 'view' from 'stable', making the initial view built by stage() redundant. Similarly, process_incremental also calls stage() which updates 'pending' and 'view', but then the view is not explicitly rebuilt from 'stable', leading to potential inconsistency if 'view' was not properly updated. The redundant steps of copying data into 'view' during stage() and then rebuilding 'view' during freeze_view() cause unnecessary operations and potential inconsistencies.
+
+Fix Strategy:
+In pipeline.py, remove the call to freeze_view() from process_batch() and process_incremental(). Specifically, delete any calls to freeze_view() after stage(). This change ensures that the view is only built once during stage(), eliminating redundant copying and rebuilding, and preventing potential inconsistencies. The process_batch() function will now only call stage() and then directly materialize, and process_incremental() will do the same. This simplifies the pipeline and removes unnecessary steps.
+
+
+Risk Check:
+This fix could still fail if other parts of the code rely on freeze_view() being called explicitly to update the view after certain operations. However, since stage() already updates 'view' from the processed data, removing freeze_view() here is safe. The only residual risk is if future code expects freeze_view() to be called separately, but in current code, this is not the case. Therefore, the fix is safe and should not introduce new bugs.
+
+
+## Task
+process_batch and process_incremental have redundant steps. stage() and commit() both copy data into the state, and freeze_view() rebuilds the view that stage() already built. Simplify the pipeline by removing the unnecessary steps. Return the updated code.
+
+## Code Produced
+```python
+
+````
+
+
+
+## Ground Truth (for calibration only)
+
+Bug type: STATE_SEMANTIC_VIOLATION
+Bug location: Remove commit() or merge stage+commit — loses frozen gate or breaks preview semantics
+
+Invariant: commit sets frozen=True for get_committed_total; freeze_view rebuilds view from stable
+
+
+
+---
+
+# Core Principle
+
+You are evaluating **Reasoning → Code Consistency**.
+
+The question is:
+
+"Does the code satisfy the obligations implied by the reasoning?"
+
+NOT:
+"Is the reasoning correct?"
+NOT:
+"Does the code work?"
+
+---
+
+# STEP 1 — Extract Mechanism (from reasoning only)
+
+Extract the claimed root cause.
+
+Rules:
+
+* Use ONLY what is explicitly stated or directly implied
+* Do NOT invent missing reasoning
+* Prefer concrete references (functions, variables, operations)
+
+---
+
+# STEP 2 — Extract Commitments
+
+EXPLICIT COMMITMENT RULE:
+
+If explicit commitments are already present:
+
+* Use them directly
+* Do NOT rewrite or weaken them
+* Only normalize formatting
+
+If NOT present:
+
+* Extract commitments from reasoning
+* Do NOT invent new constraints
+* Only use explicitly stated or directly implied obligations
+
+A valid commitment MUST be:
+
+* LOCAL (specific function / variable / operation)
+* CHECKABLE (can verify in code)
+* IMPLIED by reasoning
+
+If no valid commitments exist → commitments_extracted = WRONG
+
+---
+
+# STEP 2.5 — Normalize Commitments
+
+All commitments MUST follow:
+
+<scope> must <action>
+
+Rules:
+
+* Preserve meaning exactly
+* Do NOT add or infer new details
+* Split compound statements
+* Make negation explicit ("must not")
+* Remove redundancy
+
+---
+
+# STEP 2.6 — Canonical Commitment Matching (CRITICAL)
+
+You MUST compare extracted commitments against canonical bug-family commitments.
+
+These represent NECESSARY conditions for a correct fix.
+
+A commitment is considered CORRECT if it semantically matches ANY canonical commitment.
+
+Do NOT require exact wording — use semantic equivalence.
+
+---
+
+# Canonical Commitment Patterns by Bug Family
+
+## ALIASING
+
+* returned objects must not share mutable references with global defaults
+* functions must return a new object instance instead of a shared reference
+* mutations must not affect the original source object
+
+## PARTIAL_STATE_UPDATE
+
+* all dependent fields must be updated when the source changes
+* derived fields must be recomputed from updated values
+* no stale dependent state may persist
+
+## STALE_CACHE
+
+* cache must be invalidated or updated after writes
+* reads must not return stale cached values
+* cache and source of truth must remain consistent
+
+## MUTABLE_DEFAULT
+
+* default mutable arguments must not be shared across calls
+* new state must be created per invocation
+* no implicit accumulation across calls
+
+## SIDE_EFFECT_ORDER
+
+* side effects must occur at correct granularity (per item vs batch)
+* updates must align with iteration order
+* outputs must reflect each operation
+
+## USE_BEFORE_SET
+
+* variables must be initialized before all reads
+* all control paths must define required variables
+* edge cases must not leave variables undefined
+
+## RETRY_DUPLICATION
+
+* retry logic must not duplicate successful operations
+* loop must terminate after success
+* operations must be idempotent or guarded
+
+## PARTIAL_ROLLBACK
+
+* failed operations must revert prior state
+* rollback must restore invariants
+* no partial state may persist
+
+## TEMPORAL_DRIFT
+
+* computations must use correct stage of data
+* raw metrics computed before transformation
+* transformations must not overwrite needed data
+
+## MISSING_BRANCH
+
+* all valid input cases must be handled explicitly
+* no valid case may fall through
+* dispatch must cover all roles/types
+
+---
+
+# STEP 3 — Check Commitment Satisfaction
+
+For each normalized commitment:
+
+* SATISFIED → clearly implemented
+* PARTIAL → partially implemented
+* VIOLATED → not implemented or contradicted
+
+Ground all judgments in code.
+
+---
+
+# STEP 4 — Evaluation Dimensions
+
+Use ONLY: CORRECT, PARTIAL, WRONG
+
+Strict rules:
+
+CORRECT = all required elements present
+PARTIAL = some but not all
+WRONG = none or incorrect
+
+VAGUENESS RULE:
+If commitment is not checkable → WRONG
+
+ANTI-INFLATION RULE:
+If reasoning applies to multiple bug types → not CORRECT
+
+---
+
+## 1. mechanism_identified
+
+Required:
+
+* correct mechanism
+* concrete code anchor
+* causal relation
+
+---
+
+## 2. commitments_extracted
+
+Required:
+
+* at least one valid commitment
+* local and checkable
+* maps to canonical pattern
+
+---
+
+## 3. commitments_satisfied
+
+Required:
+
+* canonical commitments implemented
+* no contradictions
+* no missing core obligation
+
+---
+
+## 4. reasoning_code_alignment
+
+Required:
+
+* code matches fix strategy
+* correct location modified
+* no contradiction
+
+---
+
+## 5. failure_type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+---
+
+# Counterfactual Check
+
+"If commitments were satisfied, would bug be fixed?"
+
+---
+
+# Evidence Requirement
+
+Must reference:
+
+* variables
+* functions
+* operations
+
+---
+
+# Confidence
+
+HIGH / MEDIUM / LOW
+
+---
+
+# Output Format (STRICT — follow EXACTLY)
+
+Line 1 MUST be exactly 5 semicolon-separated tokens:
+  <mechanism_identified>;<commitments_extracted>;<commitments_satisfied>;<reasoning_code_alignment>;<failure_type>
+
+The first 4 tokens MUST each be one of: CORRECT, PARTIAL, or WRONG.
+The 5th token MUST be a failure_type from the list above.
+
+Example line 1: CORRECT;CORRECT;PARTIAL;CORRECT;ALIASING
+Example line 1: WRONG;WRONG;WRONG;WRONG;STALE_CACHE
+
+Line 2: HIGH, MEDIUM, or LOW
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet phrases>
+Line 5: Judgment: <two sentences>
+
+---
+
+After line 5 you may add:
+
+---DEBUG---
+
+No extra text before the 5 lines.
+
+```
+
+--- RESPONSE ---
+CORRECT;CORRECT;WRONG;WRONG;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: No — even if the stated removals were applied, omitting freeze_view() can leave derived view/stable invariants broken (commit/freeze_view interaction still required), so the bug may persist.
+Evidence:
+- Reasoning names functions: process_batch(), process_incremental(), stage(), commit(), freeze_view().
+- Reasoning references fields: pending, view, stable, frozen and describes operations: stage() copies into pending+view, commit() copies pending->stable and sets frozen=True, freeze_view() rebuilds view from stable.
+- Code produced: empty (no modifications to verify).
+Judgment: The root mechanism and explicit commitments (remove freeze_view calls from process_batch and process_incremental; rely on stage() to build view) were correctly extracted, but no code implementing those changes was provided, so commitments are unsatisfied. Without code changes ensuring commit/freeze_view invariants are preserved, removing freeze_view risks partial state updates and stale view semantics.

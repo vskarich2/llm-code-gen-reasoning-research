@@ -1,0 +1,169 @@
+=== CALL 000093 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: retry_dup_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:00:11.171236
+LATENCY_MS: 27118
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+pipeline.ingest is missing a break after a successful call to send_with_retry. In pipeline.py the for-loop 'for attempt in range(max_pipeline_retries):' always continues even when send_with_retry succeeds, so the pipeline calls send_with_retry again and causes additional successful sends. Additionally, pipeline.reset attempts to reset module-level variables _messages, _notifications and _attempt_count that are not defined in pipeline.py instead of calling the reset functions from the store and sender modules, so calling reset() does not reliably clear shared state.
+
+## Failure Mechanism
+Concrete scenario: ingest(msg, max_pipeline_retries=2, fail_first=True). On the first pipeline loop iteration send_with_retry(msg, max_retries=2, fail_first=True) will internally retry and eventually succeed, causing store.append(msg) to be called once. Because pipeline.ingest does not break after that success, the second pipeline iteration runs and calls send_with_retry again, which succeeds immediately and causes store.append(msg) to be called a second time. The result is two copies of the same message in the store. In other configurations (different max values) the combination of pipeline-level retries and sender-level retries can produce 3-4 total sends because each successful outer retry triggers one successful inner send that appends the message.
+
+## Broken Invariant
+Calling ingest(msg, ...) must cause the message to be appended to the store at most once. Formally: after a successful ingest(msg), store.get_messages().count(msg) == 1.
+
+## Fix Strategy
+Stop the pipeline-level retry loop once send_with_retry has succeeded by adding a break after the successful call. This prevents additional successful calls to send_with_retry that would append the same message again. Also replace the broken manual resets in pipeline.reset with calls to the store.reset() and sender.reset_sender() functions so shared module state is properly cleared instead of touching undefined names. These changes eliminate the extra appends while ensuring reset() behaves correctly.
+
+
+# Task Description
+Messages appearing 3-4 times. Fix the retry logic. Return the updated code.
+
+# Code Produced
+```python
+"""Ingestion pipeline with its own retry around sender."""
+
+from sender import send_with_retry, reset_sender
+from store import get_messages, reset as reset_store
+
+_ingest_log = []
+
+
+def reset():
+    global _ingest_log
+    _ingest_log = []
+    # Properly reset shared modules' state instead of touching undefined names
+    reset_store()
+    reset_sender()
+
+
+def ingest(msg, max_pipeline_retries=2, fail_first=False):
+    """Ingest a message with pipeline-level retry."""
+    for attempt in range(max_pipeline_retries):
+        try:
+            send_with_retry(msg, max_retries=2, fail_first=fail_first)
+            break  # stop retrying pipeline on success
+        except Exception:
+            continue
+    _ingest_log.append(msg)
+    return True
+
+
+def get_ingest_log():
+    return list(_ingest_log)
+
+
+def batch_ingest(messages):
+    """Ingest multiple messages. Legitimate batch — no retry needed."""
+    for msg in messages:
+        send_with_retry(msg, max_retries=1)
+    return len(messages)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;RETRY_LOGIC_BUG
+HIGH
+Counterfactual: If the missing break from the pipeline-level retry loop were added (and reset() used the module reset functions), the duplicate-store entries would not occur.
+Evidence: for-loop in ingest calls send_with_retry repeatedly (range(max_pipeline_retries)) which led to repeated sender invocations; send_with_retry internally appends to the store (causing multiple store.append calls) so repeated successful outer iterations => duplicate messages; original reset tried to touch undefined _messages/_notifications/_attempt_count (incorrect) but new reset calls reset_store() and reset_sender(); break is added immediately after successful send_with_retry in the provided code.
+Judgment: The developer correctly identified the specific missing-break retry interaction and the incorrect reset behavior, traced the mutation (multiple store.append calls) to the observed duplicates, and the code implements the proposed fixes; one minor note — ingest still appends to _ingest_log regardless of send success/failure (logging behavior), which does not affect the duplicate-message invariant but may deserve review.

@@ -21,41 +21,7 @@ from exec_eval import _CASE_TESTS, _load_v2_test, load_module_from_code
 
 BASE = Path(__file__).parent
 
-_STDLIB = {
-    "os",
-    "sys",
-    "json",
-    "re",
-    "math",
-    "copy",
-    "collections",
-    "functools",
-    "itertools",
-    "typing",
-    "pathlib",
-    "datetime",
-    "abc",
-    "dataclasses",
-    "enum",
-    "logging",
-    "hashlib",
-    "random",
-    "io",
-    "string",
-    "textwrap",
-}
-
-
-def _strip_local_imports(code: str) -> str:
-    lines = []
-    for line in code.splitlines():
-        s = line.strip()
-        if s.startswith("from ") and " import " in s:
-            mod = s.split()[1].split(".")[0]
-            if mod not in _STDLIB:
-                continue
-        lines.append(line)
-    return "\n".join(lines)
+from code_assembly import assemble_code
 
 
 def _load_buggy_code(case: dict) -> str:
@@ -65,7 +31,8 @@ def _load_buggy_code(case: dict) -> str:
         if not path.exists():
             raise FileNotFoundError(f"Code file missing: {rel}")
         parts.append(path.read_text(encoding="utf-8"))
-    return _strip_local_imports("\n\n".join(parts))
+    asm = assemble_code("\n\n".join(parts), case)
+    return asm.code
 
 
 def check_case(case: dict) -> dict:
@@ -141,9 +108,9 @@ def check_case(case: dict) -> dict:
                 if path.exists():
                     other_parts.append(path.read_text(encoding="utf-8"))
         if other_parts:
-            full_ref = _strip_local_imports("\n\n".join(other_parts) + "\n\n" + ref_code)
+            full_ref = assemble_code("\n\n".join(other_parts) + "\n\n" + ref_code, case).code
         else:
-            full_ref = _strip_local_imports(ref_code)
+            full_ref = assemble_code(ref_code, case).code
 
         ref_mod = load_module_from_code(full_ref, f"preflight_ref_{cid}")
         ref_passed, ref_reasons = test_fn(ref_mod)

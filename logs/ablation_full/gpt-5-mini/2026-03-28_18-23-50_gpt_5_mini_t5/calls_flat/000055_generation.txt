@@ -1,0 +1,211 @@
+=== CALL 000055 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: mutable_default_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:41:22.386925
+LATENCY_MS: 25215
+
+--- PROMPT ---
+Workers skip valid tasks on second batch. Fix. Return the updated code.
+
+## Codebase (2 files)
+
+### FILE 1/2: code_snippets_v2/mutable_default_b/queue.py ###
+```python
+"""Task queue module."""
+
+
+def create_task(name, priority=1):
+    """Create a task dict."""
+    return {"name": name, "priority": priority, "status": "pending"}
+
+
+def enqueue(task, queue=None):
+    """Add task to queue. Returns the queue."""
+    if queue is None:
+        queue = []
+    queue.append(task)
+    return queue
+
+
+def dequeue(queue):
+    """Remove and return the first task, or None."""
+    if queue:
+        return queue.pop(0)
+    return None
+```
+
+### FILE 2/2: code_snippets_v2/mutable_default_b/worker.py ###
+```python
+"""Worker that processes task batches."""
+
+from queue import create_task
+
+
+def process_batch(tasks, seen=set()):
+    """Process a batch of tasks, skipping already-seen ones.
+
+    Invariant: each call to process_batch with a fresh batch must
+    process ALL tasks in that batch, regardless of prior calls.
+    """
+    # BUG: seen set persists across calls — valid tasks skipped as duplicates
+    results = []
+    for task in tasks:
+        task_id = task["name"]
+        if task_id in seen:
+            continue
+        seen.add(task_id)
+        results.append({"name": task["name"], "result": "processed"})
+    return results
+
+
+def summarize(results):
+    """Summarize processing results (distractor)."""
+    return f"{len(results)} tasks processed"
+```
+
+You are implementing a STRICT reasoning + code generation procedure designed to REDUCE reasoning-execution mismatch.
+
+This is NOT a formatting task. This is a TWO-PASS reasoning process with adversarial verification.
+
+You MUST follow the procedure exactly.
+
+Return a SINGLE valid JSON object. No text outside JSON. No markdown fences.
+
+# GOAL
+
+Fix the bug AND ensure your reasoning is causally correct and robust to failure.
+
+You are required to:
+- identify the correct mechanism
+- challenge your own hypothesis
+- verify your fix against failure scenarios
+
+# PROCEDURE (MANDATORY)
+
+## STEP 1 — DIAGNOSE (PRIMARY HYPOTHESIS)
+
+Identify:
+
+- root_cause:
+  Name the exact function + variable + operation causing the bug.
+  Must describe a causal relationship (not just "missing X").
+
+- failure_mechanism:
+  Give a concrete scenario:
+  cause → mutation/event → propagation → observable failure
+
+- broken_invariant:
+  A specific, testable property that is violated.
+
+## STEP 2 — ALTERNATIVE HYPOTHESIS (CRITICAL)
+
+Propose ONE alternative explanation for the bug.
+
+- What else could plausibly be the cause?
+- Why might your primary hypothesis be wrong?
+
+Then explicitly reject it:
+
+- Why is your original diagnosis more correct?
+- What evidence in the code supports this?
+
+This step is REQUIRED. Do not skip.
+
+## STEP 3 — PLAN FIX
+
+Describe:
+
+- fix_strategy:
+  What exact change you will make
+  Why it breaks the causal chain
+
+Must reference actual code behavior.
+
+## STEP 4 — CODE
+
+Implement the fix.
+
+Rules:
+- Modify ONLY necessary files
+- Return COMPLETE contents for modified files
+- Use "UNCHANGED" for others
+
+## STEP 5 — ADVERSARIAL SELF-CHECK (MANDATORY)
+
+You must actively try to BREAK your own fix.
+
+Answer ALL:
+
+1. Failure Scenario:
+   Describe a concrete scenario where your fix might still fail.
+
+2. Edge Case:
+   Identify a boundary condition (e.g., retries, empty values, ordering).
+
+3. Invariant Check:
+   Verify your invariant holds under:
+   - multiple calls
+   - retries / loops
+   - state reuse
+
+4. Conclusion:
+   - If a flaw is found → REVISE your fix
+   - If no flaw → explain WHY it is safe
+
+Your answer MUST reference your actual code.
+
+# OUTPUT FORMAT (STRICT JSON)
+
+{
+  "root_cause": "<exact function + variable + causal relationship>",
+  "failure_mechanism": "<cause → mutation → propagation → observable failure>",
+  "broken_invariant": "<specific testable property that is violated>",
+  "alternative_hypothesis": "<one alternative explanation for the bug>",
+  "hypothesis_rejection": "<why primary hypothesis is correct, with code evidence>",
+  "fix_strategy": "<what change you will make and why it breaks the causal chain>",
+  "self_check": {
+    "failure_scenario": "<concrete scenario where fix might still fail>",
+    "edge_case": "<boundary condition to test>",
+    "invariant_check": "<verify invariant under multiple calls, retries, state reuse>",
+    "conclusion": "<flaw found → revise, or why it is safe>"
+  },
+  "files": {"<path>": "<complete file contents or UNCHANGED>"}
+}
+
+# RULES
+
+- All fields are REQUIRED and must be substantive
+- No generic statements — ground every claim in actual code
+- Must reference actual variables and behavior
+- Do NOT restate the task
+- Do NOT skip alternative hypothesis
+- Do NOT skip adversarial self-check
+- For files you did NOT modify, set value to "UNCHANGED"
+- Do NOT include markdown formatting (no ```python blocks) inside file values
+- File values must be raw Python source code, not markdown
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "process_batch function: default argument seen=set() creates a shared mutable set at function-definition time; mutation of this set (seen.add(task_id)) persists across calls causing later calls to observe prior mutations",
+  "failure_mechanism": "Call 1: process_batch called with default seen -> the default set object is mutated by seen.add('A') and seen.add('B') (cause → mutation). Because the default set object is shared, Call 2: process_batch called again with a fresh batch containing 'A' will find 'A' already in the same shared seen set and skip processing it (propagation). Observable failure: valid tasks in the new batch (e.g., 'A') are not processed, reducing the returned results and violating the documented invariant.",
+  "broken_invariant": "For two independent calls with fresh batches, process_batch should process all tasks in each batch; concretely: after calling process_batch([{'name':'x'}]) twice, both calls should return a processed entry for 'x'. Current code: first call returns [{'name':'x','result':'processed'}], second call returns [] because 'x' remains in the shared seen set.",
+  "alternative_hypothesis": "The skipping could be caused by task objects carrying persistent state (e.g., task['status']='processed') and process_batch checking that field elsewhere (or some external cache), so the function is correctly skipping tasks based on task status rather than a shared seen set.",
+  "hypothesis_rejection": "The code contains no checks of task['status'] or other external caches inside process_batch; the only skip logic is 'if task_id in seen: continue' and the only mutation to a long-lived structure is seen.add(task_id) on a default mutable 'seen' created at function definition time. Therefore the shared default seen is the direct causal mechanism. Evidence: process_batch implementation shows the default seen=set() and the only condition that prevents processing is membership in seen. No other variables or calls modify task objects before that check.",
+  "fix_strategy": "Change the default for seen from a shared mutable set to None and create a fresh set inside the function when seen is None. This ensures each call without an explicit seen argument gets its own fresh set, breaking the causal chain where mutations persisted across calls. The skip behavior for duplicates within the same batch is preserved because the per-call seen set still records names seen during that call.",
+  "self_check": {
+    "failure_scenario": "A caller intentionally passes a non-empty seen set to process_batch to enforce cross-call deduplication; in that case the function will respect the provided seen and skip tasks. This is not a failure of the fix but a behavior change only for callers that relied on the previous bug (shared default seen). If a caller expected the old shared behavior without passing a seen argument, the fix changes that behavior; however, the documented invariant requires fresh batches to be fully processed, so this is correct.",
+    "edge_case": "If a task['name'] is unhashable (e.g., a dict or list), checking 'if task_id in seen' or adding it to the set will raise TypeError. The current code already assumes task['name'] is hashable (strings in create_task), so the fix preserves that assumption. Another edge case: duplicate names inside the same tasks list — the per-call seen still prevents processing duplicates multiple times within one call, which matches existing behavior.",
+    "invariant_check": "Multiple calls: With the fix, calling process_batch([{'name':'a'}]) twice with default arguments produces processed entries for 'a' in both calls because each call creates its own seen set. Retries / loops: If a caller retries by calling process_batch again with default arguments, each retry processes the batch items anew. State reuse: If a caller explicitly passes a mutable seen set to share state across calls, the function will honor that explicit state reuse (seen parameter is still supported). Therefore the invariant 'each call to process_batch with a fresh batch must process ALL tasks in that batch, regardless of prior calls' holds for the default/no-argument case.",
+    "conclusion": "No flaw found in the chosen fix for the documented invariant: replacing the shared mutable default with a per-call set (seen=None → seen=set() inside) removes unintended cross-call state. The function still allows deliberate sharing when a caller passes a seen set. The code change is minimal, preserves in-call duplicate suppression, and resolves the root cause."
+  },
+  "files": {
+    "code_snippets_v2/mutable_default_b/queue.py": "UNCHANGED",
+    "code_snippets_v2/mutable_default_b/worker.py": "\"\"\"Worker that processes task batches.\"\"\"\n\nfrom queue import create_task\n\n\ndef process_batch(tasks, seen=None):\n    \"\"\"Process a batch of tasks, skipping already-seen ones.\n\n    Invariant: each call to process_batch with a fresh batch must\n    process ALL tasks in that batch, regardless of prior calls.\n    \"\"\"\n    # Fix: do not use a shared mutable default. Create a fresh set per call\n    # when the caller does not provide one.\n    if seen is None:\n        seen = set()\n    results = []\n    for task in tasks:\n        task_id = task[\"name\"]\n        if task_id in seen:\n            continue\n        seen.add(task_id)\n        results.append({\"name\": task[\"name\"], \"result\": \"processed\"})\n    return results\n\n\ndef summarize(results):\n    \"\"\"Summarize processing results (distractor).\"\"\"\n    return f\"{len(results)} tasks processed\""
+  }
+}

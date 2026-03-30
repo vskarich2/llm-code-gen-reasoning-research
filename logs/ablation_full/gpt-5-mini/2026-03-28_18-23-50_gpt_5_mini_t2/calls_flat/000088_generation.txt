@@ -1,0 +1,134 @@
+=== CALL 000088 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: retry_dup_b
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:58:26.578427
+LATENCY_MS: 30578
+
+--- PROMPT ---
+Messages appearing twice in store. Fix the retry logic. Return the updated code.
+
+## Codebase (2 files)
+
+### FILE 1/2: code_snippets_v2/retry_dup_b/sender.py ###
+```python
+"""Message sender with retry and store integration."""
+
+from store import append, notify, get_messages, get_notifications
+
+_attempt_count = 0
+
+
+def reset():
+    global _attempt_count, _messages, _notifications
+    _attempt_count = 0
+    _messages = []
+    _notifications = []
+
+
+def send(msg, fail_first=False):
+    """Send a message: store it and notify.
+
+    If fail_first is True, raises on first call to simulate transient error.
+    """
+    global _attempt_count
+    _attempt_count += 1
+    if fail_first and _attempt_count == 1:
+        raise ConnectionError("transient failure")
+    append(msg)
+    notify(msg)
+    return True
+
+
+def send_with_retry(msg, max_retries=2, fail_first=False):
+    """Retry send on transient errors."""
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            send(msg, fail_first=fail_first)
+            # BUG: no break after success — continues loop, duplicating
+        except ConnectionError as e:
+            last_error = e
+            continue
+    return True
+
+
+def get_attempt_count():
+    return _attempt_count
+```
+
+### FILE 2/2: code_snippets_v2/retry_dup_b/store.py ###
+```python
+"""Message store with notification tracking."""
+
+_messages = []
+_notifications = []
+
+
+def reset():
+    global _messages, _notifications
+    _messages = []
+    _notifications = []
+
+
+def append(msg):
+    """Store a message."""
+    _messages.append(msg)
+
+
+def notify(msg):
+    """Record a notification for the message."""
+    _notifications.append({"msg": msg, "notified": True})
+
+
+def get_messages():
+    return list(_messages)
+
+
+def get_notifications():
+    return list(_notifications)
+
+
+def message_count():
+    return len(_messages)
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/retry_dup_b/sender.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/retry_dup_b/store.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "In sender.send_with_retry the function never stops after a successful call to sender.send because there is no break or return inside the try block. This causes send(msg) to be invoked repeatedly for each iteration of the for-loop. The causal variables are send_with_retry (the retry loop) and send (which calls append and notify), so the missing break/return in send_with_retry leads to multiple calls to append/notify.",
+  "failure_mechanism": "When send_with_retry is called with max_retries > 1 and send does not raise (for example fail_first=False), the for attempt in range(max_retries) loop will call send(msg) on every iteration. Each successful send calls append(msg) and notify(msg), so the message and notification are recorded once per loop iteration. Concretely: with max_retries=3 and fail_first=False, send is called three times, appending the same message three times into store._messages and pushing three notifications into store._notifications.",
+  "broken_invariant": "send_with_retry(msg, max_retries=N) must result in at most one stored message and at most one notification for a single logical send attempt. Specifically, after a successful send (no ConnectionError), store.message_count() increases by exactly 1 and len(get_notifications()) increases by exactly 1. The current code violates this invariant when max_retries > 1 or when the first attempts succeed, because it performs repeated successful sends.",
+  "fix_strategy": "Return immediately after a successful call to send so the loop does not continue and duplicate append/notify. Also, if all attempts fail, re-raise the last ConnectionError to surface the transient failure to the caller. Additionally, fix reset to actually clear the shared store by delegating to store.reset() instead of creating local _messages/_notifications variables. These changes prevent multiple append/notify invocations and ensure the store is reset correctly.",
+  "files": {
+    "code_snippets_v2/retry_dup_b/sender.py": "\"\"\"Message sender with retry and store integration.\"\"\"\n\nfrom store import append, notify, get_messages, get_notifications, reset as store_reset\n\n_attempt_count = 0\n\n\ndef reset():\n    global _attempt_count\n    _attempt_count = 0\n    # delegate to the shared store reset\n    store_reset()\n\n\ndef send(msg, fail_first=False):\n    \"\"\"Send a message: store it and notify.\n\n    If fail_first is True, raises on first call to simulate transient error.\n    \"\"\"\n    global _attempt_count\n    _attempt_count += 1\n    if fail_first and _attempt_count == 1:\n        raise ConnectionError(\"transient failure\")\n    append(msg)\n    notify(msg)\n    return True\n\n\ndef send_with_retry(msg, max_retries=2, fail_first=False):\n    \"\"\"Retry send on transient errors.\"\"\"\n    last_error = None\n    for attempt in range(max_retries):\n        try:\n            send(msg, fail_first=fail_first)\n            # stop retrying after a successful send to avoid duplicates\n            return True\n        except ConnectionError as e:\n            last_error = e\n            continue\n    # if we exited the loop without success, propagate the last error\n    if last_error:\n        raise last_error\n    return False\n\n\ndef get_attempt_count():\n    return _attempt_count\n",
+    "code_snippets_v2/retry_dup_b/store.py": "UNCHANGED"
+  }
+}

@@ -1,0 +1,212 @@
+=== CALL 000203 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: hidden_dep_multihop
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:40:20.663394
+LATENCY_MS: 22626
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+Two separate helper functions in cache_writer.py — refresh_user_snapshot (which calls cache_put_if_absent on _store) and sync_user_to_cache (which calls cache_put on _store) — duplicated related behavior for writing user display names to the same cache (_store). This duplication created inconsistent semantics and confusion about whether callers should overwrite existing cache entries or only write when absent.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Introduce a single consolidated function sync_user_snapshot(user, overwrite=False) that centralizes the logic for storing a user's display name in the cache: when overwrite=True it uses cache_put (replace), otherwise it uses cache_put_if_absent. Update all internal callers to use this single function and pass overwrite=True where an overwrite is intended (rename_user). Provide small thin compatibility wrappers named refresh_user_snapshot and sync_user_to_cache that delegate to the consolidated function so existing external imports using the old names won't break. This removes duplicate implementation while preserving the two behaviors via a single, explicit parameter.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure: external code (outside this codebase) may have imported the old functions and relied on their presence or on their exact behavior. To mitigate, I retained small compatibility wrappers refresh_user_snapshot and sync_user_to_cache that call the new consolidated function with the appropriate flag, so external imports continue to work. Another possible failure is mis-specifying overwrite semantics for internal callers; I updated rename_user to call sync_user_snapshot(updated, overwrite=True) because it updates the user's name and must replace the cache entry; other callers (save_user and bulk_warm_cache) use the default non-overwrite behavior. Given these changes and the compatibility wrappers, the fix is safe within this codebase and backward-compatible externally.
+
+
+# Task Description
+There are too many small cache helper functions doing similar things. Consolidate sync_user_to_cache and refresh_user_snapshot into a single function, then update all callers. Return the updated code.
+
+# Code Produced
+```python
+_store = {}
+
+
+def cache_put(key, value):
+    _store[key] = value
+
+
+def cache_delete(key):
+    _store.pop(key, None)
+
+
+def cache_put_if_absent(key, value):
+    if key not in _store:
+        _store[key] = value
+
+
+def cache_clear_prefix(prefix):
+    to_remove = [k for k in _store if k.startswith(prefix)]
+    for k in to_remove:
+        del _store[k]
+
+
+def sync_user_snapshot(user, overwrite=False):
+    """Store a user's display name in the cache.
+
+    If overwrite is True, replace any existing entry. Otherwise only write
+    if the key is absent.
+    """
+    key = f"user:{user['id']}"
+    if overwrite:
+        cache_put(key, user["name"])
+    else:
+        cache_put_if_absent(key, user["name"])
+
+
+# Backwards-compatible thin wrappers for callers that used the previous names
+def refresh_user_snapshot(user):
+    sync_user_snapshot(user, overwrite=False)
+
+
+def sync_user_to_cache(user):
+    sync_user_snapshot(user, overwrite=True)
+
+
+from user_repo import persist_user, remove_user, sync_user_to_db, lookup_user
+from cache_writer import cache_delete, sync_user_snapshot
+
+
+def save_user(user):
+    persist_user(user)
+    sync_user_snapshot(user)
+
+
+def delete_user(user_id):
+    remove_user(user_id)
+    cache_delete(f"user:{user_id}")
+
+
+def rename_user(user_id, new_name):
+    from user_repo import db
+    db.update_name(user_id, new_name)
+    updated = lookup_user(user_id)
+    if updated:
+        # name changed, ensure cache is updated
+        sync_user_snapshot(updated, overwrite=True)
+
+
+def bulk_warm_cache(users):
+    for u in users:
+        sync_user_snapshot(u)
+
+
+def migrate_legacy_user(legacy_record):
+    converted = {"id": legacy_record["uid"], "name": legacy_record["full_name"]}
+    sync_user_to_db(converted)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+PARTIAL;WRONG;WRONG;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If the duplicate helpers with conflicting write semantics were removed (consolidated to a single function with explicit overwrite control), the inconsistent cache-overwrite behavior and resulting stale/incorrect cache entries would not occur.
+Evidence: refresh_user_snapshot previously used cache_put_if_absent (only write-if-absent); sync_user_to_cache previously used cache_put (always overwrite); new sync_user_snapshot(user, overwrite=False) selects cache_put_if_absent vs cache_put based on overwrite flag; callers like rename_user now call sync_user_snapshot(..., overwrite=True) while save_user and bulk_warm_cache use default non-overwrite; developer left Failure Mechanism and Broken Invariant sections blank so propagation to an observable stale-cache failure was not articulated.
+Judgment: The developer correctly located the duplicated helpers and proposed a fix that aligns with the identified difference in put-vs-put_if_absent semantics, and the code implements that consolidation; however their reasoning is incomplete— they failed to state the concrete invariant violated or the full causal chain from duplicated functions to the observable failure.

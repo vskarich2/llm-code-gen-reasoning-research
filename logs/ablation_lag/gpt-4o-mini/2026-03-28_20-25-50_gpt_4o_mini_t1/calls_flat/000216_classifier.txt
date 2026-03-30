@@ -1,0 +1,149 @@
+=== CALL 000216 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: overdetermination
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:17:08.199347
+LATENCY_MS: 22422
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+update_product function + write_fresh and write_cached + both writers are called redundantly, leading to stale data.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Remove the call to write_cached in update_product, so only write_fresh is used, ensuring fresh data is always written with version tracking.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+The most likely failure mode is that if write_fresh fails to compute a fresh value, the product data may not be updated. This is not a real risk since write_fresh is designed to compute and write fresh data, ensuring the latest value is always stored.
+
+
+# Task Description
+Product updates sometimes show stale data. Both write_fresh and write_cached write product data. Simplify by removing the redundant writer. Return the updated code.
+
+# Code Produced
+```python
+from store import read, get_version
+from writer_a import write_fresh
+
+
+def update_product(product_id, compute_fn):
+    """Update product data. Uses only write_fresh for fresh data."""
+    write_fresh(product_id, compute_fn)
+    return read(product_id)
+
+
+def serve_request(product_id):
+    """Serve product data with version."""
+    return {"value": read(product_id), "version": get_version(product_id)}
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+PARTIAL;WRONG;WRONG;CORRECT;CORRECT;TEMPORAL_ORDERING
+MEDIUM
+Counterfactual: Removing the redundant write_cached call would stop a stale overwrite only if no other writer (or later write_cached) produces stale data and write_fresh reliably computes and writes fresh values; otherwise staleness could still occur.
+Evidence: update_product in provided code calls write_fresh(product_id, compute_fn) and then read(product_id); developer claimed both write_fresh and write_cached were called but did not show the original code or the order; Failure Mechanism and Broken Invariant fields are blank so the propagation (who writes when, which value wins) is undocumented; serve_request uses read() and get_version(), indicating versioning exists but the reasoning never ties stale symptoms to version/order of writes.
+Judgment: The developer correctly targets redundant writers and the supplied fix matches that intent, but the analysis is incomplete—no concrete causal chain or invariant is given, and there is insufficient code evidence that write_cached was the actual overwrite source; the risk assessment also dismisses a plausible failure mode (write_fresh failing) without proof.

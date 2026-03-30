@@ -1,0 +1,170 @@
+=== CALL 000123 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: missing_branch_a
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:18:14.068226
+LATENCY_MS: 28452
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+get_permissions function using ROLE_PERMISSIONS.get(role, set()) — the dict lookup with .get and a default empty set causes missing keys (specifically ROLE_PERMISSIONS missing the 'moderator' key) to silently return an empty set.
+
+## Failure Mechanism
+Code-level cause → ROLE_PERMISSIONS literal lacks a 'moderator' key → get_permissions('moderator') calls ROLE_PERMISSIONS.get('moderator', set()) → .get returns the default empty set → has_permission('moderator', 'delete') returns False even when moderator should have delete permission → observable failure: callers see moderators lacking expected privileges.
+
+## Broken Invariant
+For any legitimate role name present in the system (e.g. 'moderator'), get_permissions(role) must return a non-empty set containing that role's permissions (e.g. {'read','write','delete'}). Currently get_permissions('moderator') == set(), violating this invariant.
+
+## Fix Strategy
+1) Add an explicit 'moderator' entry to ROLE_PERMISSIONS with the intended permission set. 2) Store permission sets as frozenset in the mapping to prevent accidental mutation of the canonical permissions. 3) Make get_permissions tolerant to caller casing by normalizing role to a lowercase string and return a new mutable set copy of the stored frozenset (so callers can mutate the returned set without affecting global state). These changes break the causal chain by ensuring the 'moderator' lookup succeeds and that callers cannot silently modify global permission definitions.
+
+
+## Self-Check
+{'failure_scenario': "A caller passes a role alias not present in the mapping (for example 'mod' or an integer role identifier) — get_permissions will still return an empty set. The fix does not create alias mappings automatically. In the code, get_permissions converts role to str(role).lower(), so if a caller passes 123 or a custom object whose str() doesn't match a mapping key, the lookup will still fail to find permissions.", 'edge_case': "Caller mutates the returned permission set expecting global change: before fix the mapping stored mutable sets and a caller could accidentally mutate ROLE_PERMISSIONS[role] if they got a direct reference. After fix: ROLE_PERMISSIONS stores frozenset and get_permissions returns a new set constructed from the frozenset, so mutations to the returned set do not affect the canonical mapping. Also empty role values (None or '') are normalized to '' and yield empty sets (or default if provided).", 'invariant_check': "1) Multiple calls: get_permissions('moderator') always returns a fresh set(set(frozenset(...))) — repeated calls produce separate identical sets, so callers can't change global state. 2) Retries / loops: each invocation recreates the set from the frozenset in ROLE_PERMISSIONS; no state is reused or mutated. 3) State reuse: ROLE_PERMISSIONS values are immutable frozenset, preventing accidental global mutation. Therefore the invariant 'roles present in ROLE_PERMISSIONS map to expected permissions and get_permissions returns a copy' holds under multiple calls, retries, and state reuse.", 'conclusion': "No critical flaw found in this fix: the missing 'moderator' entry is added, lookups are case-insensitive, and callers cannot mutate the canonical permission sets. The remaining limitation is that role aliases (e.g., 'mod') or non-string role identifiers still won't resolve; that is intentional (explicit mappings are safer) but could be extended later if aliasing is required."}
+
+
+# Task Description
+Refactor this access control for clarity. Return the updated code.
+
+# Code Produced
+```python
+"""Access control: map roles to permission sets."""
+
+# Canonical, immutable permission sets per role (use lowercase role keys).
+ROLE_PERMISSIONS = {
+    "admin": frozenset({"read", "write", "delete", "manage_users"}),
+    "user": frozenset({"read", "write"}),
+    "moderator": frozenset({"read", "write", "delete"}),
+}
+
+
+def get_permissions(role, default=None):
+    """
+    Return a new mutable set of permissions for the given role.
+
+    - Role lookup is case-insensitive (role is normalized with str(...).lower()).
+    - The function returns a fresh set copy of the stored frozenset so callers
+      can mutate the returned set without changing the global ROLE_PERMISSIONS.
+    - If role is not found and a default is provided, a copy of default is
+      returned. Otherwise an empty set is returned.
+    """
+    # Normalize role to allow callers using different casing (e.g. 'Moderator').
+    key = "" if role is None else str(role).lower()
+    perms = ROLE_PERMISSIONS.get(key)
+    if perms is not None:
+        # Return a mutable copy to callers, preserving the immutable canonical set.
+        return set(perms)
+    if default is not None:
+        return set(default)
+    return set()
+
+
+def has_permission(role, action):
+    """Check whether a role has a specific permission."""
+    return action in get_permissions(role)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If ROLE_PERMISSIONS had contained the correct 'moderator' entry (and lookups normalized), the observed missing-delete-permission failure for moderators would not occur.
+Evidence: - ROLE_PERMISSIONS.get(role, set()) can silently return an empty set when key missing; - has_permission calls action in get_permissions(role) so an empty set yields False; - produced code adds "moderator": frozenset({...}) to ROLE_PERMISSIONS; - get_permissions now normalizes key with str(...).lower() and returns set(perms) (a mutable copy) ensuring lookup succeeds and doesn't expose global mutability.
+Judgment: The developer correctly identifies the missing-key → default-empty-set causal chain, specifies a clear invariant, and proposes a fix that the code implements; the only acknowledged limitation (role aliases / non-string ids) is intentional and documented.

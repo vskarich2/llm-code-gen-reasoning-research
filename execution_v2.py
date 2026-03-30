@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from contracts_v2 import CONDITION_TO_SCHEMA, V2_CONDITIONS
-from parser_v2 import parse_generation_v2
+from parser_v2 import parse_v2_execution, parse_v2_format, parse_v2_recovery
 from reasoning_v2 import normalize_generation_v2
 from evaluator_v2 import (
     build_classifier_v2_vars, parse_classifier_v2_output,
@@ -23,12 +23,18 @@ from metrics_v2 import derive_v2_signals
 _log = logging.getLogger("t3.execution_v2")
 
 
-def run_v2(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
+def run_v2(case: dict, model: str, condition: str, logger,
+           case_start_eid: int = 0) -> tuple[str, str, dict]:
     """Run a v2 condition. Single entry point called from runner.py.
 
     Handles: baseline_v2, leg_reduction_v2, leg_reduction_lean_v2.
     Returns (case_id, condition, ev) — same signature as v1 run functions.
+
+    Args:
+        logger: RunLogger instance. Required. Passed explicitly through call stack.
     """
+    if logger is None:
+        raise RuntimeError("run_v2 requires an explicit logger")
     if condition not in V2_CONDITIONS:
         raise ValueError(f"run_v2 called with non-v2 condition: {condition}")
 
@@ -37,7 +43,7 @@ def run_v2(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
     from llm import call_model
     from exec_eval import exec_evaluate
     from experiment_config import get_config
-    from call_logger import set_call_context, set_prompt_provenance
+    from execution import _capture_prompt_assembly
 
     t0 = time.monotonic()
     config = get_config()
@@ -52,7 +58,6 @@ def run_v2(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
 
     schema_variant = CONDITION_TO_SCHEMA[condition]
 
-    # Build schema_line for output_instruction_v3 (baseline_v2 only)
     schema_line = ""
     if condition == "baseline_v2":
         schema_line = (
@@ -71,15 +76,37 @@ def run_v2(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
     components = list(spec["components"])
     rendered = _assembly_build(components, variables)
     prompt = rendered.final_prompt
-
-    set_prompt_provenance(rendered, variables, condition=condition)
-    set_call_context(phase="generation", case_id=cid, condition=condition, attempt_index=0)
+    prompt_asm = _capture_prompt_assembly(rendered, variables, condition, prompt)
 
     # ── STAGE 2: Call model ──
-    raw_response = call_model(prompt, model=model, raw=True)
+    raw_response = call_model(
+        prompt, model=model, raw=True,
+        logger=logger, case_id=cid, phase="generation",
+        condition=condition, prompt_assembly=prompt_asm,
+        parent_event_id=case_start_eid,
+    )
+    gen_eid = logger._event_counter
 
-    # ── STAGE 3: Parse (parser_v2 — sole authority) ──
-    parsed_gen = parse_generation_v2(raw_response, condition)
+    # ── STAGE 3: Parse (three-tier: execution drives, format+recovery diagnostic) ──
+    parse_exec = parse_v2_execution(raw_response, condition)
+    parse_fmt = parse_v2_format(raw_response, condition)
+    parse_rec = parse_v2_recovery(raw_response, condition)
+
+    parsed_gen = parse_exec  # ONLY execution enters pipeline
+
+    # Compute execution-recovery equivalence
+    parse_rec.execution_equivalent = (
+        parse_exec.parse_valid
+        and parse_rec.parse_valid
+        and parse_exec.full_json == parse_rec.full_json
+    )
+
+    # Invariant check: execution subset of recovery
+    if parse_exec.parse_valid and not parse_rec.parse_valid:
+        _log.error(
+            "INVARIANT VIOLATION: execution parsed but recovery failed. case=%s condition=%s",
+            cid, condition,
+        )
 
     # ── STAGE 4: Normalize ──
     artifact = normalize_generation_v2(parsed_gen, case, condition)
@@ -87,7 +114,6 @@ def run_v2(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
     # ── STAGE 5: Extract code + execute ──
     code = ""
     if parsed_gen.files_dict:
-        # Reconstruct code from files dict
         from reconstructor import reconstruct_strict
         manifest_files = case.get("code_files_contents", {})
         manifest_paths = list(manifest_files.keys())
@@ -100,18 +126,23 @@ def run_v2(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
 
     # ── STAGE 6: Classify (only if parse succeeded) ──
     classifier_result = ClassifierResultV2()
+    classify_eid = gen_eid  # default parent if classifier doesn't run
     if parsed_gen.parse_status == "success":
         classifier_vars, source_for_classifier = build_classifier_v2_vars(
             artifact, case, code, config
         )
         classifier_result.commitment_source_for_classifier = source_for_classifier
 
-        set_call_context(phase="classifier", case_id=cid, condition=condition, attempt_index=0)
+        classify_prompt = _assembly_build(["classify_reasoning_v2"], classifier_vars).final_prompt
         classify_raw = call_model(
-            _assembly_build(["classify_reasoning_v2"], classifier_vars).final_prompt,
+            classify_prompt,
             model=config.models.evaluator.name,
             raw=True,
+            logger=logger, case_id=cid, phase="classification",
+            condition=condition,
+            parent_event_id=gen_eid,
         )
+        classify_eid = logger._event_counter
         classifier_result = parse_classifier_v2_output(classify_raw)
         classifier_result.commitment_source_for_classifier = source_for_classifier
     else:
@@ -130,7 +161,6 @@ def run_v2(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
         commitments_source=artifact.commitments_source,
     )
 
-    # Handle parse/classifier failures for category
     if parsed_gen.parse_status != "success":
         signals.v2_category = "parser_failure_v2"
         signals.legacy_compat_category = "parse_failed"
@@ -146,13 +176,27 @@ def run_v2(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
         model=model,
     )
 
+    # Parse tier diagnostics (never consumed by pipeline)
+    ev["v2_parse_tiers"] = {
+        "exec_parse_valid": parse_exec.parse_valid,
+        "exec_schema_valid": parse_exec.schema_valid,
+        "exec_parse_error": parse_exec.parse_error,
+        "format_valid": parse_fmt.format_valid,
+        "format_error": parse_fmt.format_error,
+        "recovery_parse_valid": parse_rec.parse_valid,
+        "recovery_schema_valid": parse_rec.schema_valid,
+        "recovery_type": parse_rec.recovery_type,
+        "recovery_steps": parse_rec.recovery_steps,
+        "execution_equivalent": parse_rec.execution_equivalent,
+        "recoverable": not parse_exec.parse_valid and parse_rec.parse_valid,
+        "possible_mis_extraction": parse_exec.possible_mis_extraction,
+        "schema_normalization": parse_rec.schema_normalization_applied,
+        "invariant_violation": parse_exec.parse_valid and not parse_rec.parse_valid,
+    }
+
     elapsed = time.monotonic() - t0
 
-    # ── STAGE 9: Log ──
-    # Reuse existing logging infrastructure
-    from execution import write_log, _emit_metrics_event
-
-    # Build a parsed dict compatible with write_log signature
+    # ── STAGE 9: Log via explicit logger ──
     parsed_compat = {
         "code": code,
         "reasoning": f"Root cause: {artifact.normalized_root_cause}\nFix strategy: {artifact.normalized_fix_strategy}",
@@ -161,7 +205,12 @@ def run_v2(case: dict, model: str, condition: str) -> tuple[str, str, dict]:
         "data_lineage": ["raw_output_received", "parser_v2"],
     }
 
-    write_log(cid, condition, model, prompt, raw_response, parsed_compat, ev)
-    _emit_metrics_event(case, model, condition, ev, elapsed_seconds=round(elapsed, 2))
+    # Determine parent: classify_eid if classifier ran, else gen_eid
+    last_eid = classify_eid if parsed_gen.parse_status == "success" else gen_eid
+    end_eid = logger.end_case(cid, condition=condition, raw_ev=ev,
+                              runtime_ms=round(elapsed * 1000),
+                              parent_event_id=last_eid)
+    logger.log_run(cid, condition, prompt, raw_response, parsed_compat,
+                   canonical_event_id=end_eid)
 
     return cid, condition, ev

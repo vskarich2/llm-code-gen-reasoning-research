@@ -1,0 +1,206 @@
+=== CALL 000201 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: hidden_dep_multihop
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:52:09.407099
+LATENCY_MS: 16884
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+cache_writer.refresh_user_snapshot uses cache_put_if_absent on _store via cache_put_if_absent(f"user:{user['id']}", user['name']) — the use of cache_put_if_absent (operation) prevents updating an existing cached display name when callers expect the cache to reflect the current DB value.
+
+## Failure Mechanism
+rename_user or save_user → call refresh_user_snapshot(user) → refresh_user_snapshot calls cache_put_if_absent which checks if key exists and does nothing if present → existing cache entry (old name) remains unchanged → cache_reader.get_display_name(user_id) returns stale name → callers that format or display the name observe the old value instead of the updated DB name.
+
+## Broken Invariant
+After a successful rename_user(user_id, new_name) or save_user(user) that updates the persisted user name, the cache key 'user:<id>' must equal the DB-stored user['name']; currently this invariant can be false (cache != DB) when the cache key already exists.
+
+## Fix Strategy
+Consolidate the two similar functions into a single function sync_user_to_cache(user, overwrite=False) in cache_writer.py. Implement it so when overwrite=True it uses cache_put (always write) and when overwrite=False it uses cache_put_if_absent (warm-only). Update all callers in user_service.py to call the unified function. Specifically: save_user and rename_user should call sync_user_to_cache(..., overwrite=True) to ensure the cache reflects the persisted DB state after changes; bulk_warm_cache should call sync_user_to_cache(..., overwrite=False) to preserve warm-only behavior. This breaks the causal chain by removing the separate refresh_user_snapshot (which used cache_put_if_absent unconditionally) and providing explicit control over overwriting the cache so callers that mutate the DB force a cache update.
+
+
+## Self-Check
+{'failure_scenario': 'If callers pass malformed user dicts (missing \'id\' or \'name\'), sync_user_to_cache will raise a KeyError at f"user:{user[\'id\']}" or user[\'name\']. This will surface as an exception and prevent cache updates. The original code had the same KeyError behavior, so this is unchanged.', 'edge_case': "bulk_warm_cache uses the default overwrite=False to avoid stomping existing entries. If bulk_warm_cache is called after a rename (and the cache already contains an old name), bulk_warm_cache will not overwrite, preserving the current cache value. However, our rename_user uses overwrite=True so the overwrite ordering of operations matters: if bulk_warm_cache runs concurrently with rename_user there is a race where warm may run after rename and set a put_if_absent (which won't overwrite) — put_if_absent cannot revert an overwrite. The real race is if bulk_warm_cache used overwrite=False and ran before rename_user finished; then rename_user overwrite=True will overwrite to new name as intended.", 'invariant_check': "Invariant: After rename_user(user_id, new_name) or save_user(user) completes, cache key 'user:<id>' equals the DB-stored name. Verify under scenarios:\n- multiple calls: calling save_user twice with the same updated name will call sync_user_to_cache(..., overwrite=True) both times, last write sets correct value. The function uses cache_put when overwrite=True which assigns _store[key]=value deterministically.\n- retries/loops: repeated calls with overwrite=True are idempotent for setting the same value (no harmful growth); retries will reassign the same string. For loops that warm or update many users, using overwrite appropriately prevents accidental suppression of updates.\n- state reuse: _store is a module-level dict; sync_user_to_cache writes to it directly. No state is cached in the function, so repeated calls reuse the same store consistently.\nConcretely, rename_user: db.update_name updates UserDB._rows; lookup_user returns updated dict; sync_user_to_cache(updated, overwrite=True) executes cache_put(key,value) which sets _store[f'user:{id}'] to new_name — satisfying invariant.\n", 'conclusion': 'No fundamental flaw remains: the fix preserves prior warm-only behavior for bulk warming (overwrite=False) and ensures write-through behavior (overwrite=True) for operations that change persisted data (save_user and rename_user). The only remaining risks are malformed user dicts causing KeyError (same as before) and external concurrent access to _store (existing module-level mutability). These are outside the scope of this consolidation. Therefore the fix is safe and addresses the stale-cache bug.'}
+
+
+# Task Description
+There are too many small cache helper functions doing similar things. Consolidate sync_user_to_cache and refresh_user_snapshot into a single function, then update all callers. Return the updated code.
+
+# Code Produced
+```python
+_store = {}
+
+
+def cache_put(key, value):
+    _store[key] = value
+
+
+def cache_delete(key):
+    _store.pop(key, None)
+
+
+def cache_put_if_absent(key, value):
+    if key not in _store:
+        _store[key] = value
+
+
+def cache_clear_prefix(prefix):
+    to_remove = [k for k in _store if k.startswith(prefix)]
+    for k in to_remove:
+        del _store[k]
+
+
+def sync_user_to_cache(user, overwrite=False):
+    """Write a user's display name into the cache.
+
+    If overwrite is True, always write (cache_put). If False, only
+    write if the key is absent (cache_put_if_absent) — useful for
+    warming the cache without stomping existing entries.
+    """
+    key = f"user:{user['id']}"
+    value = user["name"]
+    if overwrite:
+        cache_put(key, value)
+    else:
+        cache_put_if_absent(key, value)
+
+
+from user_repo import persist_user, remove_user, sync_user_to_db, lookup_user
+from cache_writer import cache_delete, sync_user_to_cache
+
+
+def save_user(user):
+    persist_user(user)
+    # After persisting, ensure cache reflects the persisted name
+    sync_user_to_cache(user, overwrite=True)
+
+
+def delete_user(user_id):
+    remove_user(user_id)
+    cache_delete(f"user:{user_id}")
+
+
+def rename_user(user_id, new_name):
+    from user_repo import db
+    db.update_name(user_id, new_name)
+    updated = lookup_user(user_id)
+    if updated:
+        # Rename must overwrite any existing cached value
+        sync_user_to_cache(updated, overwrite=True)
+
+
+def bulk_warm_cache(users):
+    for u in users:
+        # Warm-only: do not overwrite existing cached entries
+        sync_user_to_cache(u)
+
+
+def migrate_legacy_user(legacy_record):
+    converted = {"id": legacy_record["uid"], "name": legacy_record["full_name"]}
+    sync_user_to_db(converted)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL;PARTIAL_STATE_UPDATE
+MEDIUM
+Counterfactual: If the cache update used an unconditional write (cache_put) instead of cache_put_if_absent after DB changes, the stale-display-name failures would not occur.
+Evidence: - cache_put_if_absent(key,value) only writes when key not in _store (top of code) ; - original root cause identified: refresh_user_snapshot used cache_put_if_absent so existing cached old name persisted; - fix introduces sync_user_to_cache(user, overwrite=False) and uses overwrite=True in save_user and rename_user so those paths call cache_put and update _store[f"user:{id}"] to new name; - bulk_warm_cache preserves warm-only behavior by calling sync_user_to_cache without overwrite; - code-level inconsistency: file defines cache_delete/sync_user_to_cache then later does "from cache_writer import cache_delete, sync_user_to_cache" (possible circular/duplicate import), indicating the produced code doesn't fully align with module boundaries.
+Judgment: The developer's causal reasoning is correct and the proposed fix directly addresses the stale-cache mechanism; however the delivered code only partially matches the described modularization (duplicate import/cross-module confusion), so while the logic is right the implementation has integration issues to resolve.

@@ -1,0 +1,161 @@
+=== CALL 000192 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: feature_flag_drift
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:47:01.652183
+LATENCY_MS: 16441
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+api.checkout function: the parameter use_new_pricing is not used (no assignment or call) → the global feature flag new_pricing in flags.py is never changed before create_invoice runs, so compute_price (which reads flags.is_enabled('new_pricing')) continues to use the previous flag state.
+
+## Failure Mechanism
+caller passes use_new_pricing=True → checkout() does not set the 'new_pricing' flag (no mutation of flags._flags) → create_invoice() calls compute_price() which calls is_enabled('new_pricing') and sees the old value (False) → compute_price selects _v1_price instead of _v2_price → invoice amounts and pricing_version are incorrect for that checkout call (observable mismatch between requested pricing and billed pricing).
+
+## Broken Invariant
+For any call checkout(customer, items, use_new_pricing=X), the produced invoice must have invoice['pricing_version'] == ('v2' if X is True else 'v1') and item amounts computed using the corresponding pricing version. This is currently violated when use_new_pricing differs from the current global flag.
+
+## Fix Strategy
+Modify api.checkout to propagate the use_new_pricing parameter by temporarily setting the global flag before calling create_invoice and restoring the previous flag value afterward. This breaks the causal chain because compute_price/get_pricing_version consult flags.is_enabled('new_pricing') during invoice creation; setting the flag ensures those calls observe the requested value. Use try/finally to restore original flag even if create_invoice raises, preventing permanent mutation of global state.
+
+
+## Self-Check
+{'failure_scenario': "Concurrent requests: if two threads call checkout simultaneously with different use_new_pricing values, the temporary global toggle will race (thread A sets new_pricing=True then thread B sets new_pricing=False); compute_price calls from one request may observe the other request's temporary setting leading to mixed pricing. Because flags._flags is a global mutable state and there's no locking, this remains a possible failure under concurrency.", 'edge_case': 'create_invoice raises an exception (e.g., malformed item that causes a KeyError) — ensure flag restoration still occurs. Empty items list: compute_price not called; pricing_version still must reflect requested flag for the invoice. The code uses try/finally to restore the flag, covering exceptions. An empty items list still produces an invoice and get_pricing_version() will reflect the temporarily-set flag.', 'invariant_check': "After the fix, for multiple sequential calls: - Each checkout call captures prev = is_enabled('new_pricing'), sets the flag according to use_new_pricing, calls create_invoice, then restores prev in finally. Thus after each call flags._flags['new_pricing'] equals its original value. For retries/loops where checkout is called repeatedly, the same capture/set/restore behavior preserves original state after each call. State reuse: if a long-running process toggles flags elsewhere, checkout always restores to whatever prev was at its start, so it does not permanently mutate global state.", 'conclusion': "The fix addresses the original bug for single-threaded or non-concurrent usages: it ensures checkout's use_new_pricing argument controls the pricing observed by compute_price/get_pricing_version for that invocation and that the global flag is restored afterward. A remaining flaw is concurrency: because flags are global, concurrent checkouts with different use_new_pricing values can race. If the application must be safe under concurrent requests, the fix should be revised to propagate the flag as a parameter through create_invoice -> compute_price (avoid global mutation) or to add synchronization. For the current codebase and tests that use single-threaded execution, this change is correct and safe."}
+
+
+# Task Description
+The checkout function takes a use_new_pricing flag but pricing doesn't seem to respect it. Fix the flag propagation. Return the updated code.
+
+# Code Produced
+```python
+from billing import create_invoice, get_invoices
+from flags import enable, disable, is_enabled
+
+
+def checkout(customer, items, use_new_pricing=False):
+    # Preserve previous flag state so we don't permanently mutate global flags
+    prev = is_enabled("new_pricing")
+    try:
+        if use_new_pricing:
+            enable("new_pricing")
+        else:
+            disable("new_pricing")
+        invoice = create_invoice(customer, items)
+    finally:
+        # Restore previous state even if create_invoice raises
+        if prev:
+            enable("new_pricing")
+        else:
+            disable("new_pricing")
+
+    return invoice
+
+
+def admin_report():
+    return get_invoices()
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: If checkout did set the pricing observable used by compute_price (or compute_price accepted an explicit pricing parameter) the mismatch would not occur.
+Evidence: prev = is_enabled("new_pricing") in checkout captures current global flag; enable()/disable() are called before create_invoice(customer, items) so compute_price (which calls flags.is_enabled('new_pricing')) will observe the temporary value; finally restores prev via enable()/disable() so global flags._flags is returned to prior state; create_invoice is the code path that reads flags.is_enabled so switching the flag here directly affects invoice['pricing_version'] and item amounts; concurrency risk remains because flags._flags is mutated globally and no locking exists.
+Judgment: The developer correctly identified the specific global-flag dependency and the causal chain from missing mutation to wrong pricing; the proposed fix and produced code implement that fix exactly, but the reasoning correctly calls out (and the code retains) a remaining concurrency hazard.

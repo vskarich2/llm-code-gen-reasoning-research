@@ -1,0 +1,278 @@
+=== CALL 000208 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: commit_gate
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:54:59.240760
+LATENCY_MS: 29952
+
+--- PROMPT ---
+After simplifying the pipeline by removing commit() and freeze_view(), the system is broken. Restore the necessary steps. Return the updated code.
+
+## Codebase (5 files)
+
+### FILE 1/5: code_snippets_v2/commit_gate/state.py ###
+```python
+def make_state(entries):
+    return {
+        "raw": list(entries),
+        "pending": [],
+        "stable": [],
+        "view": [],
+        "meta": {"version": 0, "frozen": False},
+    }
+```
+
+### FILE 2/5: code_snippets_v2/commit_gate/reducers.py ###
+```python
+def normalize(raw):
+    return [dict(e) for e in raw]
+
+
+def collapse(entries):
+    merged = {}
+    for e in entries:
+        merged[e["id"]] = e
+    return list(merged.values())
+
+
+def stage(st, data):
+    st["pending"] = list(data)
+    st["view"] = list(data)
+    st["meta"]["version"] += 1
+
+
+def commit(st):
+    """Promote pending to stable. Sorts by id for canonical ordering. Sets frozen gate."""
+    st["stable"] = sorted(st["pending"], key=lambda e: e["id"])
+    st["meta"]["frozen"] = True
+
+
+def freeze_view(st):
+    """Rebuild view from committed (stable) data."""
+    st["view"] = list(st["stable"])
+
+
+def materialize(st):
+    return list(st["view"])
+```
+
+### FILE 3/5: code_snippets_v2/commit_gate/selectors.py ###
+```python
+def get_committed_total(st):
+    """Returns total only if state is committed (frozen). None otherwise."""
+    if not st["meta"]["frozen"]:
+        return None
+    return sum(e.get("val", 0) for e in st["stable"])
+
+
+def get_view_digest(st):
+    """Order-sensitive digest of view items."""
+    return "|".join(e["id"] for e in st["view"])
+
+
+def get_committed_digest(st):
+    """Order-sensitive digest of committed items."""
+    if not st["meta"]["frozen"]:
+        return None
+    return "|".join(e["id"] for e in st["stable"])
+```
+
+### FILE 4/5: code_snippets_v2/commit_gate/pipeline.py ###
+```python
+from state import make_state
+from reducers import normalize, collapse, stage, commit, freeze_view, materialize
+
+
+def process_batch(entries):
+    st = make_state(entries)
+    cleaned = normalize(st["raw"])
+    merged = collapse(cleaned)
+    stage(st, merged)
+    # commit(st)       — removed as "redundant"
+    # freeze_view(st)  — removed as "redundant"
+    return st, materialize(st)
+```
+
+### FILE 5/5: code_snippets_v2/commit_gate/api.py ###
+```python
+from pipeline import process_batch
+from selectors import get_committed_total, get_view_digest, get_committed_digest
+from reducers import stage
+from state import make_state
+
+
+def ingest(entries):
+    st, items = process_batch(entries)
+    total = get_committed_total(st)
+    return {"items": items, "total": total}
+
+
+def preview(entries):
+    from reducers import normalize, collapse
+    st = make_state(entries)
+    cleaned = normalize(st["raw"])
+    merged = collapse(cleaned)
+    stage(st, merged)
+    return {"items": list(st["view"]), "frozen": st["meta"]["frozen"]}
+
+
+def ingest_and_verify(entries):
+    """Full pipeline: ingest then verify view is consistent with committed data."""
+    st, items = process_batch(entries)
+    committed_total = get_committed_total(st)
+    view_digest = get_view_digest(st)
+    committed_digest = get_committed_digest(st)
+    return {
+        "items": items,
+        "committed_total": committed_total,
+        "consistent": view_digest == committed_digest,
+    }
+```
+
+You are implementing a STRICT reasoning + code generation procedure designed to REDUCE reasoning-execution mismatch.
+
+This is NOT a formatting task. This is a TWO-PASS reasoning process with adversarial verification.
+
+You MUST follow the procedure exactly.
+
+Return a SINGLE valid JSON object. No text outside JSON. No markdown fences.
+
+# GOAL
+
+Fix the bug AND ensure your reasoning is causally correct and robust to failure.
+
+You are required to:
+- identify the correct mechanism
+- challenge your own hypothesis
+- verify your fix against failure scenarios
+
+# PROCEDURE (MANDATORY)
+
+## STEP 1 — DIAGNOSE (PRIMARY HYPOTHESIS)
+
+Identify:
+
+- root_cause:
+  Name the exact function + variable + operation causing the bug.
+  Must describe a causal relationship (not just "missing X").
+
+- failure_mechanism:
+  Give a concrete scenario:
+  cause → mutation/event → propagation → observable failure
+
+- broken_invariant:
+  A specific, testable property that is violated.
+
+## STEP 2 — ALTERNATIVE HYPOTHESIS (CRITICAL)
+
+Propose ONE alternative explanation for the bug.
+
+- What else could plausibly be the cause?
+- Why might your primary hypothesis be wrong?
+
+Then explicitly reject it:
+
+- Why is your original diagnosis more correct?
+- What evidence in the code supports this?
+
+This step is REQUIRED. Do not skip.
+
+## STEP 3 — PLAN FIX
+
+Describe:
+
+- fix_strategy:
+  What exact change you will make
+  Why it breaks the causal chain
+
+Must reference actual code behavior.
+
+## STEP 4 — CODE
+
+Implement the fix.
+
+Rules:
+- Modify ONLY necessary files
+- Return COMPLETE contents for modified files
+- Use "UNCHANGED" for others
+
+## STEP 5 — ADVERSARIAL SELF-CHECK (MANDATORY)
+
+You must actively try to BREAK your own fix.
+
+Answer ALL:
+
+1. Failure Scenario:
+   Describe a concrete scenario where your fix might still fail.
+
+2. Edge Case:
+   Identify a boundary condition (e.g., retries, empty values, ordering).
+
+3. Invariant Check:
+   Verify your invariant holds under:
+   - multiple calls
+   - retries / loops
+   - state reuse
+
+4. Conclusion:
+   - If a flaw is found → REVISE your fix
+   - If no flaw → explain WHY it is safe
+
+Your answer MUST reference your actual code.
+
+# OUTPUT FORMAT (STRICT JSON)
+
+{
+  "root_cause": "<exact function + variable + causal relationship>",
+  "failure_mechanism": "<cause → mutation → propagation → observable failure>",
+  "broken_invariant": "<specific testable property that is violated>",
+  "alternative_hypothesis": "<one alternative explanation for the bug>",
+  "hypothesis_rejection": "<why primary hypothesis is correct, with code evidence>",
+  "fix_strategy": "<what change you will make and why it breaks the causal chain>",
+  "self_check": {
+    "failure_scenario": "<concrete scenario where fix might still fail>",
+    "edge_case": "<boundary condition to test>",
+    "invariant_check": "<verify invariant under multiple calls, retries, state reuse>",
+    "conclusion": "<flaw found → revise, or why it is safe>"
+  },
+  "files": {"<path>": "<complete file contents or UNCHANGED>"}
+}
+
+# RULES
+
+- All fields are REQUIRED and must be substantive
+- No generic statements — ground every claim in actual code
+- Must reference actual variables and behavior
+- Do NOT restate the task
+- Do NOT skip alternative hypothesis
+- Do NOT skip adversarial self-check
+- For files you did NOT modify, set value to "UNCHANGED"
+- Do NOT include markdown formatting (no ```python blocks) inside file values
+- File values must be raw Python source code, not markdown
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "pipeline.process_batch removed calls to reducers.commit() and reducers.freeze_view(), causing st[\"stable\"] to remain unset and st[\"meta\"][\"frozen\"] to remain False after staging. The missing operations (commit -> mutation of st['stable'] and st['meta']['frozen'], freeze_view -> mutation of st['view']) are the direct cause of inconsistent outputs.",
+  "failure_mechanism": "process_batch: entries -> make_state creates st with st['raw'] populated. normalize/collapse produce merged. stage(st, merged) sets st['pending']=merged, st['view']=merged and increments st['meta']['version']. Because commit(st) and freeze_view(st) were removed, st['stable'] remains its initial empty list and st['meta']['frozen'] remains False. This propagates to selectors: get_committed_total(st) returns None (because it checks st['meta']['frozen']), get_committed_digest(st) returns None, while get_view_digest(st) returns an id list string. Observable failures: ingest returns total=None instead of a numeric sum; ingest_and_verify reports inconsistent view vs committed because committed digest is None, and preview/consistency semantics deviate from intended committed/view agreement.",
+  "broken_invariant": "After process_batch returns, the invariant 'if st[\"meta\"][\"version\"] > 0 then st[\"meta\"][\"frozen\"] is True and st[\"view\"] equals st[\"stable\"] and get_committed_total(st) is numeric' is violated. Specifically: st['meta']['frozen'] == True and get_view_digest(st) == get_committed_digest(st) is expected but not held.",
+  "alternative_hypothesis": "The bug could be that normalize() or collapse() are producing malformed entries (e.g., missing 'val' or 'id'), causing selectors to behave unexpectedly, rather than missing commit/freeze steps. For example, if collapse returned entries without 'id' then get_committed_digest or get_view_digest could fail or be incorrect.",
+  "hypothesis_rejection": "This alternative is less likely because the code shows explicit commented-out calls in pipeline.py: \"# commit(st) — removed as \\\"redundant\\\"\" and \"# freeze_view(st) — removed as \\\"redundant\\\"\" indicating an intentional removal. Also, reducers.normalize and collapse return reasonable values: normalize makes dict copies, collapse creates merged dict keyed by e['id'] (so if an entry lacked 'id' it would have failed earlier). The observable failures described (frozen flag False, stable empty) map directly to the absence of commit() and freeze_view(), which are the only places that set st['stable'] and st['meta']['frozen'] and rebuild st['view'] from st['stable']. Thus the primary diagnosis (missing commit/freeze_view in pipeline.process_batch) matches the explicit code changes and the failure symptoms.",
+  "fix_strategy": "Restore the removed operations in process_batch: after staging, call commit(st) to promote pending to stable and set st['meta']['frozen']=True and then call freeze_view(st) to rebuild st['view'] from st['stable']. This breaks the causal chain because it ensures st['stable'] is populated and st['meta']['frozen'] is True before materialize(st) and selectors are used, restoring the invariant that committed and view data are consistent and that committed totals/digests are available.",
+  "self_check": {
+    "failure_scenario": "If another caller takes the returned state st and calls stage(st, ...) again (re-staging) without resetting st['meta']['frozen'] to False, the system could claim data is committed while view/pending are inconsistent. Specifically: process_batch now commits and freezes; if a consumer then calls stage(st, new_pending) on that same st, stage increments version and replaces st['view'] but does not clear st['meta']['frozen'], so get_committed_total still returns the previous committed total while st['view'] reflects new pending. This is a possible misuse of returned st rather than an error in process_batch, but it is a realistic failure path.",
+    "edge_case": "Empty input entries: make_state([]) -> normalize([]) -> collapse([]) -> stage assigns pending=[], view=[] and increments version. commit(sorted([])) leaves st['stable']=[] and sets frozen True. freeze_view copies []. get_committed_total returns 0 (sum of empty). The code handles this fine. Another edge case: duplicate ids where collapse keeps the last seen entry; commit sorts by id which will canonicalize ordering. If stable ordering is expected to reflect insertion order rather than id sort, that domain expectation might be violated, but this was existing behavior.",
+    "invariant_check": "Multiple calls: process_batch creates a fresh state via make_state(entries) each time, so repeated calls produce independent states. For retries/loops where the caller discards previous state and calls process_batch again, the invariant holds because commit() and freeze_view() are executed each run. For state reuse: if a caller reuses a returned st and calls stage(st, ...) again, our invariant 'frozen implies stable reflects last committed view' could be violated because stage does not clear st['meta']['frozen']. This is a caller misuse pattern; to fully guard against it we'd need to modify stage() to clear the frozen flag when staging new pending data, but that change is beyond the minimal fix requested. Given existing code patterns (preview creates fresh state and process_batch returns fresh states), restoring commit/freeze_view in process_batch suffices to reestablish invariants for normal usage.",
+    "conclusion": "No flaw in the minimal fix for the intended usage: restoring commit() and freeze_view() in process_batch ensures that after processing, st['stable'] and st['view'] are consistent and st['meta']['frozen'] is set, which resolves the original observable failures (ingest returning None total, inconsistent digests). The only remaining risk is misuse of returned state by re-staging without clearing frozen; if that becomes a real issue, adjust reducers.stage to clear st['meta']['frozen'] when new pending data arrives. For now, the minimal, correct repair is to reintroduce commit and freeze_view in pipeline.process_batch as implemented below.",
+  "files": {
+    "code_snippets_v2/commit_gate/pipeline.py": "from state import make_state\nfrom reducers import normalize, collapse, stage, commit, freeze_view, materialize\n\n\ndef process_batch(entries):\n    st = make_state(entries)\n    cleaned = normalize(st[\"raw\"])\n    merged = collapse(cleaned)\n    stage(st, merged)\n    # commit and freeze_view are required to promote pending -> stable and\n    # ensure the view reflects the committed (stable) data. They were removed\n    # previously and that caused selectors to observe an uncommitted state.\n    commit(st)\n    freeze_view(st)\n    return st, materialize(st)\n",
+    "code_snippets_v2/commit_gate/state.py": "UNCHANGED",
+    "code_snippets_v2/commit_gate/reducers.py": "UNCHANGED",
+    "code_snippets_v2/commit_gate/selectors.py": "UNCHANGED",
+    "code_snippets_v2/commit_gate/api.py": "UNCHANGED"
+  }
+}

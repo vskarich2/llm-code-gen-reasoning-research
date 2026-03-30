@@ -1,0 +1,199 @@
+=== CALL 000171 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: silent_default_a
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:25:39.379963
+LATENCY_MS: 16063
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+is_enabled + FLAGS + causal relationship: is_enabled used FLAGS.get(flag_name, False) without normalizing caller-provided names; callers passed camelCase (e.g., 'darkMode') while FLAGS uses snake_case ('dark_mode'), so the lookup failed and .get returned the default False silently.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Introduce a normalization helper (_normalize_flag_name) that converts incoming flag names from camelCase, PascalCase, kebab-case, or space-separated forms into snake_case, then perform an explicit lookup using the normalized name. This ensures 'darkMode' -> 'dark_mode' before checking FLAGS and prevents mismatches caused by differing naming styles.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure mode: callers pass a non-string (e.g., None or an object) or an unusual identifier that doesn't normalize to an existing flag, which will either raise a TypeError or return False. I revised the fix to explicitly check the input type and raise a clear TypeError for non-strings; for unknown-but-validly-typed names the function returns False (preserving a safe default). The normalization covers camelCase, PascalCase, kebab-case, and space-separated names and includes collapsing duplicate separators, so typical naming variants are handled safely.
+
+
+# Task Description
+Refactor this feature flag module for clarity. Return the updated code.
+
+# Code Produced
+```python
+import re
+
+"""Feature flag system with snake_case keys.
+
+This module accepts common naming variants (camelCase, PascalCase, kebab-case,
+space separated) for flag lookups by normalizing them to snake_case before
+checking the FLAGS mapping.
+"""
+
+FLAGS = {
+    "dark_mode": True,
+    "beta_features": False,
+    "new_dashboard": True,
+    "analytics_v2": False,
+}
+
+
+def _normalize_flag_name(name):
+    """Normalize a flag name to snake_case.
+
+    Accepts camelCase, PascalCase, kebab-case, and space-separated names.
+    Raises TypeError if name is not a string.
+    """
+    if not isinstance(name, str):
+        raise TypeError("flag_name must be a string")
+
+    # Replace common separators with underscores
+    s = name.replace('-', '_').replace(' ', '_')
+
+    # Insert underscores between lower->Upper transitions and between letter-digit/ digit-letter where helpful
+    s = re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', s)
+    s = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', s)
+
+    # Collapse multiple underscores and lower-case the result
+    s = re.sub(r'_+', '_', s).lower()
+
+    return s
+
+
+def is_enabled(flag_name):
+    """Check if a feature flag is enabled.
+
+    The provided flag_name is normalized to snake_case before lookup, so callers
+    can pass common variants like 'darkMode', 'DarkMode', 'dark-mode', or
+    'dark mode'. Non-string inputs raise TypeError. Unknown (but validly-typed)
+    flag names return False.
+
+    Args:
+        flag_name: the flag key to look up (string; common naming variants allowed)
+
+    Returns:
+        True if the flag is enabled, False otherwise.
+    """
+    normalized = _normalize_flag_name(flag_name)
+    if normalized in FLAGS:
+        return bool(FLAGS[normalized])
+    return False
+
+
+def list_flags():
+    """Return all defined flag names (in their canonical snake_case form)."""
+    return list(FLAGS.keys())
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;WRONG;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If flag names were normalized (or callers always used snake_case), the false-negative lookups would not occur.
+Evidence: - FLAGS dict defines snake_case keys like "dark_mode"; - _normalize_flag_name maps variants ("darkMode", "Dark-Mode", "dark mode") to "dark_mode"; - is_enabled now normalizes then does "if normalized in FLAGS: return bool(FLAGS[normalized]) else False"; - developer left "Broken Invariant" blank.
+Judgment: The developer correctly identified the lookup/name-mismatch in is_enabled and proposed a matching normalization fix which the code implements; however they failed to state the specific invariant (that callers must supply snake_case or the API must normalize) and omitted an explicit failure-mechanism section.

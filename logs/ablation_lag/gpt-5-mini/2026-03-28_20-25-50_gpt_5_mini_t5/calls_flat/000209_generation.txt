@@ -1,0 +1,173 @@
+=== CALL 000209 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: commit_gate
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:41:03.974578
+LATENCY_MS: 17091
+
+--- PROMPT ---
+After simplifying the pipeline by removing commit() and freeze_view(), the system is broken. Restore the necessary steps. Return the updated code.
+
+## Codebase (5 files)
+
+### FILE 1/5: code_snippets_v2/commit_gate/state.py ###
+```python
+def make_state(entries):
+    return {
+        "raw": list(entries),
+        "pending": [],
+        "stable": [],
+        "view": [],
+        "meta": {"version": 0, "frozen": False},
+    }
+```
+
+### FILE 2/5: code_snippets_v2/commit_gate/reducers.py ###
+```python
+def normalize(raw):
+    return [dict(e) for e in raw]
+
+
+def collapse(entries):
+    merged = {}
+    for e in entries:
+        merged[e["id"]] = e
+    return list(merged.values())
+
+
+def stage(st, data):
+    st["pending"] = list(data)
+    st["view"] = list(data)
+    st["meta"]["version"] += 1
+
+
+def commit(st):
+    """Promote pending to stable. Sorts by id for canonical ordering. Sets frozen gate."""
+    st["stable"] = sorted(st["pending"], key=lambda e: e["id"])
+    st["meta"]["frozen"] = True
+
+
+def freeze_view(st):
+    """Rebuild view from committed (stable) data."""
+    st["view"] = list(st["stable"])
+
+
+def materialize(st):
+    return list(st["view"])
+```
+
+### FILE 3/5: code_snippets_v2/commit_gate/selectors.py ###
+```python
+def get_committed_total(st):
+    """Returns total only if state is committed (frozen). None otherwise."""
+    if not st["meta"]["frozen"]:
+        return None
+    return sum(e.get("val", 0) for e in st["stable"])
+
+
+def get_view_digest(st):
+    """Order-sensitive digest of view items."""
+    return "|".join(e["id"] for e in st["view"])
+
+
+def get_committed_digest(st):
+    """Order-sensitive digest of committed items."""
+    if not st["meta"]["frozen"]:
+        return None
+    return "|".join(e["id"] for e in st["stable"])
+```
+
+### FILE 4/5: code_snippets_v2/commit_gate/pipeline.py ###
+```python
+from state import make_state
+from reducers import normalize, collapse, stage, commit, freeze_view, materialize
+
+
+def process_batch(entries):
+    st = make_state(entries)
+    cleaned = normalize(st["raw"])
+    merged = collapse(cleaned)
+    stage(st, merged)
+    # commit(st)       — removed as "redundant"
+    # freeze_view(st)  — removed as "redundant"
+    return st, materialize(st)
+```
+
+### FILE 5/5: code_snippets_v2/commit_gate/api.py ###
+```python
+from pipeline import process_batch
+from selectors import get_committed_total, get_view_digest, get_committed_digest
+from reducers import stage
+from state import make_state
+
+
+def ingest(entries):
+    st, items = process_batch(entries)
+    total = get_committed_total(st)
+    return {"items": items, "total": total}
+
+
+def preview(entries):
+    from reducers import normalize, collapse
+    st = make_state(entries)
+    cleaned = normalize(st["raw"])
+    merged = collapse(cleaned)
+    stage(st, merged)
+    return {"items": list(st["view"]), "frozen": st["meta"]["frozen"]}
+
+
+def ingest_and_verify(entries):
+    """Full pipeline: ingest then verify view is consistent with committed data."""
+    st, items = process_batch(entries)
+    committed_total = get_committed_total(st)
+    view_digest = get_view_digest(st)
+    committed_digest = get_committed_digest(st)
+    return {
+        "items": items,
+        "committed_total": committed_total,
+        "consistent": view_digest == committed_digest,
+    }
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/commit_gate/state.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/commit_gate/reducers.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/commit_gate/selectors.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/commit_gate/pipeline.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/commit_gate/api.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "The bug is in pipeline.process_batch: the calls to reducers.commit(st) and reducers.freeze_view(st) were removed. As a result, st['stable'] is never populated and st['meta']['frozen'] remains False after processing. The causal relationship is that commit() is responsible for promoting st['pending'] into st['stable'] and setting st['meta']['frozen'] = True, and freeze_view() copies the committed st['stable'] into st['view']. Without these calls, the state never becomes 'committed' and the view is not synchronized with the stable data.",
+  "failure_mechanism": "When ingest(entries) or ingest_and_verify(entries) calls process_batch(entries), process_batch only runs normalize, collapse and stage. stage writes merged data into st['pending'] and st['view'] and bumps st['meta']['version'], but it does not set st['stable'] or st['meta']['frozen']. Then get_committed_total(st) returns None because it checks st['meta']['frozen'] and finds False. get_committed_digest(st) also returns None, while get_view_digest(st) returns a non-empty string. Example: given entries with ids 'a' and 'b', process_batch returns items list (from view) but get_committed_total returns None and ingest_and_verify reports 'consistent': False because view_digest != committed_digest (a non-empty string != None).",
+  "broken_invariant": "After process_batch(entries) completes, the state must be committed and view must reflect committed data: specifically, st['meta']['frozen'] must be True, st['stable'] must equal the canonical (sorted by id) list of committed entries, and st['view'] must equal st['stable']. Equivalently, get_committed_total(st) must return an integer (not None) and get_view_digest(st) must equal get_committed_digest(st).",
+  "fix_strategy": "Reintroduce the omitted commit(st) and freeze_view(st) calls in pipeline.process_batch after stage(st, merged). commit() populates st['stable'] and sets st['meta']['frozen']=True; freeze_view() then copies st['stable'] into st['view']. This restores the contract that the pipeline leaves the state in a committed/frozen state with view equal to stable, ensuring get_committed_total returns a numeric total and view/committed digests match.",
+  "files": {
+    "code_snippets_v2/commit_gate/state.py": "UNCHANGED",
+    "code_snippets_v2/commit_gate/reducers.py": "UNCHANGED",
+    "code_snippets_v2/commit_gate/selectors.py": "UNCHANGED",
+    "code_snippets_v2/commit_gate/pipeline.py": "from state import make_state\nfrom reducers import normalize, collapse, stage, commit, freeze_view, materialize\n\n\ndef process_batch(entries):\n    st = make_state(entries)\n    cleaned = normalize(st[\"raw\"])\n    merged = collapse(cleaned)\n    stage(st, merged)\n    # commit and freeze_view are required to promote pending -> stable,\n    # set the frozen gate, and ensure view reflects committed data.\n    commit(st)\n    freeze_view(st)\n    return st, materialize(st)\n",
+    "code_snippets_v2/commit_gate/api.py": "UNCHANGED"
+  }
+}

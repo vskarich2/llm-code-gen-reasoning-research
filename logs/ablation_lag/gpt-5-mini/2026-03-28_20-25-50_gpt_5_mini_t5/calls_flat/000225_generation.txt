@@ -1,0 +1,121 @@
+=== CALL 000225 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: ordering_dependency
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:47:10.916529
+LATENCY_MS: 24478
+
+--- PROMPT ---
+process() runs before init() and items are lost. Fix so all items are processed regardless of arrival order.
+
+## Codebase (1 file)
+
+### FILE 1/1: code_snippets_v2/ordering_dependency/pipeline.py ###
+```python
+"""Pipeline with ordering dependency: process must run after init."""
+
+_log = []
+_initialized = False
+_buffer = []
+
+
+def reset():
+    global _initialized
+    _log.clear()
+    _buffer.clear()
+    _initialized = False
+
+
+def init():
+    global _initialized
+    _initialized = True
+    _log.append("init")
+
+
+def process(item):
+    """Must run AFTER init. BUG: logs error and skips if not initialized."""
+    if not _initialized:
+        _log.append(f"error:not_init:{item}")
+        return False
+    _log.append(f"processed:{item}")
+    return True
+
+
+def shutdown():
+    _log.append("shutdown")
+    return list(_log)
+
+
+def get_log():
+    return list(_log)
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def correct_order():
+    """init -> process(a) -> process(b) -> shutdown. Correct."""
+    reset()
+    run_steps([
+        (init, ()),
+        (process, ("a",)),
+        (process, ("b",)),
+        (shutdown, ()),
+    ])
+    return get_log()
+
+
+def broken_order():
+    """process(a) runs BEFORE init. BUG: item a is lost."""
+    reset()
+    run_steps([
+        (process, ("a",)),
+        (init, ()),
+        (process, ("b",)),
+        (shutdown, ()),
+    ])
+    return get_log()
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/ordering_dependency/pipeline.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "The bug is in process(): when called while the module-level flag _initialized is False, process() appends an error to _log and returns False, and the existing module-level list _buffer is never used. Because process() takes the error path instead of storing the item, items submitted before init() are dropped and never processed.",
+  "failure_mechanism": "In the broken_order() scenario, run_steps calls process('a') first. Because _initialized is False, process('a') executes the branch that does _log.append(f\"error:not_init:{item}\") and returns False. Since process() never saved 'a' to any buffer, when init() later runs there is nothing to flush and 'a' is never processed; the final _log contains an error entry and lacks a processed:a entry.",
+  "broken_invariant": "For any sequence of steps containing calls to process(item) and a later call to init(), every item passed to process() must appear as a \"processed:<item>\" entry in the final log after shutdown. Concretely: if process(x) is invoked before init(), then after init() and shutdown() complete, get_log() must contain \"processed:x\" exactly once.",
+  "fix_strategy": "Change process() so that when _initialized is False it buffers the item into the existing _buffer list instead of logging an error and returning False. Change init() to set _initialized True and then flush _buffer by calling process() for each buffered item (after _initialized is True), clearing the buffer. This preserves ordering and ensures items submitted before init() are eventually processed. The change uses the existing _buffer variable and avoids the previous error path, guaranteeing each item is processed once.",
+  "files": {
+    "code_snippets_v2/ordering_dependency/pipeline.py": " \"\"\"Pipeline with ordering dependency: process must run after init.\"\"\"\n\n_log = []\n_initialized = False\n_buffer = []\n\n\ndef reset():\n    global _initialized\n    _log.clear()\n    _buffer.clear()\n    _initialized = False\n\n\ndef init():\n    global _initialized\n    # mark initialized and then flush any items that arrived before init\n    _initialized = True\n    _log.append(\"init\")\n    if _buffer:\n        # process buffered items in arrival order\n        buffered = list(_buffer)\n        _buffer.clear()\n        for item in buffered:\n            # process will see _initialized == True and append processed logs\n            process(item)\n\n\ndef process(item):\n    \"\"\"Must run AFTER init. Fixed: if called before init, buffer the item instead\n    of logging an error so it will be processed once init() runs.\n    \"\"\"\n    if not _initialized:\n        # buffer item for later processing once init() is called\n        _buffer.append(item)\n        return True\n    _log.append(f\"processed:{item}\")\n    return True\n\n\ndef shutdown():\n    _log.append(\"shutdown\")\n    return list(_log)\n\n\ndef get_log():\n    return list(_log)\n\n\ndef run_steps(steps):\n    results = []\n    for fn, args in steps:\n        results.append(fn(*args))\n    return results\n\n\ndef correct_order():\n    \"\"\"init -> process(a) -> process(b) -> shutdown. Correct.\"\"\"\n    reset()\n    run_steps([\n        (init, ()),\n        (process, (\"a\",)),\n        (process, (\"b\",)),\n        (shutdown, ()),\n    ])\n    return get_log()\n\n\ndef broken_order():\n    \"\"\"process(a) runs BEFORE init. BUG: item a is lost. Fixed: a is buffered and\n    processed after init.\"\"\"\n    reset()\n    run_steps([\n        (process, (\"a\",)),\n        (init, ()),\n        (process, (\"b\",)),\n        (shutdown, ()),\n    ])\n    return get_log()\n"
+  }
+}

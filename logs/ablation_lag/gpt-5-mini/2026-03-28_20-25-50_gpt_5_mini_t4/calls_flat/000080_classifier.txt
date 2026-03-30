@@ -1,0 +1,187 @@
+=== CALL 000080 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: use_before_set_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:54:18.986953
+LATENCY_MS: 18426
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+loader.load: the function uses 'if source and len(source) > 0' so when source is empty or None it does not update the module-level _status (leaving a previous value), and calling len(source) on non-sized iterables (e.g. generators) raises TypeError — both cause incorrect status or a crash.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Always determine and set _status inside load(): treat None or non-iterable as empty, materialize the source into a list for uniform handling, then set _status = 'loaded' if the list is non-empty or 'empty' otherwise. This ensures _status always reflects the current call and avoids relying on len() on possibly unsized iterables.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure mode is materializing very large or infinite iterables into memory (memory exhaustion). This is not new for this codebase because the pipeline expects a list-like get_data() and previous implementations already materialized sources in some cases; for the intended finite data sources this fix is safe. Therefore no further revision was made.
+
+
+# Task Description
+Pipeline crashes on empty data source. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Data loader with status tracking."""
+
+_status = "idle"
+_data = None
+
+
+def reset():
+    global _status, _data
+    _status = "idle"
+    _data = None
+
+
+def load(source):
+    """Load data from source. Sets status on success only."""
+    global _status, _data
+    # Treat None as an empty source
+    if source is None:
+        _data = []
+        _status = "empty"
+        return _data
+
+    # Try to materialize the source into a list (handles generators/iterables)
+    try:
+        _data = [x for x in source]
+    except TypeError:
+        # Not iterable: treat as empty
+        _data = []
+        _status = "empty"
+        return _data
+
+    if len(_data) > 0:
+        _status = "loaded"
+    else:
+        _status = "empty"
+    return _data
+
+
+def get_status():
+    return _status
+
+
+def get_data():
+    return _data
+
+
+def validate_format(data):
+    """Distractor: checks data format, unrelated to bug."""
+    if data is None:
+        return False
+    return isinstance(data, list)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;WRONG;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If the conditional that relied on truthiness + len() (and thus could skip setting _status or call len() on unsized iterables) were removed or corrected so _status is always set and len() isn't invoked on generators, the observed crashes/stale status would be prevented.
+Evidence: load() is the implicated function and _status is a module-level variable; relying on "if source and len(source) > 0" can skip _status assignment when source is falsy (e.g., []) leaving stale _status; calling len() on generators/non-sized iterables raises TypeError (crash); the provided fix materializes source into a list and assigns _status on all control paths (None, TypeError, empty, non-empty).
+Judgment: The developer correctly identified the faulty conditional and the resulting stale-state and TypeError paths and proposed a fix that directly addresses them; however they failed to state the explicit invariant (that load() must always set _status) and left several diagnostic fields blank, so the reasoning is mostly correct but incompletely documented.

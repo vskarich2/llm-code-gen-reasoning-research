@@ -1,0 +1,227 @@
+=== CALL 000223 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: check_then_act
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:47:44.792034
+LATENCY_MS: 19468
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+make_withdraw_steps() + global _accounts: make_withdraw_steps sets result['approved'] from check_balance() without modifying _accounts (no reservation). Because check_balance only reads the shared variable _accounts[name], two check steps can both observe sufficient funds before either debits, and then both subsequent act steps call do_withdraw(), causing an overdraft.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Introduce an atomic reservation operation reserve_withdraw(name, amount) that checks and, if sufficient, immediately decrements _accounts[name] (reserving the funds). Change make_withdraw_steps so the check step calls reserve_withdraw and records the reservation in result['approved'], and make the act step a no-op that only returns the recorded approval. This prevents two checks from both approving because the first check will decrement the balance so the second check will fail.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure: callers rely on the previous semantic that the check step was non-destructive and that the act step performed the actual debit; changing semantics could break external code. Another possible failure in a real concurrent environment is lacking synchronization primitives (locks) — our change makes the simulated interleaving safe by performing the check-and-decrement together, but in a threaded runtime without proper locking this could still race. I considered adding explicit locks around check+act, but for this simple step-interleaving simulation performing an atomic reservation in the check step is the simplest safe fix, and I did not revise further because the tests shown expect withdrawals to be prevented under interleaving and this fix achieves that without external dependencies.
+
+
+# Task Description
+Under interleaving, two withdrawals of 80 from balance=100 both succeed, leaving -60. Fix so balance never goes negative.
+
+# Code Produced
+```python
+ """Bank with non-atomic check-then-act withdrawal, simulated via steps."""
+
+_accounts = {}
+
+
+def reset():
+    _accounts.clear()
+
+
+def create_account(name, balance):
+    _accounts[name] = balance
+
+
+def get_balance(name):
+    return _accounts.get(name, 0)
+
+
+def check_balance(name, amount):
+    """CHECK: is balance sufficient?"""
+    return _accounts.get(name, 0) >= amount
+
+
+def do_withdraw(name, amount):
+    """ACT: decrement balance. Assumes caller verified."""
+    _accounts[name] = _accounts.get(name, 0) - amount
+
+
+def reserve_withdraw(name, amount):
+    """Atomically check-and-decrement (reserve funds) if sufficient.
+
+    Returns True if reservation (withdrawal) succeeded, False otherwise.
+    This prevents separate check and act steps from both succeeding under interleaving.
+    """
+    if _accounts.get(name, 0) >= amount:
+        _accounts[name] = _accounts.get(name, 0) - amount
+        return True
+    return False
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def make_withdraw_steps(name, amount):
+    """Split withdrawal into separate check and act steps.
+
+    FIX: perform an atomic reservation during the check step so two checks
+    cannot both succeed before either debits the account. The act step
+    becomes a no-op that simply reports the previously recorded outcome.
+    """
+    result = {"approved": False}
+
+    def step_check():
+        # Atomically attempt to reserve (withdraw) the funds now.
+        result["approved"] = reserve_withdraw(name, amount)
+        return ("check", result["approved"])
+
+    def step_act():
+        # Act is now a no-op because the check already performed the
+        # reservation/debit if it was approved.
+        return ("act", result["approved"])
+
+    return step_check, step_act
+
+
+def sequential_withdrawals():
+    """Two withdrawals of 80 from balance=100. Sequential: second denied."""
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (act_a, ()), (check_b, ()), (act_b, ())])
+    return get_balance("alice")
+
+
+def interleaved_withdrawals():
+    """Two withdrawals of 80, interleaved: BUG — both approved, overdraft.
+
+    With the fix, the first check will reserve/debit 80, so the second check
+    will fail and no overdraft occurs.
+    """
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (check_b, ()), (act_a, ()), (act_b, ())])
+    return get_balance("alice")
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;PARTIAL;CORRECT;CORRECT;CORRECT;TEMPORAL_ORDERING
+HIGH
+Counterfactual: If the non-atomic, separate check-then-act behavior (reads via check_balance without reservation) were removed or replaced by an atomic check-and-decrement, the interleaving that allows two approvals and an overdraft would not occur.
+Evidence: check_balance(_:amount) only reads _accounts[name] and can return True for both check steps; do_withdraw(_:amount) writes _accounts[name] = ... - amount and two later writes cause negative balance; make_withdraw_steps originally split check and act allowing run_steps([(check_a),(check_b),(act_a),(act_b)]) to let both checks pass before debits; reserve_withdraw() in the patch performs if _accounts.get(name,0) >= amount: _accounts[name] = _accounts.get(name,0) - amount and returns True (atomic reservation); make_withdraw_steps now calls reserve_withdraw in step_check and makes step_act a no-op returning result['approved'].
+Judgment: The developer correctly pinpointed the race (non-atomic check/act on shared _accounts) and proposed a fix that directly prevents the double-approval by making the check atomic; however they omitted an explicit statement of the violated invariant (balance >= 0) and acknowledged but did not fully address synchronization/compatibility risks with callers relying on non-destructive checks.

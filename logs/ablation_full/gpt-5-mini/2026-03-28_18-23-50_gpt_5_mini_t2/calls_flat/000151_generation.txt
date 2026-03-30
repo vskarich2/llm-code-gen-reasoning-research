@@ -1,0 +1,164 @@
+=== CALL 000151 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: early_return_c
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:28:52.597116
+LATENCY_MS: 26230
+
+--- PROMPT ---
+Audit log missing entries for cached charges. Fix. Return the updated code.
+
+## Codebase (3 files)
+
+### FILE 1/3: code_snippets_v2/early_return_c/audit.py ###
+```python
+"""Audit log for charge operations."""
+
+_log = []
+
+
+def log_charge(txn_id, amount, source="direct"):
+    """Record a charge event for reasoning_evaluator_audit purposes."""
+    _log.append({
+        "txn_id": txn_id,
+        "amount": amount,
+        "source": source,
+    })
+
+
+def verify_completeness(expected_count):
+    """Verify that exactly expected_count charges were logged."""
+    return len(_log) == expected_count
+
+
+def get_log():
+    """Return a copy of the reasoning_evaluator_audit log."""
+    return list(_log)
+
+
+def reset_audit():
+    """Clear all reasoning_evaluator_audit log entries."""
+    _log.clear()
+```
+
+### FILE 2/3: code_snippets_v2/early_return_c/ledger.py ###
+```python
+"""Transaction ledger — records all financial events."""
+
+_entries = []
+
+
+def record(txn_id, amount, status):
+    """Record a transaction."""
+    _entries.append({
+        "txn_id": txn_id,
+        "amount": amount,
+        "status": status,
+    })
+
+
+def get_total():
+    """Return the sum of all entry amounts."""
+    return sum(e["amount"] for e in _entries)
+
+
+def get_count():
+    """Return the number of ledger entries."""
+    return len(_entries)
+
+
+def reset_ledger():
+    """Clear all ledger entries."""
+    _entries.clear()
+```
+
+### FILE 3/3: code_snippets_v2/early_return_c/payment.py ###
+```python
+"""Payment processor with caching and reasoning_evaluator_audit trail.
+
+Caching is intentional: repeated charges for the same txn_id
+return the cached result without re-charging. However, every
+call to charge() must still be recorded in the reasoning_evaluator_audit log.
+"""
+
+from ledger import record, get_count, reset_ledger
+from audit import log_charge, verify_completeness, get_log, reset_audit
+
+_charge_cache = {}
+
+
+def charge(txn_id, amount):
+    """Charge the given amount. Uses cache to avoid double-charging.
+
+    Caching is correct (no double-charge), but EVERY call — cached
+    or not — must be logged in the reasoning_evaluator_audit system for compliance.
+    """
+    # BUG: early return on cached path skips log_charge()
+    if txn_id in _charge_cache:
+        return _charge_cache[txn_id]
+
+    result = {"txn_id": txn_id, "amount": amount, "status": "charged"}
+    record(txn_id, amount, "charged")
+    log_charge(txn_id, amount)
+    _charge_cache[txn_id] = result
+    return result
+
+
+def refund(txn_id):
+    """Refund a previously charged transaction."""
+    if txn_id not in _charge_cache:
+        return {"txn_id": txn_id, "status": "not_found"}
+    original = _charge_cache[txn_id]
+    record(txn_id, -original["amount"], "refund")
+    log_charge(txn_id, -original["amount"], source="refund")
+    return {"txn_id": txn_id, "status": "refunded"}
+
+
+def reset():
+    """Reset all payment state."""
+    global _charge_cache
+    _charge_cache = {}
+    reset_ledger()
+    reset_audit()
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/early_return_c/audit.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/early_return_c/ledger.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/early_return_c/payment.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "In payment.charge, the early-return branch checks 'if txn_id in _charge_cache' and returns the cached result immediately; because the call to audit.log_charge is placed after that branch, any cached-path return bypasses log_charge. The specific causal chain is: payment.charge -> sees txn_id in _charge_cache -> early return -> skip calling audit.log_charge.",
+  "failure_mechanism": "If a caller calls charge('tx123', 100) twice, the first call goes through the non-cached path, calls record(...) and log_charge('tx123', 100), and stores the result in _charge_cache. The second call hits the early-return branch 'if txn_id in _charge_cache' and returns the cached result without invoking log_charge. As a result, audit.get_log() contains one entry even though there were two invocations, causing verification routines (e.g. verify_completeness(expected_count=2)) to fail.",
+  "broken_invariant": "Every invocation of payment.charge(txn_id, amount) must append an audit entry via audit.log_charge with the provided txn_id and amount (i.e., len(audit.get_log()) must equal the number of charge(...) calls). Currently, cached-path invocations do not satisfy this invariant.",
+  "fix_strategy": "Ensure the audit is recorded on every call, including cached-path calls, by invoking log_charge(txn_id, amount, source='cached') just before returning the cached result. This preserves the existing ledger behavior (no double record()) while guaranteeing an audit entry per call. The change is minimal and scoped to payment.charge: add log_charge in the cached branch and then return the cached result.",
+  "files": {
+    "code_snippets_v2/early_return_c/audit.py": "UNCHANGED",
+    "code_snippets_v2/early_return_c/ledger.py": "UNCHANGED",
+    "code_snippets_v2/early_return_c/payment.py": "\"\"\"Payment processor with caching and reasoning_evaluator_audit trail.\n\nCaching is intentional: repeated charges for the same txn_id\nreturn the cached result without re-charging. However, every\ncall to charge() must still be recorded in the reasoning_evaluator_audit log.\n\"\"\"\n\nfrom ledger import record, get_count, reset_ledger\nfrom audit import log_charge, verify_completeness, get_log, reset_audit\n\n_charge_cache = {}\n\n\ndef charge(txn_id, amount):\n    \"\"\"Charge the given amount. Uses cache to avoid double-charging.\n\n    Caching is correct (no double-charge), but EVERY call — cached\n    or not — must be logged in the reasoning_evaluator_audit system for compliance.\n    \"\"\"\n    # Ensure every call is logged. If cached, record the audit and return cached result.\n    if txn_id in _charge_cache:\n        # Log the invocation that used the cached result. Do not record to ledger again.\n        log_charge(txn_id, amount, source=\"cached\")\n        return _charge_cache[txn_id]\n\n    result = {\"txn_id\": txn_id, \"amount\": amount, \"status\": \"charged\"}\n    record(txn_id, amount, \"charged\")\n    log_charge(txn_id, amount)\n    _charge_cache[txn_id] = result\n    return result\n\n\ndef refund(txn_id):\n    \"\"\"Refund a previously charged transaction.\"\"\"\n    if txn_id not in _charge_cache:\n        return {\"txn_id\": txn_id, \"status\": \"not_found\"}\n    original = _charge_cache[txn_id]\n    record(txn_id, -original[\"amount\"], \"refund\")\n    log_charge(txn_id, -original[\"amount\"], source=\"refund\")\n    return {\"txn_id\": txn_id, \"status\": \"refunded\"}\n\n\ndef reset():\n    \"\"\"Reset all payment state.\"\"\"\n    global _charge_cache\n    _charge_cache = {}\n    reset_ledger()\n    reset_audit()\n"
+  }
+}

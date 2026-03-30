@@ -1,0 +1,221 @@
+=== CALL 000221 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: check_then_act
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:02:22.693363
+LATENCY_MS: 21648
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+make_withdraw_steps -> step_act uses result['approved'] (set by check_balance) to decide calling do_withdraw; the operation is a separated CHECK (check_balance reading _accounts) and ACT (do_withdraw mutating _accounts) with no atomic re-check, allowing stale approval to be acted on.
+
+## Failure Mechanism
+Two callers run check_balance(name, amount) in step_check while balance is 100 → both calls return True and each sets its own result['approved']=True → steps are interleaved so both step_check run before either step_act → step_act uses result['approved'] (True) and calls do_withdraw twice → _accounts['alice'] is decremented twice (100 - 80 - 80 = -60) → observable failure: negative balance (get_balance('alice') == -60).
+
+## Broken Invariant
+Account balances are non-negative: for any account name, get_balance(name) >= 0 should always hold after any sequence of withdrawals.
+
+## Fix Strategy
+Introduce an atomic attempt_withdraw(name, amount) that performs check-and-decrement together against the current _accounts state. Modify make_withdraw_steps.step_act to call attempt_withdraw when the prior check indicated approval, and update result['approved'] with the actual outcome of the atomic attempt. This breaks the causal chain because even if both checks returned True earlier, the ACT phase will only succeed for the first caller that performs the atomic decrement; subsequent attempts will fail when balance is insufficient, preventing negative balances.
+
+
+## Self-Check
+{'failure_scenario': 'If other code in the codebase bypasses attempt_withdraw and calls do_withdraw(name, amount) directly (or manually mutates _accounts), then the invariant can still be violated. do_withdraw still unconditionally decrements the balance and assumes the caller verified funds; so misuse of do_withdraw outside of the new atomic path remains a risk.', 'edge_case': "If an act step is invoked without a preceding check step (i.e., someone calls step_act() directly), step_act currently only performs attempt_withdraw if result['approved'] is True. In that case the act will be a no-op. This preserves earlier semantics (an act without approval doesn't withdraw). If desired semantics were that an act alone should perform an atomic withdraw, we could change step_act to always call attempt_withdraw; but that would change behavior when check is omitted.", 'invariant_check': "Under the new code: (1) multiple calls — multiple interleaved withdrawals (checks may return True for more than one caller) but only the first act that invokes attempt_withdraw when balance >= amount will decrement; subsequent attempts will fail because attempt_withdraw re-checks the current balance. (2) retries/loops — if an act fails (attempt_withdraw returns False) the result['approved'] is set to False and no decrement happens. Re-running a new check+act pair will succeed only when balance is sufficient. (3) state reuse — reset() clears _accounts; new accounts start fresh. The atomic attempt_withdraw directly reads and writes _accounts in a single function so there is no window for a stale read to be used to mutate state incorrectly. These behaviors ensure get_balance(name) >= 0 is maintained for sequences exercised by sequential_withdrawals() and interleaved_withdrawals().", 'conclusion': 'No flaw in this codepath as long as callers use the provided check/act steps (make_withdraw_steps) and do not bypass the atomic attempt_withdraw. The fix is safe: it localizes the crucial check-and-update into attempt_withdraw, preventing an earlier successful check from causing an overdraft when actions are interleaved. To further harden, do_withdraw should be treated as an internal helper and external callers should use attempt_withdraw; however this change preserves backward compatibility while fixing the demonstrated bug.'}
+
+
+# Task Description
+Under interleaving, two withdrawals of 80 from balance=100 both succeed, leaving -60. Fix so balance never goes negative.
+
+# Code Produced
+```python
+ """Bank with non-atomic check-then-act withdrawal, simulated via steps."""
+
+_accounts = {}
+
+
+def reset():
+    _accounts.clear()
+
+
+def create_account(name, balance):
+    _accounts[name] = balance
+
+
+def get_balance(name):
+    return _accounts.get(name, 0)
+
+
+def check_balance(name, amount):
+    """CHECK: is balance sufficient?"""
+    return _accounts.get(name, 0) >= amount
+
+
+def do_withdraw(name, amount):
+    """ACT: decrement balance. Assumes caller verified."""
+    _accounts[name] = _accounts.get(name, 0) - amount
+
+
+def attempt_withdraw(name, amount):
+    """Atomic check-and-decrement: returns True if withdraw succeeded, False otherwise."""
+    bal = _accounts.get(name, 0)
+    if bal >= amount:
+        _accounts[name] = bal - amount
+        return True
+    return False
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def make_withdraw_steps(name, amount):
+    """Split withdrawal into separate check and act steps.
+
+    Fixed: ACT now performs an atomic check-and-decrement (attempt_withdraw)
+    so that an earlier successful CHECK cannot be used later to withdraw
+    if the balance has since changed.
+    """
+    result = {"approved": False}
+
+    def step_check():
+        result["approved"] = check_balance(name, amount)
+        return ("check", result["approved"])
+
+    def step_act():
+        # Only attempt withdraw if check previously indicated approval.
+        # Use atomic attempt_withdraw to re-validate and decrement in one step.
+        if result["approved"]:
+            # update result["approved"] with the actual outcome at act time
+            result["approved"] = attempt_withdraw(name, amount)
+        return ("act", result["approved"])
+
+    return step_check, step_act
+
+
+def sequential_withdrawals():
+    """Two withdrawals of 80 from balance=100. Sequential: second denied."""
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (act_a, ()), (check_b, ()), (act_b, ())])
+    return get_balance("alice")
+
+
+def interleaved_withdrawals():
+    """Two withdrawals of 80, interleaved: fixed — only one approved, no overdraft."""
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (check_b, ()), (act_a, ()), (act_b, ())])
+    return get_balance("alice")
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;TEMPORAL_ORDERING
+HIGH
+Counterfactual: If the check-then-act separation were removed (i.e., the act performed an atomic check-and-decrement), the double-withdrawal failure would not occur.
+Evidence: - make_withdraw_steps.step_check sets result['approved'] from check_balance(name, amount); - original hazard: step_act used that flag to call do_withdraw which does _accounts[name] = _accounts.get(name,0) - amount unconditionally; - with interleaving two checks can both set approved before either act, allowing two decrements; - attempt_withdraw(bal check then write) combines check+decrement and is called in step_act in the new code; - interleaved_withdrawals simulates (check_a, check_b, act_a, act_b) showing the race.
+Judgment: The developer's causal chain is complete and grounded in the code (result['approved'], check_balance, do_withdraw, _accounts); the proposed atomic attempt_withdraw directly addresses the race and the produced code implements it, though the residual risk of external callers bypassing do_withdraw is correctly noted.

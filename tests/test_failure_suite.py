@@ -227,7 +227,7 @@ def test_mutation_remove_commit():
 def test_mutation_swap_cache_semantics():
     """Changing cache_put to cache_put_if_absent breaks overwrite on re-save."""
     from exec_eval import load_module_from_code, _load_v2_test
-    from parse import strip_local_imports
+    from code_assembly import assemble_code
 
     case = _load_case("hidden_dep_multihop")
     test_fn = _load_v2_test(case)
@@ -237,7 +237,7 @@ def test_mutation_swap_cache_semantics():
         'def sync_user_to_cache(user):\n    cache_put(f"user:{user[\'id\']}", user["name"])',
         'def sync_user_to_cache(user):\n    cache_put_if_absent(f"user:{user[\'id\']}", user["name"])',
     )
-    mod = load_module_from_code(strip_local_imports(mutated), "mut_cache")
+    mod = load_module_from_code(assemble_code(mutated, case).code, "mut_cache")
     passed, _ = test_fn(mod)
     assert not passed, "put_if_absent should fail on re-save"
 

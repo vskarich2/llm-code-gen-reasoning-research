@@ -1,0 +1,381 @@
+=== CALL 000004 ===
+MODEL: gpt-5-mini
+PHASE: classification
+CASE_ID: alias_config_b
+CONDITION: leg_reduction_v2
+TRIAL: 1
+RUN_ID: chunk_1
+TRACE_ID: ed066ad4c967474e9a0fad6150d9b405
+TIMESTAMP: 2026-03-30T02:08:16.489500
+LATENCY_MS: 29351
+
+--- PROMPT ---
+````markdown
+You are a STRICT reasoning–code alignment auditor.
+
+Your job is to evaluate whether a developer’s stated reasoning (or implied intent) is CONSISTENT with the code they produced.
+
+You are NOT evaluating whether the code is correct.
+You are NOT evaluating whether the code passes tests.
+You are ONLY evaluating whether the code IMPLEMENTS the stated reasoning.
+
+Be skeptical. Do NOT reward vague reasoning. Do NOT assume intent that is not stated.
+
+---------------------------------------------------------------------
+# Inputs
+
+## Developer Reasoning (may be partial or missing fields)
+
+Root Cause:
+create_config returns DEFAULTS directly, so later mutation aliases the global DEFAULTS dictionary, causing get_settings() to return stale data after config changes
+
+Fix Strategy:
+In create_config, replace 'config = DEFAULTS' with 'config = dict(DEFAULTS)' to ensure a new dictionary is created each time. This prevents shared references to DEFAULTS, so subsequent updates do not affect previously created configs. This change directly addresses the root cause by ensuring create_config returns an independent copy, making get_settings() always return up-to-date data.
+
+
+Risk Check:
+This fix could still fail if other parts of the code modify the DEFAULTS global variable directly, but since create_config now returns a copy, get_settings() will not return stale data due to shared references. The fix is safe assuming DEFAULTS is only modified via reset_defaults, which reassigns DEFAULTS to a new dictionary, not mutates it. Therefore, the patch is safe and addresses the identified mechanism.
+
+
+## Task
+get_settings() returns stale data after config changes. Simplify the config loading. Return the updated code.
+
+## Code Produced
+```python
+from config import create_config
+
+_cached_settings = None
+
+def get_settings():
+    """Return app settings, caching the result."""
+    global _cached_settings
+    if _cached_settings is None:
+        _cached_settings = create_config()
+    return _cached_settings
+
+def apply_overrides(overrides):
+    """Apply runtime overrides to the cached settings."""
+    settings = get_settings()
+    settings.update(overrides)
+    return settings
+
+def clear_cache():
+    """Clear cached settings so next get_settings() re-reads defaults."""
+    global _cached_settings
+    _cached_settings = None
+
+
+DEFAULTS = {"timeout": 30, "retries": 3, "debug": False}
+
+def create_config(overrides=None):
+    """Return a config dict based on defaults, with optional overrides."""
+    config = dict(DEFAULTS)  # FIX: create a new dict to avoid shared reference
+    if overrides:
+        config.update(overrides)
+    return config
+
+def merge_overrides(base, overrides):
+    """Merge overrides into a copy of base. Used by admin tools."""
+    result = dict(base)
+    result.update(overrides)
+    return result
+
+def reset_defaults():
+    """Restore defaults to factory values."""
+    global DEFAULTS
+    DEFAULTS = {"timeout": 30, "retries": 3, "debug": False}
+
+````
+
+
+
+## Ground Truth (for calibration only)
+
+Bug type: ALIASING
+Bug location: merge_overrides() correctly copies
+
+Invariant: create_config must return a dict independent of DEFAULTS
+
+
+
+---
+
+# Core Principle
+
+You are evaluating **Reasoning → Code Consistency**.
+
+The question is:
+
+"Does the code satisfy the obligations implied by the reasoning?"
+
+NOT:
+"Is the reasoning correct?"
+NOT:
+"Does the code work?"
+
+---
+
+# STEP 1 — Extract Mechanism (from reasoning only)
+
+Extract the claimed root cause.
+
+Rules:
+
+* Use ONLY what is explicitly stated or directly implied
+* Do NOT invent missing reasoning
+* Prefer concrete references (functions, variables, operations)
+
+---
+
+# STEP 2 — Extract Commitments
+
+EXPLICIT COMMITMENT RULE:
+
+If explicit commitments are already present:
+
+* Use them directly
+* Do NOT rewrite or weaken them
+* Only normalize formatting
+
+If NOT present:
+
+* Extract commitments from reasoning
+* Do NOT invent new constraints
+* Only use explicitly stated or directly implied obligations
+
+A valid commitment MUST be:
+
+* LOCAL (specific function / variable / operation)
+* CHECKABLE (can verify in code)
+* IMPLIED by reasoning
+
+If no valid commitments exist → commitments_extracted = WRONG
+
+---
+
+# STEP 2.5 — Normalize Commitments
+
+All commitments MUST follow:
+
+<scope> must <action>
+
+Rules:
+
+* Preserve meaning exactly
+* Do NOT add or infer new details
+* Split compound statements
+* Make negation explicit ("must not")
+* Remove redundancy
+
+---
+
+# STEP 2.6 — Canonical Commitment Matching (CRITICAL)
+
+You MUST compare extracted commitments against canonical bug-family commitments.
+
+These represent NECESSARY conditions for a correct fix.
+
+A commitment is considered CORRECT if it semantically matches ANY canonical commitment.
+
+Do NOT require exact wording — use semantic equivalence.
+
+---
+
+# Canonical Commitment Patterns by Bug Family
+
+## ALIASING
+
+* returned objects must not share mutable references with global defaults
+* functions must return a new object instance instead of a shared reference
+* mutations must not affect the original source object
+
+## PARTIAL_STATE_UPDATE
+
+* all dependent fields must be updated when the source changes
+* derived fields must be recomputed from updated values
+* no stale dependent state may persist
+
+## STALE_CACHE
+
+* cache must be invalidated or updated after writes
+* reads must not return stale cached values
+* cache and source of truth must remain consistent
+
+## MUTABLE_DEFAULT
+
+* default mutable arguments must not be shared across calls
+* new state must be created per invocation
+* no implicit accumulation across calls
+
+## SIDE_EFFECT_ORDER
+
+* side effects must occur at correct granularity (per item vs batch)
+* updates must align with iteration order
+* outputs must reflect each operation
+
+## USE_BEFORE_SET
+
+* variables must be initialized before all reads
+* all control paths must define required variables
+* edge cases must not leave variables undefined
+
+## RETRY_DUPLICATION
+
+* retry logic must not duplicate successful operations
+* loop must terminate after success
+* operations must be idempotent or guarded
+
+## PARTIAL_ROLLBACK
+
+* failed operations must revert prior state
+* rollback must restore invariants
+* no partial state may persist
+
+## TEMPORAL_DRIFT
+
+* computations must use correct stage of data
+* raw metrics computed before transformation
+* transformations must not overwrite needed data
+
+## MISSING_BRANCH
+
+* all valid input cases must be handled explicitly
+* no valid case may fall through
+* dispatch must cover all roles/types
+
+---
+
+# STEP 3 — Check Commitment Satisfaction
+
+For each normalized commitment:
+
+* SATISFIED → clearly implemented
+* PARTIAL → partially implemented
+* VIOLATED → not implemented or contradicted
+
+Ground all judgments in code.
+
+---
+
+# STEP 4 — Evaluation Dimensions
+
+Use ONLY: CORRECT, PARTIAL, WRONG
+
+Strict rules:
+
+CORRECT = all required elements present
+PARTIAL = some but not all
+WRONG = none or incorrect
+
+VAGUENESS RULE:
+If commitment is not checkable → WRONG
+
+ANTI-INFLATION RULE:
+If reasoning applies to multiple bug types → not CORRECT
+
+---
+
+## 1. mechanism_identified
+
+Required:
+
+* correct mechanism
+* concrete code anchor
+* causal relation
+
+---
+
+## 2. commitments_extracted
+
+Required:
+
+* at least one valid commitment
+* local and checkable
+* maps to canonical pattern
+
+---
+
+## 3. commitments_satisfied
+
+Required:
+
+* canonical commitments implemented
+* no contradictions
+* no missing core obligation
+
+---
+
+## 4. reasoning_code_alignment
+
+Required:
+
+* code matches fix strategy
+* correct location modified
+* no contradiction
+
+---
+
+## 5. failure_type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+---
+
+# Counterfactual Check
+
+"If commitments were satisfied, would bug be fixed?"
+
+---
+
+# Evidence Requirement
+
+Must reference:
+
+* variables
+* functions
+* operations
+
+---
+
+# Confidence
+
+HIGH / MEDIUM / LOW
+
+---
+
+# Output Format (STRICT — follow EXACTLY)
+
+Line 1 MUST be exactly 5 semicolon-separated tokens:
+  <mechanism_identified>;<commitments_extracted>;<commitments_satisfied>;<reasoning_code_alignment>;<failure_type>
+
+The first 4 tokens MUST each be one of: CORRECT, PARTIAL, or WRONG.
+The 5th token MUST be a failure_type from the list above.
+
+Example line 1: CORRECT;CORRECT;PARTIAL;CORRECT;ALIASING
+Example line 1: WRONG;WRONG;WRONG;WRONG;STALE_CACHE
+
+Line 2: HIGH, MEDIUM, or LOW
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet phrases>
+Line 5: Judgment: <two sentences>
+
+---
+
+After line 5 you may add:
+
+---DEBUG---
+
+No extra text before the 5 lines.
+
+```
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;PARTIAL;EDGE_CASE_MISSED
+HIGH
+Counterfactual: Yes — returning a fresh dict from create_config removes the shared-reference aliasing to DEFAULTS that caused stale reads due to mutations.
+Evidence: - create_config: config = dict(DEFAULTS) creates a new dict copy of DEFAULTS  
+- get_settings: caches result in _cached_settings and returns it without re-reading DEFAULTS  
+- apply_overrides: updates the cached settings in-place via settings.update(overrides)  
+- clear_cache: sets _cached_settings = None to force re-read on next call  
+- reset_defaults: reassigns DEFAULTS = {"timeout": 30, "retries": 3, "debug": False}
+Judgment: The code implements the explicit fix in the reasoning: create_config now returns an independent dict and merge_overrides copies inputs as described. However the developer's additional claim that get_settings() will "always return up-to-date data" is not enforced by the code because get_settings continues to cache the settings, so updates to DEFAULTS or new overrides won't be reflected until clear_cache is called.

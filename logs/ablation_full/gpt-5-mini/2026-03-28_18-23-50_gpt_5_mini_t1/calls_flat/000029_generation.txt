@@ -1,0 +1,122 @@
+=== CALL 000029 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: stale_cache_b
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:33:45.170474
+LATENCY_MS: 16788
+
+--- PROMPT ---
+Products show old prices after updates. Fix the catalog. Return the updated code.
+
+## Codebase (2 files)
+
+### FILE 1/2: code_snippets_v2/stale_cache_b/cache.py ###
+```python
+"""Simple key-value cache."""
+
+_store = {}
+
+
+def get(key):
+    """Return cached value or None."""
+    return _store.get(key)
+
+
+def put(key, value):
+    """Store a value in the cache."""
+    _store[key] = value
+
+
+def invalidate(key):
+    """Remove a key from the cache."""
+    _store.pop(key, None)
+
+
+def clear():
+    """Clear entire cache."""
+    _store.clear()
+```
+
+### FILE 2/2: code_snippets_v2/stale_cache_b/catalog.py ###
+```python
+"""Product catalog using external cache module."""
+
+from cache import get, put, invalidate
+
+_db = {}
+
+
+def add_product(product_id, name, price):
+    """Add a product to the database."""
+    _db[product_id] = {"name": name, "price": price}
+
+
+def get_product(product_id):
+    """Get product, checking cache first."""
+    cached = get(product_id)
+    if cached is not None:
+        return cached
+    product = _db.get(product_id)
+    if product is not None:
+        put(product_id, dict(product))
+    return _db.get(product_id)
+
+
+def update_product(product_id, **fields):
+    """Update product in DB.
+
+    Invariant: subsequent get_product() must reflect the update.
+    """
+    if product_id not in _db:
+        return False
+    _db[product_id].update(fields)
+    # BUG: should call invalidate(product_id) but doesn't
+    return True
+
+
+def reset():
+    """Clear DB and cache."""
+    _db.clear()
+    from cache import clear
+    clear()
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/stale_cache_b/cache.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/stale_cache_b/catalog.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "In catalog.py the function update_product updates the database entry via _db[product_id].update(fields) but does not call invalidate(product_id). Because the cache entry for product_id (managed by the cache module) is never removed, the system continues to serve the old cached value.",
+  "failure_mechanism": "Concrete sequence: add_product writes to _db; a subsequent get_product checks the cache, finds nothing, and executes put(product_id, dict(product)) to cache a copy of the product. Later update_product(product_id, price=new_price) executes _db[product_id].update(fields) (the DB is changed) but does not call invalidate(product_id). A later get_product(product_id) calls get(product_id) and returns the cached dict (containing the old price) instead of the updated DB value. The code location of the put is in get_product (put(product_id, dict(product))) and the missing invalidate is in update_product (there is a comment '# BUG: should call invalidate(product_id) but doesn't').",
+  "broken_invariant": "After a successful update_product(product_id, **fields) call, get_product(product_id) must reflect those updated fields. Testable statement: if update_product(pid, price=42.0) returns True, then get_product(pid)['price'] == 42.0. The current code can return the old price because the cache was not invalidated.",
+  "fix_strategy": "Call invalidate(product_id) immediately after updating the _db so any stale cached copy is removed. Specifically, I inserted invalidate(product_id) into update_product right after _db[product_id].update(fields). This ensures the cached entry (which was created by put(product_id, dict(product)) in get_product) is removed; the next get_product will miss the cache, read the updated DB row, and put a fresh copy into the cache.",
+  "files": {
+    "code_snippets_v2/stale_cache_b/cache.py": "UNCHANGED",
+    "code_snippets_v2/stale_cache_b/catalog.py": "\"\"\"Product catalog using external cache module.\"\"\"\n\nfrom cache import get, put, invalidate\n\n_db = {}\n\n\ndef add_product(product_id, name, price):\n    \"\"\"Add a product to the database.\"\"\"\n    _db[product_id] = {\"name\": name, \"price\": price}\n\n\ndef get_product(product_id):\n    \"\"\"Get product, checking cache first.\"\"\"\n    cached = get(product_id)\n    if cached is not None:\n        return cached\n    product = _db.get(product_id)\n    if product is not None:\n        put(product_id, dict(product))\n    return _db.get(product_id)\n\n\ndef update_product(product_id, **fields):\n    \"\"\"Update product in DB.\n\n    Invariant: subsequent get_product() must reflect the update.\n    \"\"\"\n    if product_id not in _db:\n        return False\n    _db[product_id].update(fields)\n    # Ensure cached entry is removed so subsequent get_product() returns updated data\n    invalidate(product_id)\n    return True\n\n\ndef reset():\n    \"\"\"Clear DB and cache.\"\"\"\n    _db.clear()\n    from cache import clear\n    clear()\n"
+  }
+}

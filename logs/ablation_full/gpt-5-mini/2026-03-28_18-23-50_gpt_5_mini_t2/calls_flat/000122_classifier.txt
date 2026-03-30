@@ -1,0 +1,183 @@
+=== CALL 000122 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: missing_branch_a
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:16:07.860951
+LATENCY_MS: 22679
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+get_permissions() + ROLE_PERMISSIONS.get(role, set()) → the permission lookup relies on ROLE_PERMISSIONS containing the exact role key; because 'moderator' key is missing from ROLE_PERMISSIONS the .get(...) call returns the default empty set and downstream checks fail.
+
+## Failure Mechanism
+cause → missing dictionary key 'moderator' in ROLE_PERMISSIONS; mutation/event → get_permissions('moderator') evaluates ROLE_PERMISSIONS.get('moderator', set()) and returns the default empty set; propagation → has_permission('moderator', 'delete') checks membership in that empty set; observable failure → moderators are denied permissions they should have (e.g., unable to delete or moderate content).
+
+## Broken Invariant
+For every role name used by the system (including 'moderator'), get_permissions(role) must return a non-empty set of permissions appropriate to that role. Test: assert 'moderator' in ROLE_PERMISSIONS and 'delete' in get_permissions('moderator'). This property is currently violated because 'moderator' is missing.
+
+## Fix Strategy
+Add an explicit 'moderator' entry to ROLE_PERMISSIONS with the intended moderator permissions (moderator gets read/write/delete but not user management). Make permission sets immutable with frozenset to avoid accidental mutation. Make get_permissions robust: normalize role inputs (lowercase), accept a small alias map (e.g., 'mod' → 'moderator'), and return an immutable empty frozenset for unknown or invalid role inputs. This breaks the causal chain by ensuring ROLE_PERMISSIONS contains the moderator mapping (so get_permissions no longer falls back to an empty default for that role) and by preventing accidental mutation or case/alias mismatches within this module.
+
+
+## Self-Check
+{'failure_scenario': "Upstream code uses a different alias not covered here (for example 'community_moderator' or 'MODERATOR_1'). In that case get_permissions will still return the empty frozenset because only known aliases are resolved. This will again deny permissions for that unexpected alias.", 'edge_case': "Non-string role values (None, integers) or empty strings. The code explicitly checks for non-string and returns the empty frozenset, so these are handled deterministically. Another boundary is different casing ('Moderator', 'MOD') — the code lowercases input to address common casing variations.", 'invariant_check': "Multiple calls: get_permissions returns a frozenset computed from the static ROLE_PERMISSIONS dict each time, so repeated calls return identical, immutable results. Retries/loops: no mutable default state is used (we return FROZEN_EMPTY, a frozenset), so repeated calls can't mutate shared state. State reuse: ROLE_PERMISSIONS values are frozensets, so external code cannot mutate the permission sets via references returned from get_permissions. Example checks with the actual code: get_permissions('moderator') consistently returns frozenset({'read','write','delete'}), get_permissions('MOD') resolves 'mod' alias and returns the same set; get_permissions(None) returns frozenset().", 'conclusion': "A flaw was found in the original code (missing 'moderator' key) and the fix addresses it. One remaining potential issue is unknown upstream role aliases beyond 'mod' — this is an integration concern (mapping unknown aliases into canonical roles) and can be handled by adding further aliases or ensuring upstream uses canonical role names. Given the module-level improvements (explicit moderator entry, immutability, alias and casing handling, defensive non-string handling), the fix is safe for the documented failure mode and robust against common edge cases."}
+
+
+# Task Description
+Refactor this access control for clarity. Return the updated code.
+
+# Code Produced
+```python
+"""Access control: map roles to permission sets.
+
+This module provides a clear, immutable mapping from canonical role names
+(lowercase strings) to permission sets. It normalizes input role strings,
+accepts a small set of aliases, and returns immutable permission sets so
+callers cannot accidentally mutate the canonical permissions.
+"""
+
+# Immutable empty set used as a stable default (avoids callers mutating a returned set)
+FROZEN_EMPTY = frozenset()
+
+# Canonical role -> permission frozenset (all keys are lowercase)
+ROLE_PERMISSIONS = {
+    "admin": frozenset({"read", "write", "delete", "manage_users"}),
+    "moderator": frozenset({"read", "write", "delete"}),
+    "user": frozenset({"read", "write"}),
+}
+
+# Common aliases resolved to canonical role names (all keys lowercase)
+ROLE_ALIASES = {
+    "mod": "moderator",
+}
+
+
+def get_permissions(role):
+    """Return an immutable set of permissions for the given role.
+
+    Behaviors:
+    - Role lookup is case-insensitive.
+    - Recognized aliases (e.g. 'mod') are resolved to canonical roles.
+    - Non-string or unknown roles return an immutable empty frozenset.
+    """
+    if not isinstance(role, str):
+        return FROZEN_EMPTY
+
+    key = role.lower()
+    key = ROLE_ALIASES.get(key, key)
+    return ROLE_PERMISSIONS.get(key, FROZEN_EMPTY)
+
+
+def has_permission(role, action):
+    """Check whether a role has a specific permission.
+
+    Returns True iff the permission 'action' is a member of the permission
+    set returned by get_permissions(role).
+    """
+    return action in get_permissions(role)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If the 'moderator' key were present in ROLE_PERMISSIONS (or get_permissions used a non-empty, correct mapping), the described permission denial would not occur.
+Evidence: get_permissions uses ROLE_PERMISSIONS.get(key, FROZEN_EMPTY) so a missing key yields FROZEN_EMPTY; has_permission returns action in get_permissions(role) so membership check fails for the empty set; produced ROLE_PERMISSIONS explicitly includes "moderator": frozenset({"read","write","delete"}); get_permissions lowercases and resolves ROLE_ALIASES ("mod") and returns immutable frozensets to prevent mutation.
+Judgment: The developer correctly identifies the missing-key invariant and traces the full causal chain to the observable failure; the provided code implements the fix and adds sensible defenses (case/alias handling and immutability), with remaining risk limited to unexpected upstream aliases.

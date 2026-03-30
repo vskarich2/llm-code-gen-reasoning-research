@@ -1,0 +1,216 @@
+=== CALL 000221 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: check_then_act
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:03:24.848029
+LATENCY_MS: 14521
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+make_withdraw_steps -> step_check uses check_balance (reads _accounts) while step_act uses do_withdraw (writes _accounts); splitting the check (read of _accounts[name]) and the act (write to _accounts[name]) into separate steps creates a time window where other steps can observe the unchanged balance and also pass the check.
+
+## Failure Mechanism
+check step for withdraw A reads _accounts['alice'] == 100 and sets result['approved'] = True → (interleaving) check step for withdraw B also reads _accounts['alice'] == 100 and sets result['approved'] = True → act step A calls do_withdraw and writes _accounts['alice'] = 20 → act step B calls do_withdraw and writes _accounts['alice'] = -60 → observable failure: final balance is negative (-60).
+
+## Broken Invariant
+Invariant: get_balance(name) >= 0 after any sequence of withdrawal steps. This is violated when two interleaved check-then-act withdrawals each observe sufficient balance and both decrement, allowing balance to drop below zero.
+
+## Fix Strategy
+Make the 'check' step perform the balance test and the debit (i.e., perform the act) atomically in the same step so there is no window where another check can observe the old balance. Concretely, modify make_withdraw_steps so step_check performs the check and, if sufficient funds, immediately calls do_withdraw(name, amount) and sets result['approved'] = True; step_act becomes a no-op that just returns the approval. This breaks the causal chain by removing the time window between reading and writing _accounts[name]; the balance is decremented at the moment of approval.
+
+
+## Self-Check
+{'failure_scenario': "If the system had other code that expects no state mutation during the 'check' step (i.e., code that relies on check being purely observational), performing the debit inside step_check could violate higher-level expectations. Another concrete failure scenario: in a multi-process or multi-interpreter environment (not simulated here), without a real synchronization primitive, two processes could still interleave at a lower level and both pass a non-atomic read-modify-write, so the fix would not prevent races across processes/threads without locks.", 'edge_case': "Edge Case: amount <= 0. If amount is zero or negative, the check would 'approve' and do_withdraw would add (for negative amount) or do nothing (for zero). The code should validate amount > 0 if that is a required invariant. Also, if a caller relies on the act step to perform side-effects (e.g., logging or external actions), moving the debit into the check step changes when those side-effects occur; act becomes a no-op.", 'invariant_check': "Under the modified make_withdraw_steps (step_check performs check-and-withdraw, step_act is noop):\n- Multiple calls: sequential_withdrawals() — create_account('alice', 100); first check withdraws 80 -> balance 20; second check sees 20 < 80 and does not withdraw -> final balance 20 (>=0).\n- Interleaved case: interleaved_withdrawals() — first check withdraws 80 -> balance 20; second check sees 20 < 80 and does not withdraw -> final balance 20 (>=0). The invariant get_balance(name) >= 0 holds for these sequences.\n- Retries / loops / state reuse: reset() clears _accounts; repeated runs start from deterministic state. Because the mutation happens at check time, repeated checks will reflect the most recent balance; there is no path where two approvals decrement twice based on the same original balance within this single-threaded simulation.\n- Note: in a real concurrent system, this approach requires a synchronization primitive (lock, atomic compare-and-swap) to be safe across threads/processes. The current codebase simulates step interleaving in a single interpreter using explicit step ordering; within that model the fix ensures no two checks can both read the old balance because the first check immediately writes the new balance.", 'conclusion': 'No flaw found within the single-interpreter step-interleaving model used by this code: moving the debit into step_check prevents the double-approval window that allowed negative balance. If cross-process or true multithreaded concurrency is required, this fix must be augmented with proper synchronization (locks or atomic operations). Also, to be robust against malformed amounts, add validation of amount > 0 if desired. Given the current code and tests (sequential_withdrawals and interleaved_withdrawals), the fix is safe and preserves intended outcomes.'}
+
+
+# Task Description
+Under interleaving, two withdrawals of 80 from balance=100 both succeed, leaving -60. Fix so balance never goes negative.
+
+# Code Produced
+```python
+ """Bank with non-atomic check-then-act withdrawal, simulated via steps."""
+
+_accounts = {}
+
+
+def reset():
+    _accounts.clear()
+
+
+def create_account(name, balance):
+    _accounts[name] = balance
+
+
+def get_balance(name):
+    return _accounts.get(name, 0)
+
+
+def check_balance(name, amount):
+    """CHECK: is balance sufficient?"""
+    return _accounts.get(name, 0) >= amount
+
+
+def do_withdraw(name, amount):
+    """ACT: decrement balance. Assumes caller verified."""
+    _accounts[name] = _accounts.get(name, 0) - amount
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def make_withdraw_steps(name, amount):
+    """Split withdrawal into separate check and act steps.
+
+    Fixed: perform the check and the withdrawal atomically in the "check" step so
+    that another interleaved check cannot observe the old balance and also approve.
+    The act step is left as a no-op that reports the approval.
+    """
+    result = {"approved": False}
+
+    def step_check():
+        # Perform check-and-withdraw atomically in this step (in the single-threaded
+        # step simulation). This removes the window between reading and writing
+        # _accounts[name] that previously allowed double-approval under interleaving.
+        if _accounts.get(name, 0) >= amount:
+            # decrement immediately to reserve the funds
+            do_withdraw(name, amount)
+            result["approved"] = True
+        else:
+            result["approved"] = False
+        return ("check", result["approved"])
+
+    def step_act():
+        # act is now a no-op because the debit already happened at check time.
+        return ("act", result["approved"])
+
+    return step_check, step_act
+
+
+def sequential_withdrawals():
+    """Two withdrawals of 80 from balance=100. Sequential: second denied."""
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (act_a, ()), (check_b, ()), (act_b, ())])
+    return get_balance("alice")
+
+
+def interleaved_withdrawals():
+    """Two withdrawals of 80, interleaved: BUG — both approved, overdraft."""
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (check_b, ()), (act_a, ()), (act_b, ())])
+    return get_balance("alice")
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;TEMPORAL_ORDERING
+HIGH
+Counterfactual: If the check-and-act window (the separate read-only check step) were removed so the balance is decremented at check time, the double-approval interleaving cannot produce the negative balance in this step-simulation.
+Evidence: step_check reads _accounts via _accounts.get(name,0) >= amount; do_withdraw writes _accounts[name] = _accounts.get(name,0) - amount; original interleaving run_steps([(check_a,()),(check_b,()),(act_a,()),(act_b,())]) allowed two checks to observe 100 then two acts to decrement to -60; modified make_withdraw_steps calls do_withdraw inside step_check so the second check observes 20 and will not approve.
+Judgment: The developer correctly identified the temporal read-then-write race on _accounts[name], provided a complete causal chain to the negative balance, and implemented the described fix in code; the analysis properly notes the remaining limitation that true cross-process/thread safety requires synchronization and that input validation (amount>0) should be added.

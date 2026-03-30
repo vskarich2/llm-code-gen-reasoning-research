@@ -1021,14 +1021,15 @@ Respond with ONLY this JSON:
 # ============================================================
 
 
-def _write_iteration_log(case, model, k, max_iterations, condition, prompt, raw, parsed, ev, entry):
-    """Write one iteration via the active RunLogger."""
-    from execution import get_run_logger, get_model_config as _gmc
+def _write_iteration_log(case, model, k, max_iterations, condition, prompt, raw, parsed, ev, entry,
+                         logger=None):
+    """Write one iteration via the explicit logger (or no-op if None)."""
+    if logger is None:
+        return
+    from llm import get_model_config as _gmc
 
     reasoning_text = parsed.get("reasoning") or ""
     code_text = parsed.get("code") or ""
-
-    logger = get_run_logger()
 
     record = {
         "run_id": logger.run_id,
@@ -1093,12 +1094,14 @@ def _write_iteration_log(case, model, k, max_iterations, condition, prompt, raw,
             _log.error("LOG WRITE FAILED for %s/%s to %s: %s", case["id"], condition, path, e)
 
 
-def _write_retry_summary(case, model, condition, summary):
-    """Write summary record via the active RunLogger."""
-    from execution import get_run_logger
-
-    logger = get_run_logger()
-    logger.write_summary(summary)
+def _write_retry_summary(case, model, condition, summary, logger=None):
+    """Write summary record via the explicit logger (or no-op if None)."""
+    if logger is None:
+        return
+    # Summary goes into events as a metric
+    logger.log_metric("retry_summary", summary, context={
+        "case_id": case["id"], "condition": condition, "model": model,
+    })
 
 
 # ============================================================
@@ -1115,6 +1118,9 @@ def run_retry_harness(
     use_alignment=False,
     use_llm_eval=False,
     eval_model=None,
+    logger=None,
+    condition=None,
+    case_start_eid: int = 0,
 ):
     """Run retry harness. Returns (case_id, condition, ev).
 
@@ -1144,13 +1150,6 @@ def run_retry_harness(
     # Contract (elicited upfront, used only on k>0)
     contract = None
     if use_contract:
-        set_call_context(
-            phase="generation",
-            case_id=case["id"],
-            condition=condition,
-            attempt_index=0,
-            step="elicit_contract",
-        )
         contract = _elicit_contract(case, model)
         model_call_count += 1
 
@@ -1164,7 +1163,12 @@ def run_retry_harness(
     adaptive_hint = None
     trajectory_context = None
 
+    last_parent_eid = case_start_eid
     for k in range(max_iterations):
+        # New trajectory for retry iterations (re-entry after evaluation)
+        if k > 0 and logger is not None:
+            logger.new_trajectory()
+
         # Wallclock safety
         elapsed = time.monotonic() - total_start
         if elapsed > MAX_TOTAL_SECONDS:
@@ -1207,14 +1211,16 @@ def run_retry_harness(
             prompt = "\n".join(_parts)
 
         iter_start = time.monotonic()
-        from call_logger import set_call_context
-
-        set_call_context(
-            phase="generation", case_id=case["id"], condition=condition, attempt_index=k
-        )
         # Append output instruction via AssemblyEngine component
         _oi = _assembly_build(["output_instruction_v1"], {}).final_prompt
-        raw = call_model(prompt + _oi, model=model, raw=True)
+        raw = call_model(
+            prompt + _oi, model=model, raw=True,
+            logger=logger, case_id=case["id"],
+            phase="generation", condition=condition,
+            parent_event_id=last_parent_eid,
+        )
+        if logger is not None:
+            last_parent_eid = logger._event_counter
         model_call_count += 1
         iter_elapsed = time.monotonic() - iter_start
         if iter_elapsed > MAX_ITERATION_SECONDS:
@@ -1253,9 +1259,6 @@ def run_retry_harness(
         # --- Critique (only on failure, not on last iteration) ---
         critique = None
         if not ev["pass"] and k < max_iterations - 1:
-            set_call_context(
-                phase="critique", case_id=case["id"], condition=condition, attempt_index=k
-            )
             critique = _call_critique(model, code_k, error_obj, ev)
             model_call_count += 1
 
@@ -1428,7 +1431,8 @@ def run_retry_harness(
 
         # --- Log iteration ---
         _write_iteration_log(
-            case, model, k, max_iterations, condition, prompt, raw, parsed_result, ev, entry
+            case, model, k, max_iterations, condition, prompt, raw, parsed_result, ev, entry,
+            logger=logger,
         )
 
         # --- ANALYSIS logging (observations, NOT stop conditions) ---
@@ -1729,7 +1733,7 @@ def run_retry_harness(
         "trajectory": [{k2: v for k2, v in e.items() if k2 != "code"} for e in trajectory],
     }
 
-    _write_retry_summary(case, model, condition, summary)
+    _write_retry_summary(case, model, condition, summary, logger=logger)
 
     ev.update(
         condition=condition,
@@ -1741,16 +1745,16 @@ def run_retry_harness(
     # alignment is already computed correctly by evaluate_output inside evaluate_case.
     # Do NOT recompute — the previous version used wrong arguments.
 
-    # Write final iteration to run.jsonl and events.jsonl (V10 fix)
-    from execution import write_log, _emit_metrics_event
-
-    if trajectory:
-        # Use last iteration's data for logging
-        last_prompt = prompt  # loop variable from last iteration
-        last_raw = raw  # loop variable from last iteration
-        write_log(case["id"], condition, model, last_prompt, last_raw, parsed_result, ev)
-    _emit_metrics_event(
-        case, model, condition, ev, elapsed_seconds=round(time.monotonic() - total_start, 2)
-    )
+    # Write final events via explicit logger
+    if logger is not None:
+        elapsed_ms = round((time.monotonic() - total_start) * 1000)
+        end_eid = logger.end_case(case["id"], condition=condition, raw_ev=ev,
+                                  runtime_ms=elapsed_ms,
+                                  parent_event_id=last_parent_eid)
+        if trajectory:
+            last_prompt = prompt
+            last_raw = raw
+            logger.log_run(case["id"], condition, last_prompt, last_raw,
+                           parsed_result, canonical_event_id=end_eid)
 
     return case["id"], condition, ev

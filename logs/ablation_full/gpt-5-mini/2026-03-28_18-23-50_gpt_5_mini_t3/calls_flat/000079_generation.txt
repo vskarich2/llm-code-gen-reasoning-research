@@ -1,0 +1,227 @@
+=== CALL 000079 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: use_before_set_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:55:21.472673
+LATENCY_MS: 35150
+
+--- PROMPT ---
+Pipeline crashes on empty data source. Fix. Return the updated code.
+
+## Codebase (2 files)
+
+### FILE 1/2: code_snippets_v2/use_before_set_b/loader.py ###
+```python
+"""Data loader with status tracking."""
+
+_status = "idle"
+_data = None
+
+
+def reset():
+    global _status, _data
+    _status = "idle"
+    _data = None
+
+
+def load(source):
+    """Load data from source. Sets status on success only."""
+    global _status, _data
+    if source and len(source) > 0:
+        _data = [x for x in source]
+        _status = "loaded"
+    # BUG: on empty/None source, _status stays at previous value
+    # instead of being set to "empty"
+    return _data
+
+
+def get_status():
+    return _status
+
+
+def get_data():
+    return _data
+
+
+def validate_format(data):
+    """Distractor: checks data format, unrelated to bug."""
+    if data is None:
+        return False
+    return isinstance(data, list)
+```
+
+### FILE 2/2: code_snippets_v2/use_before_set_b/pipeline.py ###
+```python
+"""Data pipeline that uses loader."""
+
+from loader import load, get_status, get_data
+
+
+def reset():
+    global _status, _data
+    _status = "idle"
+    _data = None
+
+
+def run_pipeline(source):
+    """Load data and return status-tagged result.
+
+    Contract: status must reflect THIS call's outcome,
+    not a previous call's state.
+    """
+    load(source)
+    status = get_status()
+    data = get_data()
+
+    return {
+        "status": status,
+        "count": len(data) if data else 0,
+        "data": data,
+    }
+```
+
+You are implementing a STRICT reasoning + code generation procedure designed to REDUCE reasoning-execution mismatch.
+
+This is NOT a formatting task. This is a TWO-PASS reasoning process with adversarial verification.
+
+You MUST follow the procedure exactly.
+
+Return a SINGLE valid JSON object. No text outside JSON. No markdown fences.
+
+# GOAL
+
+Fix the bug AND ensure your reasoning is causally correct and robust to failure.
+
+You are required to:
+- identify the correct mechanism
+- challenge your own hypothesis
+- verify your fix against failure scenarios
+
+# PROCEDURE (MANDATORY)
+
+## STEP 1 — DIAGNOSE (PRIMARY HYPOTHESIS)
+
+Identify:
+
+- root_cause:
+  Name the exact function + variable + operation causing the bug.
+  Must describe a causal relationship (not just "missing X").
+
+- failure_mechanism:
+  Give a concrete scenario:
+  cause → mutation/event → propagation → observable failure
+
+- broken_invariant:
+  A specific, testable property that is violated.
+
+## STEP 2 — ALTERNATIVE HYPOTHESIS (CRITICAL)
+
+Propose ONE alternative explanation for the bug.
+
+- What else could plausibly be the cause?
+- Why might your primary hypothesis be wrong?
+
+Then explicitly reject it:
+
+- Why is your original diagnosis more correct?
+- What evidence in the code supports this?
+
+This step is REQUIRED. Do not skip.
+
+## STEP 3 — PLAN FIX
+
+Describe:
+
+- fix_strategy:
+  What exact change you will make
+  Why it breaks the causal chain
+
+Must reference actual code behavior.
+
+## STEP 4 — CODE
+
+Implement the fix.
+
+Rules:
+- Modify ONLY necessary files
+- Return COMPLETE contents for modified files
+- Use "UNCHANGED" for others
+
+## STEP 5 — ADVERSARIAL SELF-CHECK (MANDATORY)
+
+You must actively try to BREAK your own fix.
+
+Answer ALL:
+
+1. Failure Scenario:
+   Describe a concrete scenario where your fix might still fail.
+
+2. Edge Case:
+   Identify a boundary condition (e.g., retries, empty values, ordering).
+
+3. Invariant Check:
+   Verify your invariant holds under:
+   - multiple calls
+   - retries / loops
+   - state reuse
+
+4. Conclusion:
+   - If a flaw is found → REVISE your fix
+   - If no flaw → explain WHY it is safe
+
+Your answer MUST reference your actual code.
+
+# OUTPUT FORMAT (STRICT JSON)
+
+{
+  "root_cause": "<exact function + variable + causal relationship>",
+  "failure_mechanism": "<cause → mutation → propagation → observable failure>",
+  "broken_invariant": "<specific testable property that is violated>",
+  "alternative_hypothesis": "<one alternative explanation for the bug>",
+  "hypothesis_rejection": "<why primary hypothesis is correct, with code evidence>",
+  "fix_strategy": "<what change you will make and why it breaks the causal chain>",
+  "self_check": {
+    "failure_scenario": "<concrete scenario where fix might still fail>",
+    "edge_case": "<boundary condition to test>",
+    "invariant_check": "<verify invariant under multiple calls, retries, state reuse>",
+    "conclusion": "<flaw found → revise, or why it is safe>"
+  },
+  "files": {"<path>": "<complete file contents or UNCHANGED>"}
+}
+
+# RULES
+
+- All fields are REQUIRED and must be substantive
+- No generic statements — ground every claim in actual code
+- Must reference actual variables and behavior
+- Do NOT restate the task
+- Do NOT skip alternative hypothesis
+- Do NOT skip adversarial self-check
+- For files you did NOT modify, set value to "UNCHANGED"
+- Do NOT include markdown formatting (no ```python blocks) inside file values
+- File values must be raw Python source code, not markdown
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "loader.load: failure to set the module-level variable _status (and _data) in the branch when source is empty/None, causing the previous value of _status to be reused",
+  "failure_mechanism": "call run_pipeline(source) → run_pipeline calls loader.load(source) → when source is empty or None the load function does not mutate _status/_data (it only mutates them on the truthy non-empty branch) → _status remains the value from a previous call (e.g. 'loaded') → get_status() returns stale status → pipeline returns an incorrect 'status' that reflects a prior call rather than the current call",
+  "broken_invariant": "After load(source) returns, get_status() must equal either 'loaded' when source contained items, or 'empty' when source was empty/None. This invariant is violated when source is empty because _status can remain 'loaded' from a previous call.",
+  "alternative_hypothesis": "The bug could be caused by pipeline.run_pipeline not resetting loader state before calling load (i.e., stateful reuse across calls in pipeline rather than load itself failing to update), so the stale status is due to pipeline relying on prior state.",
+  "hypothesis_rejection": "run_pipeline always calls loader.load(source) and then immediately reads get_status() and get_data(). The code in loader.load is the only place that mutates _status and _data. If pipeline were the cause, adding a reset in pipeline would be necessary. But the minimal reproduction (multiple calls to run_pipeline with empty then non-empty inputs) shows the stale status persists only when load does not update _status. The loader module's load function contains the comment and code that only updates _status in the truthy non-empty branch; this is direct evidence that load fails to update _status for empty/None inputs, making the loader.load diagnosis more correct.",
+  "fix_strategy": "Ensure loader.load always sets both _status and _data to reflect the outcome of THIS call. Specifically, add an else branch that sets _data = [] and _status = 'empty' when the provided source is empty or None. This breaks the causal chain by preventing reuse of previous _status/_data values when the current source is empty.",
+  "self_check": {
+    "failure_scenario": "If a caller passes a truthy non-iterable (e.g. an int like 5), the condition `if source and len(source) > 0:` will attempt len(source) and raise TypeError. This scenario was possible before the fix and remains possible after the fix because the fix intentionally preserves the original branch-order and semantics for non-iterables.",
+    "edge_case": "source is an empty string ''. The code treats '' as falsy and will set _data = [] and _status = 'empty' (which is the intended behavior). Another edge: source is a generator. `source` may be truthy but have len() undefined; since len(generator) raises TypeError, the original behavior would also raise; we left that unchanged to avoid changing semantics for iterables that don't support len().",
+    "invariant_check": "After the fix, for the following situations the invariant holds:\n- multiple calls: call load([1]) → _status becomes 'loaded'; call load([]) → the else branch sets _status to 'empty'. So get_status() after each call reflects that call's outcome.\n- retries/loops: repeated calls with alternating empty and non-empty sources will always update _status/_data in each call and therefore will not leak previous state.\n- state reuse: reset() in the loader module still sets _status = 'idle' and _data = None; even without explicit reset, load will overwrite _status/_data on each call as described above.\nTherefore the invariant (status reflects THIS call) holds for empty and non-empty inputs that behave like before (i.e., ones for which evaluating the condition does not raise).",
+    "conclusion": "No flaw requiring a code revision was found relative to the original bug: the fix deterministically sets _status and _data for the empty/None branch and thus prevents stale statuses from propagating. The remaining potential failure (TypeError for truthy non-iterables or iterators without len) is a preexisting behavior and changing it would change semantics beyond the scope of the reported bug. Thus the fix is safe and targeted."
+  },
+  "files": {
+    "code_snippets_v2/use_before_set_b/loader.py": "﻿\"\"\"Data loader with status tracking.\"\"\"\n\n_status = \"idle\"\n_data = None\n\n\ndef reset():\n    global _status, _data\n    _status = \"idle\"\n    _data = None\n\n\ndef load(source):\n    \"\"\"Load data from source. Sets status on success only.\"\"\"\n    global _status, _data\n    if source and len(source) > 0:\n        _data = [x for x in source]\n        _status = \"loaded\"\n    else:\n        # Ensure empty or None source updates state to reflect THIS call\n        _data = []\n        _status = \"empty\"\n    # BUG fixed: on empty/None source, _status and _data are explicitly set\n    return _data\n\n\ndef get_status():\n    return _status\n\n\ndef get_data():\n    return _data\n\n\ndef validate_format(data):\n    \"\"\"Distractor: checks data format, unrelated to bug.\"\"\"\n    if data is None:\n        return False\n    return isinstance(data, list)\n",
+    "code_snippets_v2/use_before_set_b/pipeline.py": "UNCHANGED"
+  }
+}

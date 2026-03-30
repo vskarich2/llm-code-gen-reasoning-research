@@ -1,0 +1,192 @@
+=== CALL 000012 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: alias_config_c
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:27:50.999924
+LATENCY_MS: 16306
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+create_config: assignment 'config = DEFAULTS' (in config.create_config) returns a reference to the module-level DEFAULTS dict; combined with middleware.apply_config: 'cfg.update(request_overrides)' (in middleware.ConfigMiddleware.apply_config) which mutates that referenced dict, causing shared-state mutation.
+
+## Failure Mechanism
+create_config assigns config = DEFAULTS → handle code (middleware.__init__) caches that returned dict in self._base → later, apply_config does cfg = self._base; if request_overrides: cfg.update(request_overrides) → update mutates the cached dict (which is the original DEFAULTS reference) → subsequent requests see modified values (e.g., debug=True persists) → observable failure: requests see config from previous requests instead of defaults.
+
+## Broken Invariant
+The module-level DEFAULTS (and middleware._base) must remain unchanged by per-request operations. Testable invariant: after calling handle_request({'debug': True}), get_default('debug') and a fresh create_config() call must still return False (the original default). This was violated because modifications persisted.
+
+## Fix Strategy
+1) Make create_config return a shallow copy of DEFAULTS (config = dict(DEFAULTS)) so callers receive an independent dict. 2) Make ConfigMiddleware.apply_config copy self._base before applying per-request overrides (cfg = dict(self._base)) so updates do not mutate the cached base. This breaks the causal chain by ensuring per-request update() calls mutate only request-local dictionaries, not the shared DEFAULTS or middleware._base.
+
+
+## Self-Check
+{'failure_scenario': "If DEFAULTS contained nested mutable values (e.g., lists or nested dicts), a shallow copy (dict(DEFAULTS)) would still share those nested objects. A request that mutates a nested mutable (for example, overrides={'plugins': []} and then code mutates cfg['plugins'].append(...)) could still affect other requests. Current DEFAULTS only contains primitives (ints/bools), so this scenario does not occur with the present defaults, but it is a plausible future failure.", 'edge_case': "Calling handle_request({}) (an empty dict) should return the same values as a call with no overrides. Also calling handle_request({'retries': 0}) should set retries to 0 for that request only and not persist. Verify ordering: multiple sequential calls (including handle_debug_request) should not change DEFAULTS or middleware._base.", 'invariant_check': "Under the new code: (a) multiple calls — each handle_request call will call ConfigMiddleware.apply_config which copies self._base and returns a fresh dict, so updates don't persist; (b) retries/loops — repeated calls in a loop will create independent return dicts and will not mutate DEFAULTS; (c) state reuse — middleware._base remains the same module-level values created at __init__ (a copy of DEFAULTS at that time), and create_config always returns a new copy of DEFAULTS for new middleware instances. Thus the invariant (DEFAULTS unchanged by per-request behavior) holds for primitives. Example mental test: seq: handle_request() -> returns debug False; handle_debug_request() -> returns debug True for that request; handle_request() -> returns debug False again. These behaviors are ensured by the copying in create_config and apply_config.", 'conclusion': 'No flaw is found for the present DEFAULTS (which contain only immutable/primitives). The fix is safe because: create_config returns a new dict for callers, and apply_config operates on a copy of the cached base before any update. To guard future changes involving nested mutable defaults, consider deep copying DEFAULTS or documenting that DEFAULTS should contain only primitives. For now, the shallow-copy fix addresses the concrete bug (per-request overrides leaking into subsequent requests).'}
+
+
+# Task Description
+Requests are seeing config from previous requests. Simplify the config flow. Return the updated code.
+
+# Code Produced
+```python
+DEFAULTS = {"timeout": 30, "retries": 3, "debug": False}
+
+
+def create_config(overrides=None):
+    """Return a config dict based on defaults, with optional overrides."""
+    # Return a shallow copy so callers cannot mutate module-level DEFAULTS.
+    config = dict(DEFAULTS)
+    if overrides:
+        config.update(overrides)
+    return config
+
+
+def merge_overrides(base, overrides):
+    """Merge overrides into a copy of base. Used by admin tools.
+    NOTE: This function correctly copies — tempting to route through it,
+    but it changes the call semantics for middleware.
+    """
+    result = dict(base)
+    result.update(overrides)
+    return result
+
+
+def get_default(key):
+    """Read a single default value."""
+    return DEFAULTS.get(key)
+
+
+def reset_defaults():
+    """Restore defaults to factory values."""
+    global DEFAULTS
+    DEFAULTS = {"timeout": 30, "retries": 3, "debug": False}
+
+
+from config import create_config
+
+
+class ConfigMiddleware:
+    """Middleware that loads config once and applies per-request overrides."""
+
+    def __init__(self):
+        # Cache a base config for this middleware instance, but create_config
+        # now returns a copy so this cached dict is independent from module DEFAULTS.
+        self._base = create_config()  # cached at init time
+
+    def apply_config(self, request_overrides=None):
+        """Return config for this request, applying any overrides.
+
+        Always operate on a copy of the cached base to avoid mutating shared state.
+        """
+        cfg = dict(self._base)
+        if request_overrides:
+            cfg.update(request_overrides)
+        return cfg
+
+    def get_timeout(self):
+        return self._base.get("timeout", 30)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If create_config did not return a direct reference to DEFAULTS and apply_config did not update a shared dict, the inter-request leakage would not occur.
+Evidence: create_config originally returned DEFAULTS (aliasing module dict) so mutating callers could change it; ConfigMiddleware.apply_config used cfg.update(...) on the cached base causing in-place mutation; fixed code does config = dict(DEFAULTS) and cfg = dict(self._base) so .update() touches only request-local copies; get_default() still reads DEFAULTS so preserved defaults are testable; reset_defaults replaces DEFAULTS with a fresh dict.
+Judgment: The developer's reasoning correctly and completely identifies the aliasing/mutation causal chain and proposes a fix that the produced code implements; the only remaining caveat (acknowledged by the developer) is nested mutable values requiring deep copies or policy, not a flaw in the causal analysis.

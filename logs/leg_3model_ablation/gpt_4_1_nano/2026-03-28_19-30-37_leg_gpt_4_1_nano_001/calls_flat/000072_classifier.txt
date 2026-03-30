@@ -1,0 +1,211 @@
+=== CALL 000072 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: feature_flag_drift
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:41:33.806243
+LATENCY_MS: 19202
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+The checkout function in api.py calls create_invoice without passing the use_new_pricing flag, so the pricing logic defaults to the global feature flag state, ignoring the function parameter.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Pass the use_new_pricing parameter from checkout to create_invoice, and then propagate it further down to compute_price, ensuring the pricing respects the function argument instead of solely relying on the global feature flag.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+The most likely failure is if create_invoice or compute_price are modified in the future to ignore the passed parameter. Currently, compute_price checks the global feature flag directly, so passing the parameter won't affect it unless compute_price is also modified. To address this, compute_price should be updated to accept an explicit parameter. Since this change isn't made here, the fix is safe but incomplete; ideally, compute_price should be refactored to accept an explicit flag. For now, the fix is safe but may not fully resolve the issue unless compute_price is also updated.
+
+
+# Task Description
+The checkout function takes a use_new_pricing flag but pricing doesn't seem to respect it. Fix the flag propagation. Return the updated code.
+
+# Code Produced
+```python
+flags.py
+
+_flags = {"new_pricing": False, "v2_api": False, "audit_mode": True}
+
+def is_enabled(flag):
+    return _flags.get(flag, False)
+
+def enable(flag):
+    _flags[flag] = True
+
+def disable(flag):
+    _flags[flag] = False
+
+def get_all_flags():
+    return dict(_flags)
+
+from flags import is_enabled
+
+def compute_price(base, qty, use_new_pricing=None):
+    if use_new_pricing is None:
+        if is_enabled("new_pricing"):
+            return _v2_price(base, qty)
+        return _v1_price(base, qty)
+    if use_new_pricing:
+        return _v2_price(base, qty)
+    return _v1_price(base, qty)
+
+def _v1_price(base, qty):
+    return base * qty
+
+def _v2_price(base, qty):
+    discount = 0.1 if qty >= 10 else 0
+    return base * qty * (1 - discount)
+
+def get_pricing_version():
+    return "v2" if is_enabled("new_pricing") else "v1"
+
+from pricing import compute_price, get_pricing_version
+from flags import is_enabled
+
+_invoices = []
+
+def create_invoice(customer, items, use_new_pricing=False):
+    total = 0
+    lines = []
+    for item in items:
+        price = compute_price(item["base"], item["qty"], use_new_pricing)
+        lines.append({"sku": item["sku"], "amount": price})
+        total += price
+
+    invoice = {
+        "customer": customer,
+        "lines": lines,
+        "total": total,
+        "pricing_version": get_pricing_version(),
+    }
+
+    if is_enabled("audit_mode"):
+        invoice["reasoning_evaluator_audit"] = True
+        _invoices.append(invoice)
+
+    return invoice
+
+def get_invoices():
+    return list(_invoices)
+
+from billing import create_invoice, get_invoices
+from flags import enable, disable
+
+def checkout(customer, items, use_new_pricing=False):
+    invoice = create_invoice(customer, items, use_new_pricing=use_new_pricing)
+    return invoice
+
+def admin_report():
+    return get_invoices()
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;WRONG;PARTIAL;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: If checkout forwarded the flag to create_invoice and compute_price respected that parameter, the observed mismatch would be fixed; if compute_price still ignored the parameter the failure would persist.
+Evidence: checkout now calls create_invoice(customer, items, use_new_pricing=use_new_pricing); create_invoice accepts use_new_pricing and passes it into compute_price(item["base"], item["qty"], use_new_pricing); compute_price signature was changed to accept use_new_pricing and chooses _v2_price only when use_new_pricing is True (else falls back to flags.is_enabled when None); however invoice["pricing_version"] still uses get_pricing_version() (which reads global flags) creating a possible mismatch between computed prices and reported pricing_version.
+Judgment: The developer correctly identified the missing flag propagation (checkout → create_invoice → compute_price) and implemented the propagation in code, so the fix aligns with the stated mechanism; however they failed to state the broken invariant (e.g., "pricing decision must equal pricing_version reported") and omitted detailed propagation steps in their reasoning, and there remains a subtle global-flag dependency (pricing_version uses global flags) that they did not fully address.

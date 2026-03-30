@@ -1,0 +1,163 @@
+=== CALL 000286 ===
+MODEL: gpt-4.1-nano
+PHASE: generation
+CASE_ID: async_race_lock
+CONDITION: baseline_v2
+TRIAL: 1
+RUN_ID: v2_smoke_nano_3tier_002
+TRACE_ID: 0457cc6b07a2444fad0d5034d0c5e43e
+TIMESTAMP: 2026-03-30T01:44:12.035682
+LATENCY_MS: 3544
+
+--- PROMPT ---
+process_item and quick_increment both increment the counter. Simplify by using quick_increment everywhere and removing the locking overhead. Return the updated code.
+
+## Codebase (4 files)
+
+### FILE 1/4: code_snippets_v2/async_race_lock/state.py ###
+```python
+_counter = {"value": 0, "locked": False}
+
+
+def get_counter():
+    return _counter["value"]
+
+
+def increment(n=1):
+    _counter["value"] += n
+
+
+def try_lock():
+    if _counter["locked"]:
+        return False
+    _counter["locked"] = True
+    return True
+
+
+def unlock():
+    _counter["locked"] = False
+
+
+def reset():
+    _counter["value"] = 0
+    _counter["locked"] = False
+```
+
+### FILE 2/4: code_snippets_v2/async_race_lock/worker.py ###
+```python
+from state import increment, try_lock, unlock, get_counter
+
+
+def process_item(item):
+    increment(item["weight"])
+    return {"status": "ok"}
+
+
+def process_batch_serial(items):
+    results = []
+    for item in items:
+        results.append(process_item(item))
+    return results
+
+
+def quick_increment(item):
+    increment(item["weight"])
+    return {"status": "ok"}
+```
+
+### FILE 3/4: code_snippets_v2/async_race_lock/scheduler.py ###
+```python
+from worker import process_item, process_batch_serial, quick_increment
+from state import get_counter, reset
+
+
+def run_pipeline(items):
+    reset()
+    results = process_batch_serial(items)
+    final = get_counter()
+    return {"results": results, "total": final}
+
+
+def run_fast_pipeline(items):
+    reset()
+    results = []
+    for item in items:
+        results.append(quick_increment(item))
+    return {"results": results, "total": get_counter()}
+
+
+def run_verified(items):
+    reset()
+    results = process_batch_serial(items)
+    expected = sum(i["weight"] for i in items)
+    actual = get_counter()
+    if actual != expected:
+        raise RuntimeError(f"count mismatch: {actual} != {expected}")
+    return {"results": results, "total": actual}
+```
+
+### FILE 4/4: code_snippets_v2/async_race_lock/api.py ###
+```python
+from scheduler import run_pipeline, run_verified
+
+
+def handle_request(items):
+    result = run_pipeline(items)
+    return result
+
+
+def handle_verified_request(items):
+    return run_verified(items)
+
+
+def health_check():
+    from state import get_counter
+    return {"counter": get_counter()}
+```Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/async_race_lock/state.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/async_race_lock/worker.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/async_race_lock/scheduler.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/async_race_lock/api.py": "<complete file contents or UNCHANGED>"}}
+
+Where:
+
+- "root_cause":
+  Identify the bug mechanism.
+  Must name the specific function/variable and explain the causal issue.
+
+- "fix_strategy":
+  Describe the exact code change and why it fixes the bug.
+  Must refer to a specific location and concrete operation.
+
+Requirements:
+- Be specific and code-grounded
+- Avoid vague phrases like "fix the issue" or "handle properly"
+- Your fix_strategy should make the intended code change obvious
+
+Examples:
+
+GOOD:
+- "create_config returns DEFAULTS directly, so it should return DEFAULTS.copy()"
+- "update_product writes to DB but does not invalidate cache, so cache must be cleared"
+
+BAD:
+- "fix shared state issue"
+- "update the cache correctly"
+
+RULES:
+- "root_cause" and "fix_strategy" are REQUIRED
+- "files" MUST include every file listed
+- Use "UNCHANGED" where appropriate
+- Include full contents for modified files
+- No markdown inside file values
+- Return ONLY the JSON object
+
+--- RESPONSE ---
+{
+  "root_cause": "Both process_item and quick_increment increment the counter without proper locking, leading to potential race conditions. The function process_item directly calls increment, which is not atomic under concurrent access, causing inconsistent counter updates.",
+  "fix_strategy": "Replace calls to process_item with quick_increment in all places, specifically in run_pipeline and run_verified functions in scheduler.py, to ensure all increments are performed via quick_increment, which is atomic and lock-free. Remove the process_item calls from run_pipeline and run_verified, and update run_fast_pipeline to use quick_increment for all items.",
+  "files": {
+    "code_snippets_v2/async_race_lock/state.py": "UNCHANGED",
+    "code_snippets_v2/async_race_lock/worker.py": "UNCHANGED",
+    "code_snippets_v2/async_race_lock/scheduler.py": "---\nfrom worker import process_item, process_batch_serial, quick_increment\nfrom state import get_counter, reset\n\n\ndef run_pipeline(items):\n    reset()\n    results = []\n    for item in items:\n        results.append(quick_increment(item))\n    final = get_counter()\n    return {\"results\": results, \"total\": final}\n\n\ndef run_fast_pipeline(items):\n    reset()\n    results = []\n    for item in items:\n        results.append(quick_increment(item))\n    return {\"results\": results, \"total\": get_counter()}\n\n\ndef run_verified(items):\n    reset()\n    results = []\n    for item in items:\n        results.append(quick_increment(item))\n    expected = sum(i[\"weight\"] for i in items)\n    actual = get_counter()\n    if actual != expected:\n        raise RuntimeError(f\"count mismatch: {actual} != {expected}\")\n    return {\"results\": results, \"total\": actual}\n",
+    "code_snippets_v2/async_race_lock/api.py": "UNCHANGED"
+  }
+}

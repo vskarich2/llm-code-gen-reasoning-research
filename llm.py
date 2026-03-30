@@ -47,26 +47,28 @@ def _get_model_spec(model_name: str):
 
 
 def call_model(
-    prompt: str, model: str, raw: bool = False, file_paths: list[str] | None = None
+    prompt: str, model: str, raw: bool = False, file_paths: list[str] | None = None,
+    logger=None, case_id: str | None = None,
+    phase: str = "generation", condition: str | None = None,
+    prompt_assembly: dict | None = None,
+    parent_event_id: int | None = None,
 ) -> str:
     """Call an LLM. Falls back to mock if no API key is set.
-
-    Every call is logged via call_logger.emit_call() — the ONLY call-level
-    logging path. Callers set context via call_logger.set_call_context()
-    BEFORE calling this function.
 
     Args:
         model: Model name. MUST be provided by caller (from config).
         raw: If True, send prompt as-is without appending JSON output instruction.
         file_paths: If provided and output_format is v2, use V2 file-dict instruction.
+        logger: RunLogger instance. If provided, logs the call via logger.log_call().
+        case_id: Case ID for logging context.
+        phase: Call phase for logging (generation, classification, etc.).
+        condition: Condition for logging context.
+        prompt_assembly: Prompt construction provenance for logging.
+        parent_event_id: event_id of causal predecessor for this call.
     """
     import time as _time
 
     api_key = os.environ.get("OPENAI_API_KEY")
-
-    # Output instruction is now included in the prompt by AssemblyEngine.
-    # call_model passes the prompt unchanged.
-    # Legacy: output_fmt/raw/file_paths logic has been moved to build_prompt().
     full_prompt = prompt
 
     if not api_key or api_key == "sk-dummy":
@@ -82,42 +84,52 @@ def call_model(
         t0 = _time.monotonic()
         result = mock_call(full_prompt)
         elapsed = _time.monotonic() - t0
-        _emit_call_log(model, full_prompt, result, elapsed, error=None)
+        _log_call_if_logger(logger, model, full_prompt, result, elapsed, None,
+                            case_id, phase, condition, prompt_assembly, parent_event_id)
         return result
 
     _llm_log.debug("API_CALL_START model=%s prompt_len=%d raw=%s", model, len(full_prompt), raw)
     t0 = _time.monotonic()
-    error = None
     try:
         result = _openai_call(full_prompt, model, api_key)
     except Exception as e:
         elapsed = _time.monotonic() - t0
-        _emit_call_log(model, full_prompt, "", elapsed, error=str(e))
+        _log_call_if_logger(logger, model, full_prompt, "", elapsed, str(e),
+                            case_id, phase, condition, prompt_assembly, parent_event_id)
         raise
     elapsed = _time.monotonic() - t0
     _llm_log.debug(
         "API_CALL_END model=%s elapsed=%.1fs response_len=%d", model, elapsed, len(result)
     )
-    _emit_call_log(model, full_prompt, result, elapsed, error=None)
+    _log_call_if_logger(logger, model, full_prompt, result, elapsed, None,
+                        case_id, phase, condition, prompt_assembly, parent_event_id)
     return result
 
 
-def _emit_call_log(
-    model: str, prompt: str, response: str, elapsed: float, error: str | None
+def _log_call_if_logger(
+    logger, model: str, prompt: str, response: str, elapsed: float,
+    error: str | None, case_id: str | None, phase: str,
+    condition: str | None, prompt_assembly: dict | None,
+    parent_event_id: int | None,
 ) -> None:
-    """Emit call log. Never raises — logging failure must not kill the run."""
+    """Log call via explicit logger. No-op if logger is None. Never raises."""
+    if logger is None:
+        return
     try:
-        from call_logger import emit_call
-
-        emit_call(
+        logger.log_call(
             model=model,
-            prompt_raw=prompt,
-            response_raw=response,
+            prompt=prompt,
+            response=response,
             elapsed_seconds=elapsed,
+            case_id=case_id or "unknown",
+            phase=phase,
+            parent_event_id=parent_event_id or 0,
+            condition=condition,
             error=error,
+            prompt_assembly=prompt_assembly,
         )
     except Exception as e:
-        _llm_log.debug("Call log emission skipped: %s", e)
+        _llm_log.debug("Call log emission failed: %s", e)
 
 
 def get_model_config() -> dict:

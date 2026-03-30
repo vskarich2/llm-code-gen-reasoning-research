@@ -1,0 +1,203 @@
+=== CALL 000079 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: use_before_set_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:53:55.398073
+LATENCY_MS: 19969
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+loader.load: the function did not set the module-level variable _status when the provided source was empty or None, leaving _status at a previous value and causing stale status to be reported by get_status().
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Update loader.load to always set _status and _data for every execution path. Specifically: treat None as an empty source and set _status = 'empty' and _data = [] ; for other sources attempt to determine emptiness safely (use len() when available, otherwise convert to a list to check emptiness). If source has items, set _data to those items and _status = 'loaded'. This ensures get_status() always reflects the outcome of the current load call and prevents previous statuses from leaking through.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure mode is behavior change for non-iterable inputs (e.g., passing an int) or for single-pass generators: the new code will attempt to convert non-sized iterables to a list (consuming generators) and will treat a non-iterable as a single-item load rather than raising TypeError. This is a conscious change to make load robust; however, if preserving the exact previous TypeError behavior for non-iterables is required, the code should be adjusted to re-raise for non-iterables. I revised the implementation to handle TypeError from len() by trying to iterate and falling back to treating a non-iterable as a single item, which avoids unexpected crashes from common iterable inputs (including generators). This revision was applied.
+
+
+# Task Description
+Pipeline crashes on empty data source. Fix. Return the updated code.
+
+# Code Produced
+```python
+"""Data loader with status tracking."""
+
+_status = "idle"
+_data = None
+
+
+def reset():
+    global _status, _data
+    _status = "idle"
+    _data = None
+
+
+def load(source):
+    """Load data from source. Sets status on success only."""
+    global _status, _data
+
+    # Treat explicit None as empty source
+    if source is None:
+        _data = []
+        _status = "empty"
+        return _data
+
+    # Try to use len() when available to determine emptiness without consuming iterables
+    try:
+        has_items = len(source) > 0
+    except TypeError:
+        # source has no len(): try to materialize it (handles generators and other iterables)
+        try:
+            seq = [x for x in source]
+        except TypeError:
+            # Not iterable: treat as a single item (be tolerant instead of raising)
+            _data = [source]
+            _status = "loaded"
+            return _data
+        if len(seq) > 0:
+            _data = seq
+            _status = "loaded"
+        else:
+            _data = []
+            _status = "empty"
+        return _data
+
+    # If we get here, len() worked
+    if has_items:
+        _data = [x for x in source]
+        _status = "loaded"
+    else:
+        _data = []
+        _status = "empty"
+
+    return _data
+
+
+def get_status():
+    return _status
+
+
+def get_data():
+    return _data
+
+
+def validate_format(data):
+    """Distractor: checks data format, unrelated to bug."""
+    if data is None:
+        return False
+    return isinstance(data, list)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+PARTIAL;WRONG;WRONG;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+MEDIUM
+Counterfactual: If load always wrote _status and _data on every path (no previous-value leakage), the stale-status symptom would be eliminated.
+Evidence: load(None) sets _data = [] and _status = "empty"; the len() branch sets _status to "loaded" or "empty" and materializes source with [x for x in source]; the TypeError handler treats non-iterables as single-item loads (_data=[source], _status="loaded"); developer left "Failure Mechanism" and "Broken Invariant" unspecified.
+Judgment: The developer correctly targeted loader.load and implemented a fix that prevents stale _status by always assigning _status/_data (fix_alignment and code_alignment correct). However the reasoning omitted the explicit invariant and the full causal propagation from missing assignments to the pipeline crash, so mechanism and causal-chain assessments are incomplete; additionally the code changes observable behavior for non-iterables and consumes generators, which the developer noted but did not fully justify against requirements.

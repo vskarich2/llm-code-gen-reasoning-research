@@ -1,0 +1,185 @@
+=== CALL 000158 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: index_misalign_a
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:29:59.308069
+LATENCY_MS: 19233
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+add_entry: the operation on variable _values uses append(value) when position is provided, causing _values to receive the new item at the end while _labels receives the new item at position via _labels.insert(position, label); the mismatched operations break alignment
+
+## Failure Mechanism
+caller calls add_entry(label, value, position) → code executes _labels.insert(position, label) but executes _values.append(value) (mutation) → _labels and _values become differently ordered (and thus the i-th label no longer corresponds to the i-th value) → get_entry(i) and get_all() return incorrect label/value pairings (observable failure)
+
+## Broken Invariant
+For every valid index i, _labels[i] corresponds to _values[i]. Specifically, after any call to add_entry, len(_labels) == len(_values) and for each index i the original pairing order is preserved. That property can be tested by verifying list(zip(_labels, _values)) matches expected pairs.
+
+## Fix Strategy
+Change the operation on _values when position is provided from append(value) to insert(position, value) so both lists are mutated at the same index. Additionally, validate the internal length invariant before performing the insertion to fail fast if the lists are already inconsistent (which prevents silent propagation of a prior corruption). This breaks the causal chain because both arrays will now receive the new element at the same index, preserving the index-wise correspondence.
+
+
+## Self-Check
+{'failure_scenario': 'If the internal state was already inconsistent before calling add_entry (len(_labels) != len(_values)), the function would previously continue and further corrupt state silently. With the new pre-check, add_entry will raise a RuntimeError. A remaining failure scenario: external code directly manipulates _labels or _values after the check (e.g., another thread modifies the lists between the check and the insert). Because the module is not thread-safe, concurrent mutation could still lead to misalignment.', 'edge_case': "Position values outside the typical range: position > len(_labels) or negative positions. Python's list.insert behavior appends when index > len and treats negative indices as offsets from the end; both lists use the same insert call, so the relative placement remains aligned. Another edge case: non-integer position values — the function now raises TypeError for non-int positions to avoid unpredictable behavior.", 'invariant_check': "Multiple calls: calling add_entry repeatedly with position=None appends to both lists, preserving alignment. Calling add_entry repeatedly with integer positions inserts at those indices for both lists, preserving alignment. Retries / loops: because we verify len(_labels) == len(_values) before insertion, retries won't proceed on already-corrupted state. State reuse: reset() clears both lists; after reset both lists are empty and invariant holds; subsequent insert/append operations preserve the invariant. The actual code uses identical list operations (insert/append) on both _labels and _values, ensuring index-wise correspondence.", 'conclusion': 'No flaw found in the single-threaded use model: the fix ensures that for any add_entry call the index-wise correspondence is preserved by applying the same list mutation to _labels and _values. The remaining residual risk is concurrent modification from outside this module; addressing that would require explicit synchronization, which is outside the scope of this bug fix. Therefore the fix is safe for the intended single-threaded usage and will fail fast if prior corruption exists.'}
+
+
+# Task Description
+Refactor this report builder for clarity. Return the updated code.
+
+# Code Produced
+```python
+"""Report builder with parallel label/value arrays."""
+
+_labels = []
+_values = []
+
+
+def add_entry(label, value, position=None):
+    """Add an entry to the report.
+
+    If position is given, insert at that index for both labels and values.
+    Otherwise, append to the end.
+
+    This function validates that the internal lists are aligned before an
+    indexed insert so we fail fast if prior corruption occurred.
+    """
+    if position is not None:
+        # Ensure position is an integer so list.insert semantics are predictable
+        if not isinstance(position, int):
+            raise TypeError("position must be an int or None")
+        # Fail fast if internal invariant already broken
+        if len(_labels) != len(_values):
+            raise RuntimeError("internal invariant violated: _labels and _values lengths differ")
+        # Insert label and value at the same index to maintain alignment
+        _labels.insert(position, label)
+        _values.insert(position, value)
+    else:
+        _labels.append(label)
+        _values.append(value)
+
+
+def get_entry(index):
+    """Return (label, value) at the given index."""
+    return (_labels[index], _values[index])
+
+
+def get_all():
+    """Return list of (label, value) tuples."""
+    return list(zip(_labels, _values))
+
+
+def count():
+    """Return the number of entries."""
+    return len(_labels)
+
+
+def reset():
+    """Clear all entries."""
+    _labels.clear()
+    _values.clear()
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;PARTIAL_STATE_UPDATE
+HIGH
+Counterfactual: If the mismatched append on _values were replaced by an insert at the same index (and lengths validated), the misalignment failure would not occur in single-threaded use.
+Evidence: - add_entry originally did _labels.insert(position, label) but _values.append(value), causing divergent list mutations; - get_entry returns (_labels[index], _values[index]) so any index-wise misalignment is observable; - the provided code changes _values.append -> _values.insert and adds a len(_labels) != len(_values) pre-check; - remaining risk (concurrent external mutation) is noted because no locking is added.
+Judgment: The developer's reasoning establishes a valid causal chain from the mismatched list operations to the observable incorrect pairings and proposes a direct, implemented fix; the analysis is precise and testable, with the only residual concern being concurrent mutation outside the module.

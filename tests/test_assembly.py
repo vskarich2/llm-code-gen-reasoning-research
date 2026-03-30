@@ -57,10 +57,7 @@ class TestAssemblyFunction:
         case = _get_case("partial_rollback_b")
         # Even if model returns code with all definitions, assembly still runs
         all_code = "\n\n".join(case["code_files_contents"].values())
-        from exec_eval import _strip_local_imports
-
-        complete = _strip_local_imports(all_code)
-        asm = _assemble_program(complete, case)
+        asm = _assemble_program(all_code, case)
         assert asm["assembly_used"], "Multi-file must always assemble"
 
     def test_duplicate_defs_detected(self):

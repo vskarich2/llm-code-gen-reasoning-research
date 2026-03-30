@@ -1,0 +1,194 @@
+=== CALL 000024 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: partial_update_c
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:32:57.296232
+LATENCY_MS: 16824
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+update_profile function: when handling the 'email' key the code performs user['email'] = value but does not set user['verified'] = False nor clear user['cached_greeting'], so the mutation of user['email'] is not followed by the required side-effects (verified flag reset and cached_greeting clearing).
+
+## Failure Mechanism
+User calls update_profile with changes={'email': new_email} → update_profile validates and executes user['email'] = new_email (mutation) → code returns without resetting user['verified'] or clearing user['cached_greeting'] (missing operations) → the old greeting string remains in user['cached_greeting'] and the account stays marked verified despite email change → observable failure: UI still shows old greeting and verified remains True when it should be reset.
+
+## Broken Invariant
+If the stored email value changes (i.e., an update_profile call results in user['email'] being modified to a different normalized value), then user['verified'] must be set to False (when re-verification is required) and user['cached_greeting'] must be cleared unless the name was also changed (in which case cached_greeting should reflect the new name).
+
+## Fix Strategy
+Make update_profile track whether email and/or name changed (after validation). After applying validated updates to fields, enforce invariants in a deterministic post-processing step: if email changed, call should_reverify(old_email, new_email) and if it returns True set user['verified'] = False; also clear user['cached_greeting'] when email changed unless name was changed in the same update (if name changed, cached_greeting should be rebuilt to reflect the new name). If name changed, set user['cached_greeting'] = build_greeting(user). This breaks the causal chain by ensuring the required side-effects follow every email mutation regardless of iteration order or input ordering.
+
+
+## Self-Check
+{'failure_scenario': "If changes contains both 'email' and 'name' and we processed them such that the email change would clear cached_greeting after name updated it, we could end up with a cleared greeting despite a name change. To avoid this, the implementation records flags (email_changed, name_changed) and applies the final cached_greeting logic after processing all fields: name change wins and builds greeting, otherwise email change clears it. This addresses the ordering-induced failure.", 'edge_case': 'changes contains an invalid email (validate_email returns False) and a valid name: email should not be applied, name should be applied and cached_greeting rebuilt. The code validates each field before marking it changed, so invalid email will not flip email_changed and will not affect verification or cached_greeting clearing.', 'invariant_check': 'Multiple calls: repeated update_profile calls continue to validate and apply the same post-processing rules. Example flows: (a) change email to a different one → email_changed True → should_reverify returns True → verified set to False and cached_greeting cleared; (b) change email to same value differing only in case or whitespace → should_reverify returns False → verified remains unchanged; (c) change name only → name_changed True → cached_greeting rebuilt. Retries/state reuse: since the update logic reads current user values and uses should_reverify(old_email, new_email), subsequent calls will behave consistently. The code uses explicit flags and post-processing so loop ordering or dict iteration order cannot cause verified/cached_greeting to be missed.', 'conclusion': "No flaw remains: the revised update_profile records validated changes, applies the field updates, then enforces the invariants deterministically. This ensures user['verified'] and user['cached_greeting'] are updated correctly for all combinations of email/name changes, invalid inputs are ignored, and ordering of keys in changes cannot break the invariants."}
+
+
+# Task Description
+After changing email, old greeting still shows. Fix the update. Return the updated code.
+
+# Code Produced
+```python
+'''User profile with email verification and cached greeting.'''
+
+from validation import validate_email, validate_name
+from notifications import build_greeting, should_reverify
+
+
+def create_user(name, email):
+    """Create a user with verified status and cached greeting."""
+    return {
+        "name": name,
+        "email": email,
+        "verified": False,
+        "cached_greeting": build_greeting({"name": name}),
+    }
+
+
+def verify_user(user):
+    """Mark user as verified."""
+    user["verified"] = True
+    return user
+
+
+def update_profile(user, changes):
+    """Update profile fields.
+
+    Invariant: changing email must set verified=False and clear cached_greeting.
+    Invariant: changing name must update cached_greeting.
+    """
+    # Track what actually changed after validation so we can enforce invariants
+    email_changed = False
+    name_changed = False
+    old_email = user.get("email")
+
+    # First, apply validated field updates and record flags
+    for key, value in changes.items():
+        if key == "email" and validate_email(value):
+            # apply email change, but defer side-effects until after we know
+            # if name also changed (to resolve cached_greeting conflict)
+            user["email"] = value
+            email_changed = True
+        elif key == "name" and validate_name(value):
+            user["name"] = value
+            name_changed = True
+
+    # Post-process invariants deterministically
+    if email_changed:
+        # If the email actually changed in a meaningful way, require reverify
+        if should_reverify(old_email, user.get("email")):
+            user["verified"] = False
+        # If name was not changed in the same update, clear the cached greeting
+        if not name_changed:
+            user["cached_greeting"] = ""
+
+    if name_changed:
+        # Name change always updates cached greeting to reflect the new name
+        user["cached_greeting"] = build_greeting(user)
+
+    return user
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If update_profile always applied the post-update invariant logic (reset verified and update/clear cached_greeting when email/name change), the observed stale greeting and lingering verified flag would not occur.
+Evidence: update_profile previously did user["email"]=value without side-effects; the revised code captures old_email = user.get("email"), sets email_changed/name_changed flags during validated updates, and then (1) calls should_reverify(old_email, user.get("email")) to set user["verified"]=False and (2) clears or rebuilds user["cached_greeting"] based on name_changed — directly addressing the missing mutations.
+Judgment: The developer correctly pinpointed the missing side-effects as the causal root, provided a concrete invariant, and implemented a fix that deterministically enforces that invariant; the code matches the reasoning and covers the ordering and validation edge cases.

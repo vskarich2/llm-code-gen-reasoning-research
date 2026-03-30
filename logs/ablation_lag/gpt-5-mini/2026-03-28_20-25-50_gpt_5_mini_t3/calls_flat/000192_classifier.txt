@@ -1,0 +1,214 @@
+=== CALL 000192 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: feature_flag_drift
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:32:56.237073
+LATENCY_MS: 29280
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+api.checkout does not pass the use_new_pricing argument to billing.create_invoice, so compute_price (which reads the global flag via flags.is_enabled) never sees the per-call override.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Add an optional use_new_pricing parameter to pricing.compute_price and pricing.get_pricing_version (defaulting to None to preserve existing behavior). Propagate that parameter through billing.create_invoice and from api.checkout so a call-site can request the new pricing without toggling global flags. This ensures the explicit use_new_pricing boolean controls pricing for that checkout call without mutating global state.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure: other call sites that rely on compute_price/get_pricing_version or create_invoice may not pass the new parameter and will continue to use the global flags (this is intended and backwards-compatible because defaults preserve prior behavior). I did not revise further because the change is additive and preserves old signatures (defaults maintain behavior), avoiding breaking existing callers. This fix is safe regarding concurrency because it doesn't mutate global flag state.
+
+
+# Task Description
+The checkout function takes a use_new_pricing flag but pricing doesn't seem to respect it. Fix the flag propagation. Return the updated code.
+
+# Code Produced
+```python
+from flags import is_enabled
+
+
+def compute_price(base, qty, use_new_pricing=None):
+    """Compute price using either v1 or v2 pricing.
+
+    If use_new_pricing is None, fall back to the global feature flag.
+    Otherwise, use the provided boolean to decide the pricing version.
+    """
+    enabled = is_enabled("new_pricing") if use_new_pricing is None else bool(use_new_pricing)
+    if enabled:
+        return _v2_price(base, qty)
+    return _v1_price(base, qty)
+
+
+def _v1_price(base, qty):
+    return base * qty
+
+
+def _v2_price(base, qty):
+    discount = 0.1 if qty >= 10 else 0
+    return base * qty * (1 - discount)
+
+
+def get_pricing_version(use_new_pricing=None):
+    enabled = is_enabled("new_pricing") if use_new_pricing is None else bool(use_new_pricing)
+    return "v2" if enabled else "v1"
+
+
+from pricing import compute_price, get_pricing_version
+from flags import is_enabled
+
+_invoices = []
+
+
+def create_invoice(customer, items, use_new_pricing=None):
+    """Create an invoice. If use_new_pricing is provided (True/False), use that pricing for this invoice.
+
+    If use_new_pricing is None, fall back to the global feature flag behavior.
+    """
+    total = 0
+    lines = []
+    for item in items:
+        price = compute_price(item["base"], item["qty"], use_new_pricing=use_new_pricing)
+        lines.append({"sku": item["sku"], "amount": price})
+        total += price
+
+    invoice = {
+        "customer": customer,
+        "lines": lines,
+        "total": total,
+        "pricing_version": get_pricing_version(use_new_pricing=use_new_pricing),
+    }
+
+    if is_enabled("audit_mode"):
+        invoice["reasoning_evaluator_audit"] = True
+        _invoices.append(invoice)
+
+    return invoice
+
+
+def get_invoices():
+    return list(_invoices)
+
+
+from billing import create_invoice, get_invoices
+from flags import enable, disable
+
+
+def checkout(customer, items, use_new_pricing=False):
+    # Propagate the use_new_pricing flag to billing so pricing respects the caller's intent
+    invoice = create_invoice(customer, items, use_new_pricing=use_new_pricing)
+    return invoice
+
+
+def admin_report():
+    return get_invoices()
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;WRONG;CORRECT;CORRECT;PARTIAL;HIDDEN_DEPENDENCY
+MEDIUM
+Counterfactual: If checkout forwarded the per-call use_new_pricing value (and compute_price honored a per-call override), the pricing would not fall back to the global flag and the observed mis-pricing would not occur.
+Evidence: compute_price(use_new_pricing=None) only calls is_enabled("new_pricing") when the override is None; create_invoice(now with use_new_pricing=None) passes that param to compute_price and get_pricing_version; checkout now forwards use_new_pricing to create_invoice, but checkout's default is False (which will override global-enabled behavior) rather than preserving the None/global-default semantics.
+Judgment: The developer correctly identified the missing parameter propagation (checkout → create_invoice → compute_price) and implemented the propagation; however they failed to state the violated invariant, and the produced code partially diverges from the stated preservation-of-behavior intent because checkout's default False can change behavior versus relying on the global flag.

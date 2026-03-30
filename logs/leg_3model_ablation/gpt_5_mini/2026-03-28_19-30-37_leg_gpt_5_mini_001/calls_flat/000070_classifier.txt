@@ -1,0 +1,201 @@
+=== CALL 000070 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: wrong_condition_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:58:20.713126
+LATENCY_MS: 18442
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+policy.is_allowed: it computes rate_ok = check_rate(requests_per_minute, rate_limit) and quota_ok = check_quota(daily_total, daily_quota) but returns rate_ok or quota_ok. This 'or' causes a request to be allowed when EITHER the per-minute rate check OR the daily quota check passes, letting requests through even when the other limit is exceeded.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Change the final boolean operator in policy.is_allowed from 'or' to 'and', so that a request is allowed only when BOTH rate_ok and quota_ok are True. Additionally, make the counters in RateLimiter atomic by adding a threading.Lock and performing the check-and-increment while holding the lock to avoid race conditions where concurrent requests could exceed limits.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+Most likely remaining failure mode is a race condition if multiple threads call try_request concurrently; this was addressed by adding a lock. Another possible issue is off-by-one semantics of the check functions (they use '<' so exactly 'rate_limit' and 'daily_quota' requests are allowed); this appears intentional and consistent with current behavior. No further revision was made because the lock addresses concurrency and the comparison semantics are correct for allowing up to the configured limits.
+
+
+# Task Description
+Rate limiter allows too many requests. Fix the policy. Return the updated code.
+
+# Code Produced
+```python
+ """Rate limiter using policy checks."""
+
+from threading import Lock
+from policy import is_allowed
+
+
+class RateLimiter:
+    """Tracks request counts and enforces rate + quota policies."""
+
+    def __init__(self, rate_limit=100, daily_quota=10000):
+        self.rate_limit = rate_limit
+        self.daily_quota = daily_quota
+        self._minute_count = 0
+        self._daily_count = 0
+        self._lock = Lock()
+
+    def try_request(self):
+        """Attempt a request. Returns True if allowed, False if blocked."""
+        # Acquire lock to make check-and-increment atomic across threads
+        with self._lock:
+            allowed = is_allowed(
+                self._minute_count, self.rate_limit,
+                self._daily_count, self.daily_quota,
+            )
+            if allowed:
+                self._minute_count += 1
+                self._daily_count += 1
+            return allowed
+
+    def reset_minute(self):
+        """Reset the per-minute counter (called each minute)."""
+        with self._lock:
+            self._minute_count = 0
+
+    def get_stats(self):
+        """Return current counters."""
+        with self._lock:
+            return {
+                "minute": self._minute_count,
+                "daily": self._daily_count,
+            }
+
+
+"""Rate and quota policy checks."""
+
+
+def check_rate(requests_per_minute, rate_limit):
+    """Return True if rate is within acceptable bounds."""
+    return requests_per_minute < rate_limit
+
+
+def check_quota(daily_total, daily_quota):
+    """Return True if daily quota is not exceeded."""
+    return daily_total < daily_quota
+
+
+def is_allowed(requests_per_minute, rate_limit, daily_total, daily_quota):
+    """Check if a request is allowed under BOTH rate and quota policies.
+
+    A request should only be allowed if it passes rate AND quota checks.
+    """
+    rate_ok = check_rate(requests_per_minute, rate_limit)
+    quota_ok = check_quota(daily_total, daily_quota)
+    # Correct: require BOTH rate and quota to be OK
+    retur
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;WRONG;PARTIAL;CORRECT;PARTIAL;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If policy.is_allowed used 'and' instead of 'or', requests would no longer be allowed when the other limit is exceeded (though concurrency could still permit excess without atomic check-and-increment).
+Evidence: rate_ok = check_rate(...) and quota_ok = check_quota(...) are identified as the two boolean checks; developer correctly says the use of 'or' allows requests when only one check passes; the produced code adds a Lock and performs check-and-increment under self._lock in RateLimiter.try_request (using _minute_count/_daily_count); however the file both imports is_allowed from policy and defines a local is_allowed which is truncated at "retur" (missing return) making the change not actually implemented and introducing a bug; check_rate/check_quota use '<' so behavior about limits is explicit in code.
+Judgment: The root logical cause (use of OR) is correctly identified and the proposed fixes (use AND and make check-and-increment atomic) directly address it, but the developer failed to state a formal broken invariant and the supplied code is incomplete and inconsistent (missing return and conflicting import), so the implementation does not fully realize the reasoning.

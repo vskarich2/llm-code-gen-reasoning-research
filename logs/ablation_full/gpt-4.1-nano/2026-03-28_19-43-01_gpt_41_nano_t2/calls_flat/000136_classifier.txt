@@ -1,0 +1,191 @@
+=== CALL 000136 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: wrong_condition_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:08:43.737295
+LATENCY_MS: 24244
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+The function is_allowed in policy.py uses the variable requests_per_minute with the variable rate_limit, and the variable daily_total with daily_quota, but the check functions check_rate and check_quota return True if the limits are not exceeded. The root cause is that is_allowed returns the logical OR of rate_ok and quota_ok, allowing requests if either check passes, which permits exceeding the rate limit or quota.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Change the return statement in is_allowed from 'return rate_ok or quota_ok' to 'return rate_ok and quota_ok'. This ensures that a request is only allowed if both the rate and quota policies are satisfied, fixing the bug where too many requests are permitted.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+The most likely failure mode is that the fix might overly restrict requests, possibly blocking legitimate traffic if the checks are too strict or if the counters are not properly synchronized. However, since the logic now correctly enforces both policies simultaneously, this is the intended behavior. No revision is necessary as the fix directly addresses the logical error.
+
+
+# Task Description
+Rate limiter allows too many requests. Fix the policy. Return the updated code.
+
+# Code Produced
+```python
+"""Rate limiter using policy checks."""
+
+from policy import is_allowed
+
+
+class RateLimiter:
+    """Tracks request counts and enforces rate + quota policies."""
+
+    def __init__(self, rate_limit=100, daily_quota=10000):
+        self.rate_limit = rate_limit
+        self.daily_quota = daily_quota
+        self._minute_count = 0
+        self._daily_count = 0
+
+    def try_request(self):
+        """Attempt a request. Returns True if allowed, False if blocked."""
+        allowed = is_allowed(
+            self._minute_count, self.rate_limit,
+            self._daily_count, self.daily_quota,
+        )
+        if allowed:
+            self._minute_count += 1
+            self._daily_count += 1
+        return allowed
+
+    def reset_minute(self):
+        """Reset the per-minute counter (called each minute)."""
+        self._minute_count = 0
+
+    def get_stats(self):
+        """Return current counters."""
+        return {
+            "minute": self._minute_count,
+            "daily": self._daily_count,
+        }
+
+
+def check_rate(requests_per_minute, rate_limit):
+    """Return True if rate is within acceptable bounds."""
+    return requests_per_minute < rate_limit
+
+def check_quota(daily_total, daily_quota):
+    """Return True if daily quota is not exceeded."""
+    return daily_total < daily_quota
+
+def is_allowed(requests_per_minute, rate_limit, daily_total, daily_quota):
+    """Check if a request is allowed under BOTH rate and quota policies.
+
+    A request should only be allowed if it passes rate AND quota checks.
+    """
+    rate_ok = check_rate(requests_per_minute, rate_limit)
+    quota_ok = check_quota(daily_total, daily_quota)
+    # FIX: use 'and' instead of 'or' to enforce both policies
+    return rate_ok and quota_ok
+"""
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;WRONG;PARTIAL;CORRECT;PARTIAL;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If is_allowed used AND (so both checks must pass), the over-permission failure would not occur.
+Evidence: is_allowed in the submitted code returns rate_ok and quota_ok (fix aligned to reasoning); developer stated original used OR allowing passes if either check true; RateLimiter imports is_allowed from policy but then a local is_allowed is defined (shadowing the import) which is inconsistent with modifying policy.py; there is an extra stray triple-quote at the file end (syntax error); check_rate/check_quota use "<" and RateLimiter increments counters only when allowed.
+Judgment: The developer correctly identified the core logic mistake (OR vs AND) and the appropriate fix, but they failed to state the broken invariant explicitly and omitted the full causal propagation (counters increment -> quota/rate exceeded). The provided code implements the logical fix but has structural issues (import shadowing and a stray string delimiter) that undermine the patch.

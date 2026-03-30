@@ -1,0 +1,196 @@
+=== CALL 000222 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: check_then_act
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T20:26:06.341442
+LATENCY_MS: 23197
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+The function make_withdraw_steps creates separate check and act steps that do not enforce atomicity, allowing interleaving where both checks pass before either withdrawal occurs, leading to overdraft.
+
+## Failure Mechanism
+[COULD NOT EXTRACT]
+
+## Broken Invariant
+[COULD NOT EXTRACT]
+
+## Fix Strategy
+Modify make_withdraw_steps to perform the check and withdrawal atomically within a single function, ensuring that once the check passes, the withdrawal immediately occurs, preventing other steps from interleaving and causing overdraft.
+
+
+
+## Risk Check (Adversarial Self-Assessment)
+The most likely failure mode is that the atomic check-and-withdraw could be bypassed if the code is modified elsewhere or if the atomicity is not properly enforced. Since the fix encapsulates the check and withdrawal together, it is safe. No revision needed.
+
+
+# Task Description
+Under interleaving, two withdrawals of 80 from balance=100 both succeed, leaving -60. Fix so balance never goes negative.
+
+# Code Produced
+```python
+"""Bank with atomic check-then-act withdrawal, fixed for safety."""
+
+_accounts = {}
+
+def reset():
+    _accounts.clear()
+
+def create_account(name, balance):
+    _accounts[name] = balance
+
+def get_balance(name):
+    return _accounts.get(name, 0)
+
+def check_balance(name, amount):
+    """CHECK: is balance sufficient?"""
+    return _accounts.get(name, 0) >= amount
+
+def do_withdraw(name, amount):
+    """ACT: decrement balance. Assumes caller verified."""
+    _accounts[name] = _accounts.get(name, 0) - amount
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+def make_withdraw_steps(name, amount):
+    """Split withdrawal into check and act steps, but perform atomically."""
+    def withdraw_atomically():
+        if check_balance(name, amount):
+            do_withdraw(name, amount)
+            return ("withdraw", True)
+        else:
+            return ("withdraw", False)
+    return withdraw_atomically
+
+def sequential_withdrawals():
+    """Two withdrawals of 80 from balance=100. Sequential: second denied."""
+    reset()
+    create_account("alice", 100)
+    check_a, act_a = make_withdraw_steps("alice", 80)
+    check_b, act_b = make_withdraw_steps("alice", 80)
+    run_steps([(check_a, ()), (act_a, ()), (check_b, ()), (act_b, ())])
+    return get_balance("alice")
+
+def interleaved_withdrawals():
+    """Two withdrawals of 80, interleaved: BUG — both approved, overdraft."""
+    reset()
+    create_account("alice", 100)
+    # Use the atomic withdrawal function for both steps
+    withdraw_fn = make_withdraw_steps("alice", 80)
+    run_steps([(withdraw_fn, ())])
+    # Since the function performs check and withdrawal atomically, overdraft is prevented.
+    # To simulate interleaving, we call the function twice separately.
+    # But in this fixed version, each call is atomic.
+    # For demonstration, call twice:
+    run_steps([(withdraw_fn, ())])
+    return get_balance("alice")
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;WRONG;PARTIAL;CORRECT;PARTIAL;TEMPORAL_ORDERING
+HIGH
+Counterfactual: If the check-and-act separation were eliminated and the operation made truly atomic, the described overdraft would not occur.
+Evidence: make_withdraw_steps now returns a single withdraw_atomically closure that calls check_balance() then do_withdraw(); sequential_withdrawals tries to unpack make_withdraw_steps into (check_a, act_a) which contradicts the new return shape; the shared state is _accounts mutated by do_withdraw via _accounts[name] = _accounts.get(name,0) - amount; run_steps executes provided callables in sequence so interleaving stems from splitting check and act across steps.
+Judgment: The developer correctly identified the temporal/interleaving mechanism and proposed the right fix (atomic check+withdraw), but they failed to state the invariant and omitted some propagation details; the submitted code only partially implements the reasoning and contains contradictions (tuple unpacking in sequential_withdrawals and leftover separate check/do functions) that undermine the claimed fix.

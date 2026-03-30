@@ -1,0 +1,177 @@
+=== CALL 000118 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: temporal_drift_c
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:07:50.412765
+LATENCY_MS: 25581
+
+--- PROMPT ---
+Report shows wrong raw metrics. Fix the pipeline. Return the updated code.
+
+## Codebase (3 files)
+
+### FILE 1/3: code_snippets_v2/temporal_drift_c/metrics.py ###
+```python
+"""Raw metrics computation.
+
+compute_raw_stats MUST receive the original (untransformed) data.
+"""
+
+
+def compute_raw_stats(data):
+    """Compute statistics on raw (untransformed) data.
+
+    Keys: raw_max, raw_min, raw_sum, raw_count.
+    """
+    if not data:
+        return {"raw_max": 0, "raw_min": 0, "raw_sum": 0, "raw_count": 0}
+    return {
+        "raw_max": max(data),
+        "raw_min": min(data),
+        "raw_sum": sum(data),
+        "raw_count": len(data),
+    }
+
+
+def compute_derived(raw_stats):
+    """Compute derived metrics from raw stats."""
+    count = raw_stats.get("raw_count", 0)
+    if count == 0:
+        return {"raw_mean": 0}
+    return {"raw_mean": raw_stats["raw_sum"] / count}
+```
+
+### FILE 2/3: code_snippets_v2/temporal_drift_c/pipeline.py ###
+```python
+"""Multi-stage metrics pipeline.
+
+Stage 1: compute raw stats on original data
+Stage 2: normalize
+Stage 3: clip to range
+Stage 4: summarize for display
+"""
+
+from transforms import normalize, clip, summarize_for_display
+from metrics import compute_raw_stats, compute_derived
+
+
+def pipeline(data):
+    """4-stage pipeline.
+
+    raw_stats MUST reflect the original data before any transforms.
+    """
+    # Stage 2: normalize
+    normalized = normalize(data)
+    # Stage 3: clip
+    clipped = clip(normalized, 0.05, 0.95)
+    # Stage 1: raw stats
+    raw_stats = compute_raw_stats(normalized)  # BUG: should be data, not normalized
+    derived = compute_derived(raw_stats)
+    # Stage 4: display summary
+    display = summarize_for_display(clipped)
+
+    return {
+        "raw_stats": raw_stats,
+        "derived": derived,
+        "cleaned": clipped,
+        "display": display,
+    }
+
+
+def quick_report(data):
+    """Quick report that only uses display stats. Unrelated path."""
+    normalized = normalize(data)
+    return summarize_for_display(normalized)
+```
+
+### FILE 3/3: code_snippets_v2/temporal_drift_c/transforms.py ###
+```python
+"""Data transformation utilities."""
+
+
+def normalize(data):
+    """Normalize data to 0-1 range."""
+    if not data:
+        return []
+    lo, hi = min(data), max(data)
+    if hi == lo:
+        return [0.5] * len(data)
+    return [(x - lo) / (hi - lo) for x in data]
+
+
+def clip(data, lower, upper):
+    """Clip values to [lower, upper] range."""
+    return [max(lower, min(upper, x)) for x in data]
+
+
+def scale(data, factor):
+    """Scale all values by a factor."""
+    return [x * factor for x in data]
+
+
+def summarize_for_display(cleaned):
+    """Summarize cleaned data for reporting.
+
+    Returns display_max, display_min, display_mean — NOT raw keys.
+    Trap: consolidating this with compute_raw_stats would break key names.
+    """
+    if not cleaned:
+        return {"display_max": 0, "display_min": 0, "display_mean": 0}
+    return {
+        "display_max": max(cleaned),
+        "display_min": min(cleaned),
+        "display_mean": sum(cleaned) / len(cleaned),
+    }
+```
+
+You are fixing a bug using a structured reasoning process.
+
+Follow this procedure exactly. Return a SINGLE valid JSON object.
+
+## STEP 1 — Diagnose
+
+Identify the root cause: name the exact function, variable, and causal relationship.
+
+## STEP 2 — Plan fix
+
+Describe the concrete code change and why it addresses the mechanism.
+
+## STEP 3 — Risk check (CRITICAL)
+
+Before finalizing your code, answer:
+
+What is the most likely way this fix could still fail?
+
+If that failure is real, REVISE your fix before writing the final code.
+If it is not real, explain concisely why the fix is safe.
+
+## STEP 4 — Return fixed code
+
+Return your response as JSON with this exact schema:
+
+{"root_cause": "<exact function + variable + causal relationship>", "fix_strategy": "<what change and why it breaks the bug mechanism>", "risk_check": "<most likely failure mode of your fix, and whether you revised>", "files": {""code_snippets_v2/temporal_drift_c/metrics.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/temporal_drift_c/pipeline.py": "<complete file contents or UNCHANGED>", "code_snippets_v2/temporal_drift_c/transforms.py": "<complete file contents or UNCHANGED>""}}
+
+RULES:
+- All four fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file.
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "pipeline.pipeline: compute_raw_stats was called with the variable 'normalized' (compute_raw_stats(normalized)) instead of the original input 'data', causing raw_stats to reflect transformed data rather than the original untransformed data.",
+  "fix_strategy": "Compute raw statistics from the original input. Concretely: (1) ensure the input is materialized once (data = list(data)) so it can be safely iterated multiple times (handles generators/iterators), (2) call compute_raw_stats(data) and compute_derived(raw_stats) before applying normalize/clip, and (3) then run normalize and clip and summarize_for_display. This guarantees raw_stats uses the original untransformed values and prevents the prior bug where raw metrics were computed on normalized data.",
+  "risk_check": "Most likely remaining failure mode: converting the input to a list (data = list(data)) can be memory-intensive or infeasible for very large or infinite streams; this could cause high memory usage or OOM. I considered streaming alternatives (e.g., a single-pass aggregator that computes raw stats while also producing normalized/cleaned output via on-disk buffering or two-pass streaming), but those are more complex and change the pipeline contract. Given the current pipeline semantics and that compute_raw_stats requires access to the original values, materializing the input once is the simplest safe fix. If memory use is a real concern in the deployment environment, the pipeline should be reworked to support streaming (e.g., compute raw stats in a streaming pass and persist intermediate values or use online algorithms). For typical use with in-memory lists, this fix is safe.",
+  "files": {
+    "code_snippets_v2/temporal_drift_c/metrics.py": "UNCHANGED",
+    "code_snippets_v2/temporal_drift_c/pipeline.py": "\"\"\"Multi-stage metrics pipeline.\n\nStage 1: compute raw stats on original data\nStage 2: normalize\nStage 3: clip to range\nStage 4: summarize for display\n\"\"\"\n\nfrom transforms import normalize, clip, summarize_for_display\nfrom metrics import compute_raw_stats, compute_derived\n\n\ndef pipeline(data):\n    \"\"\"4-stage pipeline.\n\n    raw_stats MUST reflect the original data before any transforms.\n    \"\"\"\n    # Ensure we can iterate multiple times (handle generators/iterators)\n    data = list(data)\n\n    # Stage 1: raw stats (must be computed on original data)\n    raw_stats = compute_raw_stats(data)\n    derived = compute_derived(raw_stats)\n\n    # Stage 2: normalize\n    normalized = normalize(data)\n    # Stage 3: clip\n    clipped = clip(normalized, 0.05, 0.95)\n\n    # Stage 4: display summary\n    display = summarize_for_display(clipped)\n\n    return {\n        \"raw_stats\": raw_stats,\n        \"derived\": derived,\n        \"cleaned\": clipped,\n        \"display\": display,\n    }\n\n\ndef quick_report(data):\n    \"\"\"Quick report that only uses display stats. Unrelated path.\"\"\"\n    normalized = normalize(data)\n    return summarize_for_display(normalized)\n",
+    "code_snippets_v2/temporal_drift_c/transforms.py": "UNCHANGED"
+  }
+}

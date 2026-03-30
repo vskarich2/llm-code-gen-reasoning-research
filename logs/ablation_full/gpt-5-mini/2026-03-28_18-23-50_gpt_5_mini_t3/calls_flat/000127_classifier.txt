@@ -1,0 +1,164 @@
+=== CALL 000127 ===
+MODEL: gpt-5-mini
+PHASE: classifier
+CASE_ID: missing_branch_b
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T19:19:42.604280
+LATENCY_MS: 17770
+
+--- PROMPT ---
+You are a STRICT reasoning auditor. Your job is to evaluate whether a developer's reasoning about a software bug is causally correct, complete, and grounded in the code.
+
+You are NOT evaluating code correctness. You are evaluating reasoning quality.
+
+Be skeptical. Do NOT reward vague or generic explanations.
+
+# Developer's Reasoning
+
+## Root Cause
+_ROLE_DISPATCH dict in auth.py is missing the 'guest' key; dict lookup (_ROLE_DISPATCH.get(role, _default_access)) therefore returns the fallback _default_access for 'guest', causing the wrong handler to be invoked
+
+## Failure Mechanism
+A caller passes role='guest' → _ROLE_DISPATCH.get('guest', _default_access) looks up the key in the dispatch dict → because 'guest' key is absent, .get returns _default_access instead of guest_access → handler() is invoked and returns {'read': False, 'write': False, 'delete': False} → observable failure: guest users receive no access (contrary to roles.guest_access which should provide read-only access)
+
+## Broken Invariant
+For every role function exported from roles.py, get_access(role) must return that role's access dict; specifically get_access('guest') should equal guest_access() i.e. {'read': True, 'write': False, 'delete': False}, but it currently returns the default no-access dict
+
+## Fix Strategy
+Add the 'guest' key to the _ROLE_DISPATCH mapping and point it to guest_access. This ensures _ROLE_DISPATCH.get(role, _default_access) returns guest_access for role == 'guest' instead of _default_access, restoring the intended read-only access for guests. This change is minimal, local to auth.py, and directly breaks the causal chain (missing key → fallback) by adding the missing key.
+
+
+## Self-Check
+{'failure_scenario': "If callers pass role strings with different casing or surrounding whitespace (e.g. 'Guest', ' guest', 'GUEST'), the lookup will still miss and fall back to _default_access, producing no access for those inputs. This is a usage/input-normalization issue, not the original missing-key bug.", 'edge_case': 'If role is None or an empty string, _ROLE_DISPATCH.get(role, _default_access) will return _default_access. The code does not raise; it returns no access. This is consistent behavior but should be documented or handled elsewhere if desired.', 'invariant_check': "After the fix, get_access('guest') will call handler = _ROLE_DISPATCH.get('guest', _default_access) which resolves to guest_access, then return guest_access(). Multiple calls (get_access('guest') repeated) always call the same pure guest_access function, returning the same dict structure. There is no mutable state in auth.py affecting this mapping, so retries, loops, and reuse do not change the result.", 'conclusion': "No flaw remains with respect to the original bug: adding the 'guest' key directly addresses the missing dispatch entry and restores the invariant that defined roles map to their access handlers. The remaining issues (case-sensitivity, trimming whitespace, None handling) are input-normalization concerns and outside the narrow fix; they do not undermine the correctness of this change. If desired, a follow-up improvement could normalize role inputs (e.g. role = (role or '').strip().lower()) before lookup, but that is not required to fix the reported bug."}
+
+
+# Task Description
+Guest users get no access. Fix the role dispatch. Return the updated code.
+
+# Code Produced
+```python
+"""Authentication and authorization dispatch."""
+
+from roles import admin_access, user_access, moderator_access, guest_access
+
+
+# Dispatch table mapping roles to access handlers
+_ROLE_DISPATCH = {
+    "admin": admin_access,
+    "user": user_access,
+    "moderator": moderator_access,
+    "guest": guest_access,  # Fix: ensure guests are dispatched to guest_access
+}
+
+
+def _default_access():
+    """Default: no access for unknown roles."""
+    return {"read": False, "write": False, "delete": False}
+
+
+def get_access(role):
+    """Return the access dict for a given role."""
+    handler = _ROLE_DISPATCH.get(role, _default_access)
+    return handler()
+
+
+def can_read(role):
+    """Check if role has read access."""
+    return get_access(role).get("read", False)
+
+```
+
+
+# Core Principle
+
+The reasoning must form a VALID CAUSAL CHAIN:
+
+cause → mutation/event → propagation → observable failure
+
+Missing any step → NOT fully correct.
+
+# Evaluate Each Dimension
+
+Rate each as CORRECT, PARTIAL, or WRONG:
+
+1. mechanism_identified:
+   CORRECT = correctly identifies the specific function/variable AND the causal chain that causes the bug
+   PARTIAL = identifies the general area but is vague or incomplete about the mechanism
+   WRONG = wrong mechanism, different bug, or only restates the task
+
+2. invariant_identified:
+   CORRECT = states the specific testable property that the bug violates
+   PARTIAL = states a related but imprecise property
+   WRONG = no invariant stated, or irrelevant invariant
+
+3. causal_chain_complete:
+   CORRECT = traces the full path from cause through mutation/event to observable failure
+   PARTIAL = identifies cause and failure but skips intermediate propagation steps
+   WRONG = no causal chain, or chain has logical gaps
+
+4. fix_alignment:
+   CORRECT = fix strategy directly addresses the identified mechanism
+   PARTIAL = fix is in the right area but incomplete
+   WRONG = fix does not address the mechanism or contradicts reasoning
+
+5. reasoning_code_alignment:
+   CORRECT = generated code implements what reasoning describes
+   PARTIAL = code partially implements reasoning
+   WRONG = code contradicts reasoning or is unchanged
+
+# Failure Type
+
+Choose one: CONFOUNDING_LOGIC, EDGE_CASE_MISSED, HIDDEN_DEPENDENCY, INVARIANT_VIOLATION, LOGGING_INCONSISTENCY, PARTIAL_STATE_UPDATE, RETRY_LOGIC_BUG, TEMPORAL_ORDERING, UNKNOWN
+
+# Counterfactual Check (mandatory)
+
+Ask yourself: "If the root cause were removed, would the failure still occur?"
+Use this to adjust your judgment.
+
+# Evidence Requirement
+
+You MUST ground your judgment in code — reference variables, operations, and actual behavior. No grounding → downgrade.
+
+# Confidence
+
+Return one: HIGH, MEDIUM, or LOW.
+
+# Output Format
+
+Return EXACTLY 5 lines:
+
+Line 1: <mechanism>;<invariant>;<causal_chain>;<fix_align>;<code_align>;<failure_type>
+Line 2: <confidence>
+Line 3: Counterfactual: <one sentence>
+Line 4: Evidence: <bullet points on one line>
+Line 5: Judgment: <1-2 sentences>
+
+Examples:
+
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;HIDDEN_DEPENDENCY
+HIGH
+Counterfactual: Removing the direct reference assignment would eliminate the shared-state corruption.
+Evidence: config = DEFAULTS creates alias; .update() mutates DEFAULTS; reset_defaults cannot recover.
+Judgment: Reasoning correctly identifies shared reference aliasing in create_config and fix creates independent copy via dict().
+
+WRONG;PARTIAL;WRONG;WRONG;WRONG;UNKNOWN
+LOW
+Counterfactual: The claimed concurrency issue is not present; removing it changes nothing.
+Evidence: No threads in code; actual bug is aliasing via config = DEFAULTS on line 5.
+Judgment: Reasoning claims concurrency issue but actual bug is aliasing; invariant is vaguely related but mechanism is wrong.
+
+After line 5, you MAY optionally add a debug section starting with exactly:
+---DEBUG---
+Followed by any detailed analysis. This section is for humans only and will be ignored by the parser.
+
+Return the 5 lines first. No other text before them.
+
+--- RESPONSE ---
+CORRECT;CORRECT;CORRECT;CORRECT;CORRECT;INVARIANT_VIOLATION
+HIGH
+Counterfactual: If the missing 'guest' entry were added, get_access('guest') would resolve to guest_access and the no-access failure would not occur.
+Evidence: _ROLE_DISPATCH controls handler selection; _ROLE_DISPATCH.get(role, _default_access) returns _default_access when 'guest' key is absent; _default_access() returns {"read": False, "write": False, "delete": False}; the submitted code adds "guest": guest_access so lookup will return guest_access().
+Judgment: The developer's reasoning is specific, causally complete, and grounded in the code: it correctly locates the missing dispatch key as the root cause and the provided code implements the targeted, minimal fix (noting input-normalization edge cases are outside the scoped fix).

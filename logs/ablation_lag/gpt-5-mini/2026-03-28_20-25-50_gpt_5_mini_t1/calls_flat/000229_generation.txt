@@ -1,0 +1,151 @@
+=== CALL 000229 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: false_fix_deadlock
+CONDITION: baseline
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T21:48:30.173835
+LATENCY_MS: 46619
+
+--- PROMPT ---
+Concurrent transfers deadlock. Fix the locking so transfers never deadlock under any interleaving.
+
+## Codebase (1 file)
+
+### FILE 1/1: code_snippets_v2/false_fix_deadlock/resources.py ###
+```python
+"""Resource transfers with lock-ordering deadlock, simulated via steps."""
+
+_locks = {}
+_state = {"A": 100, "B": 100}
+
+
+def reset():
+    _locks.clear()
+    _state["A"] = 100
+    _state["B"] = 100
+
+
+def acquire(resource):
+    """Simulate lock. Raises RuntimeError if already held (deadlock)."""
+    if _locks.get(resource):
+        raise RuntimeError(f"deadlock: {resource} already locked")
+    _locks[resource] = True
+
+
+def release(resource):
+    _locks[resource] = False
+
+
+def get_state():
+    return dict(_state)
+
+
+def run_steps(steps):
+    results = []
+    for fn, args in steps:
+        results.append(fn(*args))
+    return results
+
+
+def make_transfer_a_to_b_steps(amount):
+    """Transfer A→B: lock A first, then B."""
+
+    def step_lock_a():
+        acquire("A")
+        return "locked_A"
+
+    def step_lock_b_and_transfer():
+        acquire("B")
+        _state["A"] -= amount
+        _state["B"] += amount
+        release("B")
+        release("A")
+        return "transferred_a_to_b"
+
+    return step_lock_a, step_lock_b_and_transfer
+
+
+def make_transfer_b_to_a_steps(amount):
+    """Transfer B→A: BUG — locks B first, then A (opposite order)."""
+
+    def step_lock_b():
+        acquire("B")
+        return "locked_B"
+
+    def step_lock_a_and_transfer():
+        acquire("A")  # DEADLOCK: A is held by the other transfer
+        _state["B"] -= amount
+        _state["A"] += amount
+        release("A")
+        release("B")
+        return "transferred_b_to_a"
+
+    return step_lock_b, step_lock_a_and_transfer
+
+
+def sequential_transfers():
+    """A→B then B→A. Sequential: works fine."""
+    reset()
+    lock_ab, do_ab = make_transfer_a_to_b_steps(10)
+    lock_ba, do_ba = make_transfer_b_to_a_steps(10)
+    run_steps([
+        (lock_ab, ()), (do_ab, ()),
+        (lock_ba, ()), (do_ba, ()),
+    ])
+    return get_state()
+
+
+def interleaved_transfers():
+    """A→B and B→A interleaved: DEADLOCK."""
+    reset()
+    lock_ab, do_ab = make_transfer_a_to_b_steps(10)
+    lock_ba, do_ba = make_transfer_b_to_a_steps(10)
+    try:
+        run_steps([
+            (lock_ab, ()),   # A→B locks A
+            (lock_ba, ()),   # B→A locks B
+            (do_ab, ()),     # A→B tries to lock B — DEADLOCK
+            (do_ba, ()),     # never reached
+        ])
+        return get_state()
+    except RuntimeError as e:
+        return {"error": str(e)}
+```
+
+Return your response as a single valid JSON object with this schema:
+
+{"root_cause": "<...>", "failure_mechanism": "<...>", "broken_invariant": "<...>", "fix_strategy": "<...>", "files": {"code_snippets_v2/false_fix_deadlock/resources.py": "<complete file contents or UNCHANGED>"}}
+
+Where reasoning fields are:
+- "root_cause": what the bug is — name the specific function and variable and explain the causal relationship.
+- "failure_mechanism": how the bug manifests — describe a concrete scenario showing cause and effect.
+- "broken_invariant": the semantic contract the bug violates — must be a specific, testable statement.
+- "fix_strategy": why your code change fixes the mechanism — reference your actual change.
+
+GROUNDING RULES:
+- Do not write generic statements. Ground every claim in the actual code.
+- Do not restate the task description as reasoning.
+- Avoid repeating generic phrases. Your explanation must be specific to this code.
+
+RULES:
+- All four reasoning fields are REQUIRED and must be non-empty substantive text.
+- "files" MUST contain one entry for EVERY file listed above.
+- For files you did NOT modify, set the value to the exact string "UNCHANGED".
+- For files you DID modify, include the COMPLETE updated file contents.
+- Do NOT include markdown formatting inside file values.
+- Do NOT omit any file from the "files" object.
+- Return ONLY the JSON object, nothing else.
+
+--- RESPONSE ---
+{
+  "root_cause": "The deadlock is caused by make_transfer_b_to_a_steps acquiring locks in the opposite order from make_transfer_a_to_b_steps. make_transfer_a_to_b_steps calls acquire(\"A\") then acquire(\"B\"), while make_transfer_b_to_a_steps calls acquire(\"B\") then acquire(\"A\"). The simulated lock state is stored in the module-level dictionary _locks and acquire(resource) raises RuntimeError if _locks.get(resource) is truthy. Because the two transfer functions use inconsistent acquire order, two transfers can each hold one lock and then call acquire on the other's held resource, triggering the RuntimeError (simulating a deadlock).",
+  "failure_mechanism": "In interleaved_transfers(), the sequence is: (lock_ab) -> acquire(\"A\") sets _locks['A']=True; (lock_ba) -> acquire(\"B\") sets _locks['B']=True; then (do_ab) calls acquire(\"B\") but _locks.get('B') is True so acquire raises RuntimeError('deadlock: B already locked'). The concrete cause is the reversed lock acquisition order in make_transfer_b_to_a_steps, which allows both transfers to hold different locks and then try to acquire the other's lock, producing the RuntimeError at that point.",
+  "broken_invariant": "The module must ensure a consistent global lock acquisition order for any pair of resources: for any two resources X and Y, every transfer must call acquire on that pair in the same relative order (e.g., alphabetical). Currently this is violated because make_transfer_a_to_b_steps acquires (\"A\",\"B\") while make_transfer_b_to_a_steps acquires (\"B\",\"A\"). A concrete, testable statement of the invariant: for any interleaving of the step functions produced by make_transfer_a_to_b_steps and make_transfer_b_to_a_steps, run_steps should not reach a state where one transfer holds resource X and another holds resource Y with each then calling acquire on the other's held resource (i.e., the code should not allow the two-lock-held deadlock pattern).",
+  "fix_strategy": "I enforce a canonical/global ordering of resources when acquiring locks. I added a small ordering step so both transfer factories acquire locks in the same order (sorted resource names). That removes the possibility that two concurrent transfers will each hold a different lock and then attempt to acquire the other's lock, eliminating the two-lock circular wait deadlock. The change is localized: both make_transfer_a_to_b_steps and make_transfer_b_to_a_steps determine first_lock, second_lock = sorted([src, dst]) and then acquire the locks in that fixed order before performing the state mutation; the transfer direction still updates _state appropriately.",
+  "files": {
+    "code_snippets_v2/false_fix_deadlock/resources.py": " \"\"\"Resource transfers with lock-ordering deadlock, simulated via steps.\"\"\"\n\n_locks = {}\n_state = {\"A\": 100, \"B\": 100}\n\n\ndef reset():\n    _locks.clear()\n    _state[\"A\"] = 100\n    _state[\"B\"] = 100\n\n\ndef acquire(resource):\n    \"\"\"Simulate lock. Raises RuntimeError if already held (deadlock).\"\"\"\n    if _locks.get(resource):\n        raise RuntimeError(f\"deadlock: {resource} already locked\")\n    _locks[resource] = True\n\n\ndef release(resource):\n    _locks[resource] = False\n\n\ndef get_state():\n    return dict(_state)\n\n\ndef run_steps(steps):\n    results = []\n    for fn, args in steps:\n        results.append(fn(*args))\n    return results\n\n\ndef make_transfer_a_to_b_steps(amount):\n    \"\"\"Transfer A→B: acquire locks in canonical order, then transfer.\"\"\"\n    # enforce canonical ordering so all transfers acquire locks in the same order\n    first_lock, second_lock = sorted([\"A\", \"B\"])\n\n    def step_lock_first():\n        acquire(first_lock)\n        return f\"locked_{first_lock}\"\n\n    def step_lock_second_and_transfer():\n        acquire(second_lock)\n        # perform transfer directionally (A -> B)\n        _state[\"A\"] -= amount\n        _state[\"B\"] += amount\n        # release both locks\n        release(second_lock)\n        release(first_lock)\n        return \"transferred_a_to_b\"\n\n    return step_lock_first, step_lock_second_and_transfer\n\n\ndef make_transfer_b_to_a_steps(amount):\n    \"\"\"Transfer B→A: acquire locks in canonical order (same as A→B), then transfer.\"\"\"\n    # Use the same canonical ordering as the other transfer to avoid deadlock.\n    first_lock, second_lock = sorted([\"B\", \"A\"])\n\n    def step_lock_first():\n        acquire(first_lock)\n        return f\"locked_{first_lock}\"\n\n    def step_lock_second_and_transfer():\n        acquire(second_lock)\n        # perform transfer directionally (B -> A)\n        _state[\"B\"] -= amount\n        _state[\"A\"] += amount\n        # release both locks\n        release(second_lock)\n        release(first_lock)\n        return \"transferred_b_to_a\"\n\n    return step_lock_first, step_lock_second_and_transfer\n\n\ndef sequential_transfers():\n    \"\"\"A→B then B→A. Sequential: works fine.\"\"\"\n    reset()\n    lock_ab, do_ab = make_transfer_a_to_b_steps(10)\n    lock_ba, do_ba = make_transfer_b_to_a_steps(10)\n    run_steps([\n        (lock_ab, ()), (do_ab, ()),\n        (lock_ba, ()), (do_ba, ()),\n    ])\n    return get_state()\n\n\ndef interleaved_transfers():\n    \"\"\"A→B and B→A interleaved: previously could DEADLOCK due to inconsistent order.\n\n    With canonical ordering of lock acquisition this function will no longer produce\n    the two-lock circular wait deadlock (both transfer factories acquire locks\n    in the same order).\n    \"\"\"\n    reset()\n    lock_ab, do_ab = make_transfer_a_to_b_steps(10)\n    lock_ba, do_ba = make_transfer_b_to_a_steps(10)\n    try:\n        run_steps([\n            (lock_ab, ()),   # A→B locks first (canonical order)\n            (lock_ba, ()),   # B→A also tries to lock the same first resource\n            (do_ab, ()),     # will only run if both locks obtained\n            (do_ba, ()),     # never reached if second lock step raised\n        ])\n        return get_state()\n    except RuntimeError as e:\n        return {\"error\": str(e)}\n"
+  }
+}

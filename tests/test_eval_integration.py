@@ -26,54 +26,21 @@ from exec_eval import (
     load_module_from_code,
     exec_evaluate,
 )
+from code_assembly import assemble_code
 
 BASE = Path(__file__).resolve().parents[1]
 
-_STDLIB = {
-    "os",
-    "sys",
-    "json",
-    "re",
-    "math",
-    "copy",
-    "collections",
-    "functools",
-    "itertools",
-    "typing",
-    "pathlib",
-    "datetime",
-    "abc",
-    "dataclasses",
-    "enum",
-    "logging",
-    "hashlib",
-    "random",
-    "io",
-    "string",
-    "textwrap",
-}
-
-
-def _strip_local_imports(code: str) -> str:
-    lines = []
-    for line in code.splitlines():
-        s = line.strip()
-        if s.startswith("from ") and " import " in s:
-            mod = s.split()[1].split(".")[0]
-            if mod not in _STDLIB:
-                continue
-        lines.append(line)
-    return "\n".join(lines)
-
 
 def _load_buggy_code(case: dict) -> str:
+    """Load and assemble buggy case code through canonical assembly path."""
     parts = []
     for rel in case["code_files"]:
         parts.append((BASE / rel).read_text(encoding="utf-8"))
-    return _strip_local_imports("\n\n".join(parts))
+    return assemble_code("\n\n".join(parts), case).code
 
 
 def _load_reference_code(case: dict) -> str:
+    """Load and assemble reference fix code through canonical assembly path."""
     ref_path = BASE / "reference_fixes" / f"{case['id']}.py"
     ref_code = ref_path.read_text(encoding="utf-8")
     bug_file = case.get("reference_fix", {}).get("file", "")
@@ -84,8 +51,8 @@ def _load_reference_code(case: dict) -> str:
             if path.exists():
                 other_parts.append(path.read_text(encoding="utf-8"))
     if other_parts:
-        return _strip_local_imports("\n\n".join(other_parts) + "\n\n" + ref_code)
-    return _strip_local_imports(ref_code)
+        return assemble_code("\n\n".join(other_parts) + "\n\n" + ref_code, case).code
+    return assemble_code(ref_code, case).code
 
 
 # Load all cases once

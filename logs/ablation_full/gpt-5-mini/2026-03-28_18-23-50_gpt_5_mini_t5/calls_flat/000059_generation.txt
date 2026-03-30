@@ -1,0 +1,249 @@
+=== CALL 000059 ===
+MODEL: gpt-5-mini
+PHASE: generation
+CASE_ID: mutable_default_c
+CONDITION: leg_reduction
+TRIAL: ?
+RUN_ID: ?
+TRACE_ID: ?
+TIMESTAMP: 2026-03-28T18:42:45.515723
+LATENCY_MS: 27101
+
+--- PROMPT ---
+Scheduler history is shared across jobs. Fix. Return the updated code.
+
+## Codebase (3 files)
+
+### FILE 1/3: code_snippets_v2/mutable_default_c/queue.py ###
+```python
+"""Task queue module."""
+
+
+def create_task(name, priority=1):
+    """Create a task dict."""
+    return {"name": name, "priority": priority}
+
+
+def enqueue_all(tasks, queue=None):
+    """Enqueue multiple tasks. Returns the queue."""
+    if queue is None:
+        queue = []
+    queue.extend(tasks)
+    return queue
+
+
+def drain(queue):
+    """Remove and return all tasks from queue."""
+    items = list(queue)
+    queue.clear()
+    return items
+```
+
+### FILE 2/3: code_snippets_v2/mutable_default_c/scheduler.py ###
+```python
+"""Scheduler with decorator that tracks call history."""
+
+from worker import process, batch_process
+
+
+_shared_log = []
+
+
+def with_history(func, history=_shared_log):
+    """Decorator that records call history for a function.
+
+    Invariant: each decorated function must have its OWN
+    independent history list.
+    """
+    # BUG: history default is the module-level _shared_log list,
+    # so ALL decorated functions append to the SAME list.
+
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        history.append({"func": func.__name__, "args_count": len(args)})
+        return result
+
+    wrapper.get_history = lambda: list(history)
+    wrapper.clear_history = lambda: history.clear()
+    return wrapper
+
+
+@with_history
+def schedule_one(task):
+    """Schedule and process a single task."""
+    return process(task)
+
+
+@with_history
+def schedule_batch(tasks):
+    """Schedule and process a batch of tasks."""
+    return batch_process(tasks)
+
+
+def get_all_stats():
+    """Get combined stats (distractor)."""
+    return {
+        "one_calls": len(schedule_one.get_history()),
+        "batch_calls": len(schedule_batch.get_history()),
+    }
+```
+
+### FILE 3/3: code_snippets_v2/mutable_default_c/worker.py ###
+```python
+"""Worker module for processing tasks."""
+
+from queue import create_task
+
+
+def process(task):
+    """Process a single task and return a result."""
+    return {"name": task["name"], "status": "done"}
+
+
+def batch_process(tasks):
+    """Process a list of tasks."""
+    return [process(t) for t in tasks]
+```
+
+You are implementing a STRICT reasoning + code generation procedure designed to REDUCE reasoning-execution mismatch.
+
+This is NOT a formatting task. This is a TWO-PASS reasoning process with adversarial verification.
+
+You MUST follow the procedure exactly.
+
+Return a SINGLE valid JSON object. No text outside JSON. No markdown fences.
+
+# GOAL
+
+Fix the bug AND ensure your reasoning is causally correct and robust to failure.
+
+You are required to:
+- identify the correct mechanism
+- challenge your own hypothesis
+- verify your fix against failure scenarios
+
+# PROCEDURE (MANDATORY)
+
+## STEP 1 — DIAGNOSE (PRIMARY HYPOTHESIS)
+
+Identify:
+
+- root_cause:
+  Name the exact function + variable + operation causing the bug.
+  Must describe a causal relationship (not just "missing X").
+
+- failure_mechanism:
+  Give a concrete scenario:
+  cause → mutation/event → propagation → observable failure
+
+- broken_invariant:
+  A specific, testable property that is violated.
+
+## STEP 2 — ALTERNATIVE HYPOTHESIS (CRITICAL)
+
+Propose ONE alternative explanation for the bug.
+
+- What else could plausibly be the cause?
+- Why might your primary hypothesis be wrong?
+
+Then explicitly reject it:
+
+- Why is your original diagnosis more correct?
+- What evidence in the code supports this?
+
+This step is REQUIRED. Do not skip.
+
+## STEP 3 — PLAN FIX
+
+Describe:
+
+- fix_strategy:
+  What exact change you will make
+  Why it breaks the causal chain
+
+Must reference actual code behavior.
+
+## STEP 4 — CODE
+
+Implement the fix.
+
+Rules:
+- Modify ONLY necessary files
+- Return COMPLETE contents for modified files
+- Use "UNCHANGED" for others
+
+## STEP 5 — ADVERSARIAL SELF-CHECK (MANDATORY)
+
+You must actively try to BREAK your own fix.
+
+Answer ALL:
+
+1. Failure Scenario:
+   Describe a concrete scenario where your fix might still fail.
+
+2. Edge Case:
+   Identify a boundary condition (e.g., retries, empty values, ordering).
+
+3. Invariant Check:
+   Verify your invariant holds under:
+   - multiple calls
+   - retries / loops
+   - state reuse
+
+4. Conclusion:
+   - If a flaw is found → REVISE your fix
+   - If no flaw → explain WHY it is safe
+
+Your answer MUST reference your actual code.
+
+# OUTPUT FORMAT (STRICT JSON)
+
+{
+  "root_cause": "<exact function + variable + causal relationship>",
+  "failure_mechanism": "<cause → mutation → propagation → observable failure>",
+  "broken_invariant": "<specific testable property that is violated>",
+  "alternative_hypothesis": "<one alternative explanation for the bug>",
+  "hypothesis_rejection": "<why primary hypothesis is correct, with code evidence>",
+  "fix_strategy": "<what change you will make and why it breaks the causal chain>",
+  "self_check": {
+    "failure_scenario": "<concrete scenario where fix might still fail>",
+    "edge_case": "<boundary condition to test>",
+    "invariant_check": "<verify invariant under multiple calls, retries, state reuse>",
+    "conclusion": "<flaw found → revise, or why it is safe>"
+  },
+  "files": {"<path>": "<complete file contents or UNCHANGED>"}
+}
+
+# RULES
+
+- All fields are REQUIRED and must be substantive
+- No generic statements — ground every claim in actual code
+- Must reference actual variables and behavior
+- Do NOT restate the task
+- Do NOT skip alternative hypothesis
+- Do NOT skip adversarial self-check
+- For files you did NOT modify, set value to "UNCHANGED"
+- Do NOT include markdown formatting (no ```python blocks) inside file values
+- File values must be raw Python source code, not markdown
+- Return ONLY the JSON object. No other text.
+
+--- RESPONSE ---
+{
+  "root_cause": "scheduler.with_history function: the parameter 'history' has a default value of the module-level list '_shared_log', causing the decorator to close over and reuse the same mutable list across multiple decorated functions.",
+  "failure_mechanism": "Default argument binding → the module-level list _shared_log is bound as the default value for the history parameter at function definition time → each call to with_history (when used as @with_history) uses that same list reference instead of a fresh list → calls to schedule_one append to the same list that schedule_batch appends to → history queries and counts mix events from different decorated functions, violating per-function history isolation.",
+  "broken_invariant": "Each decorated function must have an independent history list. Testable property: after calling schedule_one('A') once and schedule_batch([...]) once, len(schedule_one.get_history()) should equal the number of calls to schedule_one (1) and not include batch calls.",
+  "alternative_hypothesis": "The bug could be caused by the decorator factory being used incorrectly (for example, the decorator intended to be used as @with_history() returning a new closure but is instead applied directly as @with_history), resulting in the same wrapper or closure being reused across functions.",
+  "hypothesis_rejection": "The code shows with_history is defined to accept the function directly (def with_history(func, history=_shared_log)), and it is used as @with_history without parentheses. The real issue is the default mutable _shared_log bound to the history parameter. Evidence: the line 'history=_shared_log' in the function signature is the only place a shared module-level mutable is introduced; wrapper uses that 'history' variable directly. Changing the invocation form (e.g., using @with_history()) is not how the current implementation is written, so the mistaken usage hypothesis is less plausible than the explicit default-mutable binding.",
+  "fix_strategy": "Make the history default be None and allocate a fresh list at decoration time when history is None. Specifically, change with_history signature to def with_history(func, history=None): and inside, if history is None: history = []. This breaks the causal chain because each call to with_history (applied at function definition/decorate time) will close over a newly created list instead of sharing the module-level _shared_log. The rest of the wrapper behavior (append, get_history, clear_history) remains unchanged.",
+  "self_check": {
+    "failure_scenario": "If a caller intentionally passes the same history list to multiple decorated functions by calling with_history(func, history=some_list), those functions will share that list — but that is an explicit, user-specified sharing rather than an accidental bug. Another potential failure is if code elsewhere mutates the returned list from get_history() expecting it to affect the stored history: get_history returns a copy, so mutations to the returned list won't affect the stored history (this is intended).",
+    "edge_case": "Decorating many functions in a loop or dynamically at runtime: each decoration will execute with_history and create its own fresh list, so histories remain isolated. Empty histories: before any calls, get_history() should return an empty list; clear_history() should clear only that function's history. Re-decorating the same function (e.g., reload) will create a new history list for the new wrapper instance.",
+    "invariant_check": "Under multiple calls: schedule_one and schedule_batch each close over their own list created at decoration time, so repeated calls append only to their own lists. Under retries/loops: repeated invocations of schedule_one.append only modify schedule_one's list. Under state reuse: because history is created at decoration time (not as a shared module-level default), there is no cross-function state reuse. The code still allows explicit shared history if a caller provides the same list to with_history manually, which is an explicit and documented behavior.",
+    "conclusion": "No flaw found in the chosen fix for the accidental sharing problem: replacing the module-level mutable default with None and allocating a fresh list prevents accidental cross-function history sharing while preserving the ability to explicitly share histories by passing a list. The fix is minimal and localized to scheduler.py and keeps existing wrapper.get_history() and clear_history() semantics."
+  },
+  "files": {
+    "code_snippets_v2/mutable_default_c/scheduler.py": "\"\"\"Scheduler with decorator that tracks call history.\"\"\"\n\nfrom worker import process, batch_process\n\n\n_shared_log = []\n\n\ndef with_history(func, history=None):\n    \"\"\"Decorator that records call history for a function.\n\n    Invariant: each decorated function must have its OWN\n    independent history list.\n    \"\"\"\n    # FIX: do not use a module-level mutable default. If no history is\n    # provided, allocate a fresh list for THIS decorated function.\n    if history is None:\n        history = []\n\n    def wrapper(*args, **kwargs):\n        result = func(*args, **kwargs)\n        history.append({\"func\": func.__name__, \"args_count\": len(args)})\n        return result\n\n    wrapper.get_history = lambda: list(history)\n    wrapper.clear_history = lambda: history.clear()\n    return wrapper\n\n\n@with_history\ndef schedule_one(task):\n    \"\"\"Schedule and process a single task.\"\"\"\n    return process(task)\n\n\n@with_history\ndef schedule_batch(tasks):\n    \"\"\"Schedule and process a batch of tasks.\"\"\"\n    return batch_process(tasks)\n\n\ndef get_all_stats():\n    \"\"\"Get combined stats (distractor).\"\"\"\n    return {\n        \"one_calls\": len(schedule_one.get_history()),\n        \"batch_calls\": len(schedule_batch.get_history()),\n    }\n",
+    "code_snippets_v2/mutable_default_c/queue.py": "UNCHANGED",
+    "code_snippets_v2/mutable_default_c/worker.py": "UNCHANGED"
+  }
+}
