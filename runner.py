@@ -218,32 +218,46 @@ def _run_one_inner(case: dict, model: str, condition: str) -> tuple[str, str, di
         return run_retry_harness(case, model, condition=condition, eval_model=get_eval_model())
     if condition == "leg_reduction":
         return run_leg_reduction(case, model)
+    if condition in ("baseline_v2", "leg_reduction_v2", "leg_reduction_lean_v2"):
+        from execution_v2 import run_v2
+        return run_v2(case, model, condition)
     return run_single(case, model, condition)
 
 
 def run_all(
-    cases: list[dict], model: str, conditions: list[str], quiet: bool = False
+    cases: list[dict], model: str, conditions: list[str], quiet: bool = False,
+    skip: set | None = None,
 ) -> list[dict]:
     """Run all (case, condition) pairs sequentially. No threads.
 
-    Parallelism is achieved by launching multiple runner.py processes
-    externally (e.g., one per model/trial in a shell script).
+    Args:
+        skip: set of (case_id, condition) tuples to skip (already completed).
     """
     work = [(case, cond) for case in cases for cond in conditions]
     total = len(work)
     raw: dict[tuple[str, str], dict] = {}
+    skipped = 0
 
     t0 = time.monotonic()
 
     for i, (case, cond) in enumerate(work):
+        if skip and (case["id"], cond) in skip:
+            skipped += 1
+            if not quiet:
+                print(f"  [{i+1:3d}/{total}] {case['id']:30s} {cond:18s} SKIPPED (already completed)")
+            continue
         cid, cn, ev = _run_one(case, model, cond)
         raw[(cid, cn)] = ev
         if not quiet:
             _print_progress(i + 1, total, cid, cn, ev)
 
     elapsed = time.monotonic() - t0
+    ran = total - skipped
     if not quiet:
-        print(f"\n  Completed {total} calls in {elapsed:.1f}s")
+        msg = f"\n  Completed {ran} calls in {elapsed:.1f}s"
+        if skipped:
+            msg += f" ({skipped} skipped via --resume)"
+        print(msg)
 
     results = []
     for case in cases:
@@ -428,17 +442,37 @@ def validate_execution_sanity(results, conditions):
         print(f"  [!] {w}")
 
 
-def create_run_timestamp_dir(run_dir: Path) -> Path:
-    """Create a timestamp subdirectory inside run_dir. Called ONCE per run.
+def load_completed_pairs(events_path: Path) -> set:
+    """Read events.jsonl and return set of completed (case_id, condition) pairs.
 
-    Format: YYYY-MM-DD_HH-MM-SS (sortable, human-readable).
-    Fails loudly if directory creation fails. Never recompute — call once,
-    pass the result to all downstream writers.
+    Skips corrupt lines. Used for --resume to avoid re-running completed work.
+    """
+    completed = set()
+    if not events_path.exists():
+        return completed
+    for line_num, line in enumerate(events_path.open(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        event = json.loads(line)
+        cid = event.get("case_id")
+        cond = event.get("condition")
+        if cid and cond:
+            completed.add((cid, cond))
+    return completed
 
-    Returns the Path to the created timestamp directory.
+
+def create_run_timestamp_dir(run_dir: Path, run_id: str = "") -> Path:
+    """Create a uniquely-named subdirectory inside run_dir. Called ONCE per run.
+
+    Format: YYYY-MM-DD_HH-MM-SS_{run_id} (sortable, collision-free).
+    Fails loudly if directory creation fails.
+
+    Returns the Path to the created directory.
     """
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-    ts_dir = run_dir / timestamp
+    name = f"{timestamp}_{run_id}" if run_id else timestamp
+    ts_dir = run_dir / name
     ts_dir.mkdir(parents=True, exist_ok=False)
     return ts_dir
 
@@ -486,14 +520,29 @@ def run_ablation_mode(args):
     n_calls = len(cases) * len(conditions)
     total_jobs = args.total_jobs if args.total_jobs > 0 else n_calls
 
-    # Step 1: Create run directory and timestamp subdirectory
+    # Step 1: Create or resume output directory
     run_dir.mkdir(parents=True, exist_ok=True)
-    ts_dir = create_run_timestamp_dir(run_dir)
+    skip = None
 
-    # All outputs go into ts_dir from here on
-    output_dir = ts_dir
+    if args.resume:
+        # Resume: reuse existing timestamp directory
+        output_dir = run_dir / args.resume
+        if not output_dir.exists():
+            raise RuntimeError(
+                f"--resume directory does not exist: {output_dir}\n"
+                f"Available: {sorted(p.name for p in run_dir.iterdir() if p.is_dir())}"
+            )
+        events_path = output_dir / "events.jsonl"
+        if not events_path.exists():
+            raise RuntimeError(f"--resume directory has no events.jsonl: {output_dir}")
+        skip = load_completed_pairs(events_path)
+        print(f"RESUMING: {output_dir} — {len(skip)} completed pairs found, skipping them")
+    else:
+        # Fresh run: create new timestamp directory
+        ts_dir = create_run_timestamp_dir(run_dir, run_id=run_id)
+        output_dir = ts_dir
 
-    # Step 2: Write metadata.json immediately
+    # Step 2: Write metadata.json (append resume info if resuming)
     try:
         git_hash = (
             _sp.check_output(["git", "rev-parse", "HEAD"], stderr=_sp.DEVNULL).decode().strip()
@@ -501,27 +550,34 @@ def run_ablation_mode(args):
     except Exception:
         git_hash = "unknown"
 
-    metadata = {
-        "model": model,
-        "trial": trial,
-        "run_id": run_id,
-        "start_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "timestamp_dir": ts_dir.name,
-        "cases_file": cases_file,
-        "conditions": conditions,
-        "total_jobs": total_jobs,
-        "command_line": sys.argv,
-        "git_hash": git_hash,
-    }
     metadata_path = output_dir / "metadata.json"
+    if args.resume and metadata_path.exists():
+        metadata = json.loads(metadata_path.read_text())
+        metadata["resume_time"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        metadata["resume_skipped"] = len(skip) if skip else 0
+    else:
+        metadata = {
+            "model": model,
+            "trial": trial,
+            "run_id": run_id,
+            "start_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "timestamp_dir": output_dir.name,
+            "cases_file": cases_file,
+            "conditions": conditions,
+            "total_jobs": total_jobs,
+            "command_line": sys.argv,
+            "git_hash": git_hash,
+        }
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
         f.flush()
         os.fsync(f.fileno())
 
-    # Step 3: Touch events.jsonl
+    # Step 3: Touch events.jsonl + enforce schema version
     events_path = output_dir / "events.jsonl"
     events_path.touch()
+    from reasoning import enforce_schema_version
+    enforce_schema_version(str(events_path))
 
     # Step 4: Set ablation context for event emission
     set_ablation_context(events_path=events_path, trial=trial, run_id=run_id)
@@ -534,13 +590,16 @@ def run_ablation_mode(args):
     # Step 5: Initialize run logger
     log_path = init_run_log(model, log_dir=output_dir)
 
+    remaining = n_calls - (len(skip) if skip else 0)
     print(f"T3 Ablation — {len(cases)} cases x {len(conditions)} conditions = {n_calls} evals")
+    if skip:
+        print(f"  Resuming: {len(skip)} already done, {remaining} remaining")
     print(f"  Model: {model}, Trial: {trial}, Run ID: {run_id}")
     print(f"  Run dir: {run_dir}")
     print(f"  Output:  {output_dir}")
 
-    # Step 6: Run evaluations sequentially
-    results = run_all(cases, model, conditions, quiet=args.quiet)
+    # Step 6: Run evaluations sequentially (skip completed pairs if resuming)
+    results = run_all(cases, model, conditions, quiet=args.quiet, skip=skip)
     print_results(results, conditions, model)
 
     # Step 6.5: Execution sanity + result distribution guard
@@ -592,6 +651,11 @@ def main():
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument(
         "--max-cases", type=int, default=None, help="Limit number of cases (for smoke tests)"
+    )
+    parser.add_argument(
+        "--resume", default=None, metavar="TIMESTAMP_DIR",
+        help="Resume a previous run. Pass the timestamp directory name (e.g. 2026-03-28_16-37-43). "
+             "Reads existing events.jsonl to skip completed (case_id, condition) pairs."
     )
     # Kept for detection — hard-fail if used
     parser.add_argument("--model", default=None, help=argparse.SUPPRESS)

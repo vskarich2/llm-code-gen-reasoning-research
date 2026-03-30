@@ -8,7 +8,7 @@ import nudges.core  # noqa: F401 — triggers operator registration
 
 from nudges.mapping import get_operators_for_case
 from nudges.operators import get
-from nudges.core import build_strict_guardrail
+# build_strict_guardrail: DELETED — guardrail_strict logic now inline in execution.py
 
 
 def _require_assignment(case_id: str, condition: str):

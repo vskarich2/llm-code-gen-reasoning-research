@@ -1,247 +1,322 @@
-# Violation Triage Report
+# Violation Triage Plan — System Architecture Aligned
 
 **Date:** 2026-03-27
-**Tools:** Ruff 0.15.8, Pyright 1.1.408, Semgrep, Import-linter, Vulture
+**Pipeline:** Prompt → LLM → Parse → Reconstruct → Execute → Evaluate → Classify → Log
+**Total actionable violations:** 335 (Ruff) + 203 (Pyright) + 54 ERROR semgrep + 20 Vulture = **612**
+**Noise (excluded):** 9,570 semgrep INFO/WARNING from overly broad heuristic rules
 
 ---
 
-## Summary
+## Summary by Pipeline Layer
 
-| Tool | Total | Actionable | Noise |
-|------|-------|-----------|-------|
-| **Ruff** | 1,766 | ~400 | ~1,366 (fixable auto, stylistic) |
-| **Pyright** | 203 | ~50 | ~153 (missing generics in strict mode) |
-| **Semgrep** | 9,624 | 54 ERROR + 52 WARNING | 9,518 INFO (noise rules) |
-| **Vulture** | 19 | 19 | 0 |
-| **Import-linter** | exit 1 | TBD (flat module limitation) | — |
-| **TOTAL** | ~11,600 | ~575 | ~11,000 |
-
-**95% of findings are noise** from overly broad semgrep INFO rules and strict pyright generics. The real issues are ~575 findings across 4 buckets.
-
----
-
-## Bucket 1 — ARCHITECTURE-CRITICAL
-
-### A1: Unused nudge/operator imports in execution.py (8 findings)
-
-- **Files:** execution.py:17
-- **Tool:** Vulture, Ruff F401
-- **What:** `apply_diagnostic`, `apply_guardrail`, `apply_counterfactual`, `apply_reason_then_act`, `apply_self_check`, `apply_counterfactual_check`, `apply_test_driven`, `apply_guardrail_strict` imported but never called
-- **Root cause:** The user's refactoring moved prompt building to `assembly_engine.py` or `prompt_registry.py`, but the old imports in `execution.py` were never cleaned up. These are remnants of the old nudge system.
-- **Violated rule:** No dead imports on critical path
-- **Priority:** HIGH — these imports mask the real dependency graph
-- **Fix type:** QUICK FIX — delete 8 import lines
-
-### A2: Legacy event emission code in execution.py (2 findings)
-
-- **Files:** execution.py:266, execution.py:270
-- **Tool:** Vulture
-- **What:** `EVENTS_PATH` and `_legacy_emit` imported but unused
-- **Root cause:** The legacy dashboard path was replaced by the process-based architecture. These imports are dead.
-- **Priority:** HIGH
-- **Fix type:** QUICK FIX — delete 2 import lines
-
-### A3: `global` statement usage (38 findings, Semgrep ERROR)
-
-- **Files:** call_logger.py (5), execution.py (3), live_metrics.py (1), and others
-- **Tool:** Semgrep `no-global-state`
-- **What:** `global _run_dir, _calls_dir, _flat_path, _call_counter, _enabled` etc.
-- **Root cause:** The process-based architecture uses module-level globals for per-run state (ablation context, call logger state). This is intentional for process isolation but violates the no-global-state rule.
-- **Assessment:** **MIXED.** Some are structural (ablation context — required by design). Some are legacy (e.g., legacy emit path). The semgrep rule is too broad — it should exclude known-intentional globals.
-- **Priority:** MEDIUM — separate intentional from accidental globals
-- **Fix type:** SYSTEMIC — need a whitelist approach or redesign state management
-
-### A4: Dynamic imports inside functions (58 findings, Semgrep WARNING)
-
-- **Files:** execution.py (12), evaluator.py (4), runner.py (8), retry_harness.py (6), and others
-- **Tool:** Semgrep `no-dynamic-import`
-- **What:** `from module import X` inside function bodies
-- **Root cause:** Two distinct causes:
-  1. **Circular import avoidance** (execution.py importing from evaluator, evaluator importing from experiment_config) — these are structural
-  2. **Lazy loading for optional deps** (redis_metrics, scm_data) — these are intentional
-- **Assessment:** The rule is correct but fires on both legitimate and problematic cases. Most dynamic imports here are avoiding circular deps — a sign of entangled modules.
-- **Priority:** LOW (these work correctly; the root cause is circular dep architecture)
-- **Fix type:** SYSTEMIC — would require module restructuring to eliminate circular deps
+| Layer | Violations | P0 | P1 | P2 | P3 |
+|-------|-----------|----|----|----|----|
+| Runner/Orchestration | 67 | 1 | 2 | 3 | 61 |
+| Prompt Construction | 8 | 0 | 0 | 1 | 7 |
+| LLM Call Layer | 12 | 1 | 1 | 1 | 9 |
+| Parsing Layer | 22 | 1 | 3 | 2 | 16 |
+| Reconstruction Layer | 6 | 0 | 0 | 1 | 5 |
+| Execution Layer | 95 | 1 | 2 | 5 | 87 |
+| Evaluation Layer | 41 | 0 | 1 | 3 | 37 |
+| Classification Layer | 17 | 0 | 1 | 1 | 15 |
+| Logging/Observability | 45 | 0 | 3 | 2 | 40 |
+| Config/Case Management | 39 | 0 | 0 | 2 | 37 |
+| **Cross-cutting** | **260** | 0 | 0 | 92 | 168 |
+| **TOTAL** | **612** | **4** | **13** | **113** | **482** |
 
 ---
 
-## Bucket 2 — INVARIANT-CRITICAL
+## Root Cause Clusters
 
-### I1: Silent exception swallowing (15 findings, Semgrep ERROR)
+### RC1: Silent Exception Swallowing
+**Severity: P0 — EXPERIMENT INVALIDATION**
+**Count:** 11 findings
+**Layers:** Parsing (3), LLM Call (1), Execution (2), Contract (2), Logging (2), Retry (1)
+**Tool:** Semgrep `no-silent-except-pass`, `no-swallowed-exception`
 
-- **Files:** execution.py (4), live_metrics.py (2), runner.py (2), retry_harness.py (3), and others
-- **Tool:** Semgrep `no-silent-except-pass`, `no-swallowed-exception`
-- **What:** `try: ... except Exception: pass` or `except: pass`
-- **Root cause:** Fire-and-forget patterns in metrics emission, Redis, and legacy event paths. These were added intentionally to prevent metrics failures from crashing the pipeline, but they hide real errors.
-- **Violated invariant:** "No silent failures"
-- **Priority:** HIGH — these can mask pipeline bugs (the original 0% pass rate bug was partially hidden by silent exceptions)
-- **Fix type:** QUICK FIX per instance — replace `pass` with `_log.debug(...)` or `_log.warning(...)`
+**Invariant broken:** "No silent failures anywhere." This is the invariant that, when violated, caused the $20 wasted ablation. Silent exceptions in the parsing layer (`parse.py:94,122,202`) mean malformed model responses are silently dropped instead of producing errors. In `llm.py:77`, a failed API call is silently swallowed.
 
-### I2: Wildcard import (1 finding, Semgrep ERROR)
+**Affected files and lines:**
+- `parse.py:94` — JSON decode failure silenced (Parsing Layer)
+- `parse.py:122` — Lenient parse failure silenced (Parsing Layer)
+- `parse.py:202` — Code dict parse failure silenced (Parsing Layer)
+- `llm.py:77` — LLM call failure silenced (LLM Call Layer)
+- `exec_eval.py:198` — Module attribute check silenced (Execution Layer)
+- `exec_eval.py:407` — Mutation test import silenced (Execution Layer)
+- `contract.py:137,147` — Contract parse failures silenced (Execution Layer)
+- `redis_live_dashboard.py:84` — Dashboard update silenced (Logging)
+- `retry_harness.py:150` — Retry step failure silenced (Orchestration)
+- `execution.py:208` — Legacy emit failure silenced (Logging)
 
-- **File:** Unknown (1 occurrence)
-- **Tool:** Semgrep `no-wildcard-import`
-- **What:** `from module import *`
-- **Priority:** HIGH
-- **Fix type:** QUICK FIX — replace with explicit imports
+**Root cause:** Defensive coding pattern applied inconsistently. Some are correct (Redis fire-and-forget). Others are dangerous (parse failures that should produce `reasoning_correct=None`).
 
-### I3: Broad exception without re-raise (52 findings, Semgrep WARNING)
+**Systemic:** YES — the pattern repeats across 6 pipeline layers.
 
-- **Files:** execution.py (8), exec_eval.py (6), runner.py (4), evaluator.py (3), and others
-- **Tool:** Semgrep `no-broad-except-without-reraise`
-- **What:** `except Exception as e:` blocks that log but don't re-raise
-- **Root cause:** Defensive coding to keep the pipeline running when individual cases fail. Correct for production resilience but violates fail-fast principle.
-- **Assessment:** **SPLIT.** Per-case exception handling (so one failing case doesn't kill the run) is correct. But broad catches that suppress unknown errors are dangerous.
-- **Priority:** MEDIUM — audit each: is it catching known failure modes or unknown ones?
-- **Fix type:** QUICK FIX per instance — narrow the exception type where possible
+**Why this threatens validity:** A silent parse failure in `parse.py:94` means a valid model response could be silently dropped, producing `code=""`, which gets scored as `pass=False`. The model's actual performance is never measured. This is exactly what happened with the reconstruction wiring bug.
 
 ---
 
-## Bucket 3 — TYPE / CONTRACT ISSUES
+### RC2: Wildcard Import Breaking Module Boundaries
+**Severity: P0 — EXPERIMENT INVALIDATION**
+**Count:** 1 finding
+**Layer:** Execution Layer
+**Tool:** Semgrep `no-wildcard-import`, Ruff F403
 
-### T1: Missing generic type arguments (92 findings)
+**Invariant broken:** "No duplicate execution paths." `execution.py:12` has `from evaluator import *`, which imports every public name from evaluator into execution's namespace. This means execution.py has direct access to `exec_evaluate`, `llm_classify`, `compute_alignment`, `_CLASSIFY_PROMPT`, `_REASONING_SIGNALS`, and every other evaluator symbol — bypassing the architectural boundary that should exist between the execution orchestrator and the evaluation layer.
 
-- **Files:** execution.py (20), exec_eval.py (18), experiment_config.py (15), runner.py (10), live_metrics.py (8), evaluator.py (8), parse.py (5), others
-- **Tool:** Pyright `reportMissingTypeArgument`
-- **What:** `dict` instead of `dict[str, Any]`, `list` instead of `list[str]`, etc.
-- **Root cause:** Code was written before strict typing was enabled. Functions use bare `dict`, `list`, `tuple` without type parameters.
-- **Priority:** LOW — these are correct at runtime, just missing type annotations
-- **Fix type:** SYSTEMIC — requires adding type annotations to ~50 function signatures
-- **Assessment:** This is 45% of all pyright errors. Fixing these is mechanical but tedious.
+**Why this threatens validity:** If someone calls `exec_evaluate` through execution.py's namespace vs evaluator's namespace, they might get different behavior if evaluator is monkey-patched or reloaded. More critically, this wildcard import masks the real dependency graph — you can't tell what execution.py actually uses from evaluator.
 
-### T2: Unused imports (30 Pyright + 135 Ruff F401 = ~135 unique)
-
-- **Files:** execution.py (10), runner.py (5), exec_eval.py (4), experiment_config.py (2), and across test files
-- **Tool:** Pyright `reportUnusedImport`, Ruff F401
-- **Root cause:** Refactoring left behind imports that are no longer referenced. Some are re-exports (e.g., `from eval_cases import _has, _low  # noqa: F401`).
-- **Priority:** MEDIUM — unused imports on the critical path mask the real dependency graph
-- **Fix type:** QUICK FIX — `ruff check --fix` can auto-remove most
-
-### T3: Optional member/call access (19 findings)
-
-- **Files:** execution.py (8), evaluator.py (4), live_metrics.py (3), others
-- **Tool:** Pyright `reportOptionalCall`, `reportOptionalMemberAccess`
-- **What:** Calling methods on values that could be `None`
-- **Root cause:** Functions return `X | None` but callers don't check for None before accessing.
-- **Priority:** MEDIUM — these are potential runtime errors (though most are guarded by prior logic)
-- **Fix type:** QUICK FIX — add None checks or narrow types
-
-### T4: Private member access (13 findings)
-
-- **Files:** runner.py (5), experiment_config.py (4), others
-- **Tool:** Pyright `reportPrivateUsage`
-- **What:** Accessing `_config_sha256`, `_active_logger`, etc. from outside the defining class/module
-- **Root cause:** Internal state accessed for logging/debugging purposes
-- **Priority:** LOW
-- **Fix type:** QUICK FIX — make these public or add accessor methods
+**Systemic:** LOCAL — single line, single file.
 
 ---
 
-## Bucket 4 — HYGIENE / COSMETIC
+### RC3: Ghost Dependencies (Dead Imports on Critical Path)
+**Severity: P0 — EXPERIMENT INVALIDATION**
+**Count:** 20 findings
+**Layer:** Execution (13), Runner (3), Exec_eval (3), Experiment_config (2)
+**Tool:** Vulture, Ruff F401, Pyright reportUnusedImport
 
-### H1: Import sorting (188 findings, Ruff I001)
+**Invariant broken:** "Pipeline linearity — no duplicate execution paths." Dead imports in `execution.py` include 8 nudge operators (`apply_diagnostic`, `apply_guardrail`, etc.) and 2 legacy event functions (`EVENTS_PATH`, `_legacy_emit`). These are remnants of the old prompt building system that was replaced by `assembly_engine.py`/`prompt_registry.py`.
 
-- **Files:** Nearly every .py file
-- **Tool:** Ruff I001
-- **Root cause:** Black was run but ruff's isort wasn't. The two tools have different import ordering preferences.
-- **Priority:** LOWEST
-- **Fix type:** QUICK FIX — `ruff check --fix` auto-sorts all imports
+**Affected files:**
+- `execution.py:17` — 8 unused nudge imports (old prompt system)
+- `execution.py:265,269` — `EVENTS_PATH`, `_legacy_emit` (old metrics)
+- `execution.py:953` — `build_leg_reduction_prompt` unused
+- `runner.py:17` — `get_current_log_path`, `get_log_write_stats` unused
+- `runner.py:565` — `get_call_count` unused
+- `exec_eval.py:14,19` — `Any`, `_STDLIB_MODULES`, `extract_all_code_blocks` unused
+- `experiment_config.py:18,25` — `copy`, `Any` unused
 
-### H2: Magic numbers (239 findings, Ruff PLR2004)
+**Why this threatens validity:** Dead imports cause `execution.py` to silently load the old nudge system on every import. If those old modules have side effects or shared state, they contaminate the pipeline. More practically, they make the dependency graph unreadable — you can't determine the real execution path.
 
-- **Files:** exec_eval.py (40), runner.py (20), execution.py (15), retry_harness.py (30), and others
-- **Tool:** Ruff PLR2004
-- **What:** Numeric literals like `0.5`, `10`, `0.95` in comparisons
-- **Root cause:** Configuration thresholds embedded in code. Many are intentional (e.g., `if score > 0.5`, `total_tests = 2`).
-- **Priority:** LOWEST — these are mostly domain-specific constants
-- **Fix type:** DEFER — extracting all to named constants would reduce readability
+**Systemic:** LOCAL — deletable in one pass.
 
-### H3: Deferred imports (433 findings, Ruff PLC0415)
+---
 
-- **Files:** Widespread — execution.py, runner.py, evaluator.py, etc.
-- **Tool:** Ruff PLC0415
-- **What:** Imports not at module top level
-- **Root cause:** Same as A4 (circular import avoidance + lazy loading). Ruff and semgrep both flag this.
-- **Priority:** LOWEST — these work correctly
-- **Fix type:** DEFER — requires module restructuring
+### RC4: Unsafe Optional Access in Test Harness
+**Severity: P0 — EXPERIMENT INVALIDATION**
+**Count:** 17 findings
+**Layer:** Execution Layer (exec_eval.py)
+**Tool:** Pyright reportOptionalCall
 
-### H4: Long exception messages (101 findings, Ruff TRY003)
+**Invariant broken:** "Execution correctness." In `exec_eval.py`, test functions use `getattr(mod, "function_name", None)` to extract functions from loaded modules, then call those functions without guaranteed None-checks. Pyright flags 17 locations where `None` could be called as a function.
 
-- **Files:** Throughout
-- **Tool:** Ruff TRY003
-- **What:** `raise ValueError("long message here")`
-- **Root cause:** Detailed error messages are useful for debugging. The rule prefers custom exception classes.
-- **Priority:** LOWEST — these messages are the right trade-off for a research codebase
-- **Fix type:** DEFER
+**Example:** `exec_eval.py:172` — `process_event({"type": "set", ...})` where `process_event` was assigned via `getattr(mod, "process_event", None)`. The guard at line 166 (`if not all([process_event, get])`) catches this at runtime, but if someone adds a new test that forgets the guard, a `TypeError: 'NoneType' object is not callable` crash would kill the entire trial — not just the one case.
 
-### H5: Semgrep INFO noise (6,114 findings)
+**Why this threatens validity:** An unguarded None call in one test crashes the entire worker process, losing all subsequent case results for that trial.
 
-- **Tool:** Semgrep (INFO severity)
-- **Rules:** `assign-alias` (3,102), `implicit-none-return` (711), `inplace-mutation-dict/list` (756+), `partial-dict-update` (359), `debug-print` (294), `side-effect-after-loop` (114), `suspicious-comparison` (22)
-- **Root cause:** The semgrep ruleset was expanded with extremely broad heuristic rules that flag normal Python patterns (dict assignment, list.append, print statements, for loops followed by function calls).
-- **Priority:** NOT ACTIONABLE — these rules should be disabled or scoped to model-generated code only (they were designed for evaluating LLM output, not the benchmark infrastructure)
-- **Fix type:** CONFIG CHANGE — remove or scope INFO rules in `.semgrep.yml`
+**Systemic:** LOCAL — all 17 are in `exec_eval.py` test functions using the same `getattr + all()` pattern.
 
-### H6: Semgrep WARNING noise (3,517 findings)
+---
 
-- **Tool:** Semgrep (WARNING severity)
-- **Rules:** `no-copy-dict-return` (989), `return-global-mutable` (989), `unreachable-code-after-return` (986), `cache-write-no-invalidate` (431)
-- **Root cause:** Same as H5 — overly broad pattern matching. `return-global-mutable` flags every `return` of any variable. `unreachable-code-after-return` flags every `return` followed by any code in the same function. `no-copy-dict-return` flags every `return` of a dict variable.
-- **Priority:** NOT ACTIONABLE — these rules are false positives at this scale
-- **Fix type:** CONFIG CHANGE — remove these WARNING rules from `.semgrep.yml`
+### RC5: Global Mutable State Across Pipeline
+**Severity: P1 — HIDDEN FAILURE RISK**
+**Count:** 38 findings (semgrep ERROR)
+**Layers:** Logging (9 in call_logger), LLM Call (1 in llm.py), Execution (3), Config (1), Metrics (2), Templates (4), Prompt Registry (8)
+**Tool:** Semgrep `no-global-state`
+
+**Invariant broken:** "No hidden state mutation across runs" and "Isolation between cases."
+
+**Two categories:**
+
+**Intentional (keep, whitelist):**
+- `call_logger.py:42` — `_run_dir, _calls_dir, _flat_path` — per-run state, set once at init
+- `execution.py:192` — `_ablation_events_path, _ablation_trial, _ablation_run_id` — ablation context
+- `experiment_config.py:230` — `_config` singleton — loaded once, frozen
+- `llm.py:115` — mock mode flag
+
+**Risky (audit):**
+- `prompt_registry.py:48,160` — 8 globals for registry state — if not properly reset between runs, prompts from run N leak into run N+1
+- `templates.py:177,190,211,249` — 4 globals for template hashes — should be immutable after init
+- `redis_metrics.py:35` — Redis client state
+- `state.py:24,29,36` — Unknown state module
+- `store.py:6,25` — Unknown store module
+
+**Why this threatens validity:** If `prompt_registry` globals aren't reset between models in the ablation, model A's prompt configuration could bleed into model B's runs. The process-based architecture (separate OS processes per worker) mitigates this for the ablation, but legacy/serial mode is vulnerable.
+
+**Systemic:** YES — 10+ modules use globals for different purposes.
+
+---
+
+### RC6: Silent Parse Failures Producing False Negatives
+**Severity: P1 — HIDDEN FAILURE RISK**
+**Count:** 3 findings (subset of RC1, parsing-specific)
+**Layer:** Parsing Layer
+**Tool:** Semgrep `no-silent-except-pass`
+
+**Invariant broken:** "Parsing must produce valid structured outputs."
+
+`parse.py:94,122,202` — Three `except: pass` blocks in the JSON parsing tiers. When a tier fails, it silently returns None and falls through to the next tier. This is *by design* (the 3-tier parser is supposed to try increasingly lenient strategies). BUT: if ALL tiers fail, the raw fallback path produces `code = raw_text`, which is almost certainly wrong.
+
+The Fix D parse gate (already implemented) catches the downstream effect (reasoning_correct=None on empty reasoning). But the parse layer itself doesn't distinguish "intentionally fell through to next tier" from "all tiers failed and we're in raw fallback."
+
+**Why this threatens validity:** A model response that is valid JSON but has an unexpected key name (e.g., `"fixed_code"` instead of `"code"`) will silently fall through all tiers and be treated as raw code. The model's actual code is never extracted.
+
+**Systemic:** LOCAL — contained in parse.py's 3-tier architecture.
+
+---
+
+### RC7: Complexity Hotspots in Critical Functions
+**Severity: P1 — HIDDEN FAILURE RISK**
+**Count:** 10 findings
+**Layers:** Execution (3), Evaluation (1), Parsing (1), Reconstruction (1), Metrics (2), Prompt (1), Exec_eval (1)
+**Tool:** Ruff C901
+
+**Functions exceeding complexity threshold (>10):**
+- `exec_evaluate` (18) — Execution Layer — THE core evaluation function
+- `compute_evidence_metrics` (21) — Evaluation Layer
+- `_compute_observability` (21) — Execution Layer
+- `compute_metrics` (16) — Metrics Layer
+- `build_prompt` (14) — Prompt Construction
+- `write_dashboard` (12) — Metrics Layer
+- `_test_retry_ack_duplication` (13) — Execution Layer
+- `parse_structured_output` (11) — Parsing Layer
+- `reconstruct_strict` (11) — Reconstruction Layer
+- `_compute_failure_source` (11) — Execution Layer
+
+**Why this threatens validity:** `exec_evaluate` at complexity 18 has the most code paths of any function in the pipeline. Every early return, every exception handler, every assembly branch is a path that must be tested. The logging invariant bug (total_tests=2 on early returns) lived in this function's complexity. Higher complexity = more hiding places for bugs.
+
+**Systemic:** YES — complexity concentrates at layer boundaries (where data transforms between pipeline stages).
+
+---
+
+### RC8: Missing Type Annotations on Pipeline Functions
+**Severity: P2 — STRUCTURAL DEBT**
+**Count:** 92 findings
+**Layers:** All pipeline layers
+**Tool:** Pyright reportMissingTypeArgument
+
+**What:** Bare `dict`, `list`, `tuple` without type parameters in function signatures across execution.py (32), exec_eval.py (7), experiment_config.py (7), evaluator.py (10), live_metrics.py (8), parse.py (9), runner.py (12), others.
+
+**Invariant affected:** "Data integrity across pipeline layers." Without typed dicts, there's no static guarantee that the `parsed` dict flowing from parse → reconstruct → evaluate has the expected keys. The reconstruction wiring bug (parsed["code"] = None) would have been caught by types if `parsed` was `TypedDict` with `code: str`.
+
+**Systemic:** YES — every inter-layer data handoff uses untyped dicts.
+
+---
+
+### RC9: Unused Variables and Dead Assignments
+**Severity: P2 — STRUCTURAL DEBT**
+**Count:** 11 Ruff F841 + 13 Pyright reportUnusedVariable = ~20 unique
+**Layers:** Execution (5), Eval (3), Runner (3), Metrics (1), others
+
+**What:** Variables assigned but never used. Examples: `live_metrics.py:149` assigns `n_trials` but never reads it. Various `_` variables in exec_eval.py.
+
+**Why this matters:** Dead assignments in the metrics layer could indicate a metric that was supposed to be computed but isn't. `n_trials` in live_metrics suggests trial-level analysis was planned but never implemented.
+
+**Systemic:** LOCAL — fixable per-instance.
+
+---
+
+### RC10: Too Many Function Parameters
+**Severity: P3 — HYGIENE**
+**Count:** 7 findings
+**Layers:** Execution (3), Runner (2), Retry (2)
+**Tool:** Ruff PLR0913
+
+**What:** Functions with >5 parameters. These are orchestration functions that take case, model, condition, config, etc. This is inherent to the pipeline's data-passing architecture.
+
+**Fix type:** DEFER — would require introducing data classes for parameter bundles.
+
+---
+
+### RC11: Deferred Imports (Circular Dependency Symptom)
+**Severity: P3 — HYGIENE**
+**Count:** 66 findings
+**Layers:** All
+**Tool:** Ruff PLC0415
+
+**Root cause:** The flat module architecture creates circular import chains (execution → evaluator → exec_eval, evaluator → experiment_config → ...). Deferred imports inside functions are the workaround.
+
+**Fix type:** DEEP REFACTOR — would require restructuring into a proper package hierarchy with clear dependency ordering.
+
+---
+
+### RC12: Magic Numbers in Thresholds
+**Severity: P3 — HYGIENE**
+**Count:** 36 findings
+**Layers:** Execution (8), Runner (6), Metrics (5), Eval (4), others
+**Tool:** Ruff PLR2004
+
+**What:** `0.5`, `10`, `0.95`, `0.05` used directly in comparisons. Most are experimental thresholds (score cutoffs, similarity thresholds, stagnation windows).
+
+**Fix type:** DEFER — these belong in experiment_config.yaml, but extracting them is low-priority.
 
 ---
 
 ## Prioritized Execution Plan
 
-### Phase 1 — Config Cleanup (0 code changes, immediate)
+### Phase 0 — Protect Experimental Validity (P0, 4 clusters)
 
-1. **Remove noisy semgrep rules** from `.semgrep.yml`: all INFO rules and the 3 false-positive WARNING rules (`no-copy-dict-return`, `return-global-mutable`, `unreachable-code-after-return`, `cache-write-no-invalidate`). Keep only ERROR rules + `no-broad-except-without-reraise` + `no-dynamic-import`.
-   - **Impact:** Reduces semgrep from 9,624 to ~165 findings
-   - **Risk:** None — removing noise improves signal
+| Order | Cluster | Count | Fix Type | Risk |
+|-------|---------|-------|----------|------|
+| **1** | RC2: Wildcard import | 1 | QUICK FIX — replace `from evaluator import *` with explicit names | None |
+| **2** | RC3: Ghost dependencies | 20 | QUICK FIX — delete unused imports | Low (verify no dynamic usage) |
+| **3** | RC1 (parse subset): Silent parse failures | 3 | QUICK FIX — add logging to parse.py except blocks | None |
+| **4** | RC4: Unsafe optional access | 17 | MEDIUM — add type narrowing or explicit None checks in exec_eval test functions | Low |
 
-2. **Auto-fix import sorting**: `ruff check --fix` for I001
-   - **Impact:** Eliminates 188 findings
-   - **Risk:** None — auto-fix is safe
+### Phase 1 — Eliminate Hidden Failure Paths (P1, 4 clusters)
 
-### Phase 2 — Quick Wins (small code changes)
+| Order | Cluster | Count | Fix Type | Risk |
+|-------|---------|-------|----------|------|
+| **5** | RC1 (non-parse): Silent exceptions | 8 | QUICK FIX — replace `pass` with `_log.warning()` | Low |
+| **6** | RC5 (risky subset): Unaudited global state | ~10 | MEDIUM — audit prompt_registry, templates, state.py globals | Medium |
+| **7** | RC6: Parse layer false negatives | 3 | MEDIUM — add parse tier tracking (which tier succeeded) | Low |
+| **8** | RC7: Complexity in exec_evaluate | 1 | DEEP — extract sub-functions from 18-complexity function | Medium |
 
-3. **Delete unused imports** in pipeline files: execution.py, runner.py, exec_eval.py, experiment_config.py
-   - **Impact:** Eliminates ~20 Vulture + ~30 Ruff F401 findings on critical path
-   - **Risk:** LOW — verify no dynamic usage
+### Phase 2 — Strengthen Type Safety (P2, 2 clusters)
 
-4. **Fix silent exception blocks** (I1): Replace `except: pass` with logging in 15 locations
-   - **Impact:** Eliminates 15 ERROR-level semgrep findings
-   - **Risk:** LOW — behavior unchanged, just adds visibility
+| Order | Cluster | Count | Fix Type | Risk |
+|-------|---------|-------|----------|------|
+| **9** | RC8: Missing type annotations | 92 | SYSTEMIC — add type params to all pipeline function signatures | None |
+| **10** | RC9: Dead variables | 20 | QUICK FIX — delete or use | None |
 
-5. **Fix wildcard import** (I2): 1 location
-   - **Impact:** 1 finding
-   - **Risk:** None
+### Phase 3 — Hygiene (P3, 3 clusters)
 
-### Phase 3 — Type Annotations (mechanical)
-
-6. **Add generic type parameters**: `dict` → `dict[str, Any]`, etc. in function signatures
-   - **Impact:** Eliminates ~92 pyright findings
-   - **Risk:** None — no runtime change
-
-7. **Add None checks** for optional access (T3)
-   - **Impact:** Eliminates ~19 pyright findings
-   - **Risk:** LOW
-
-### Phase 4 — Deferred / Won't Fix
-
-8. **Magic numbers** (H2): DEFER — not worth extracting in a research codebase
-9. **Deferred imports** (H3/A4): DEFER — requires module restructuring
-10. **Long exception messages** (H4): WON'T FIX — detailed messages are correct
-11. **Global state** (A3): PARTIAL — whitelist intentional globals, fix accidental ones
+| Order | Cluster | Count | Fix Type | Risk |
+|-------|---------|-------|----------|------|
+| **11** | RC10: Parameter count | 7 | DEFER |
+| **12** | RC11: Deferred imports | 66 | DEEP REFACTOR |
+| **13** | RC12: Magic numbers | 36 | DEFER |
 
 ---
 
-## Risks
+## Dependencies
 
-1. **Auto-fixing imports may break re-exports**: Some `import X  # noqa: F401` patterns are intentional re-exports. Verify before bulk deletion.
-2. **Removing silent exceptions may surface hidden failures**: Test after each change.
-3. **Semgrep rule removal must preserve the 8 ERROR rules**: Don't accidentally remove critical invariant checks.
+```
+RC2 (wildcard import) → RC3 (ghost deps)
+  Both clean up execution.py's import surface.
+  Fix wildcard FIRST so explicit imports are visible.
+
+RC1 (silent exceptions) → RC6 (parse false negatives)
+  Parse exceptions are a subset of RC1.
+  Fix the general pattern, then audit parse-specific implications.
+
+RC3 (ghost deps) → RC8 (type annotations)
+  Remove dead imports BEFORE adding types — otherwise you're typing dead code.
+
+RC7 (complexity) → RC4 (unsafe optional)
+  Reducing exec_evaluate complexity makes the None-check pattern clearer.
+```
+
+---
+
+## Quick Wins (< 30 min total)
+
+1. Replace `from evaluator import *` with explicit imports in execution.py
+2. Delete 20 unused imports across 4 files
+3. Add `_log.warning(...)` to 11 silent except blocks
+4. Fix 1 wildcard import
+5. Delete 1 unused variable in live_metrics.py
+
+**Combined impact:** Eliminates all P0 findings and most P1 findings. ~35 lines changed.
+
+---
+
+## Deep Refactors (not now)
+
+1. **Module restructuring** to eliminate circular imports (RC11) — would require converting flat .py files into a proper package hierarchy
+2. **TypedDict for pipeline data** (RC8) — would prevent another "parsed['code'] = None" class of bug at the type level
+3. **Decompose exec_evaluate** (RC7) — extract assembly, loading, testing, and scoring into separate functions
 
 ---
 
@@ -249,10 +324,10 @@
 
 | Category | Count | Action |
 |----------|-------|--------|
-| Semgrep INFO rules | 6,114 | Remove from config — these are for LLM output evaluation, not infrastructure |
-| Semgrep WARNING false positives | 3,406 | Remove 4 overly-broad rules |
-| Ruff PLC0415 (deferred imports) | 433 | Suppress — architectural, not fixable without restructure |
-| Ruff PLR2004 (magic numbers) | 239 | Suppress — domain constants are acceptable |
-| Ruff TRY003 (long messages) | 101 | Suppress — detailed errors are correct |
-| Pyright reportMissingTypeArgument | 92 | Fix mechanically in Phase 3 |
-| Test file violations | ~400 | Exclude from pipeline checks — tests have different standards |
+| Semgrep INFO rules | 6,114 | **REMOVE FROM CONFIG** — `assign-alias`, `implicit-none-return`, `inplace-mutation-*`, `partial-dict-update`, `debug-print`, `side-effect-after-loop`, `suspicious-comparison` are heuristics for evaluating LLM-generated code, not benchmark infrastructure |
+| Semgrep WARNING false positives | 3,406 | **REMOVE FROM CONFIG** — `no-copy-dict-return` (989), `return-global-mutable` (989), `unreachable-code-after-return` (986), `cache-write-no-invalidate` (431) match every return/assignment |
+| Ruff PLC0415 (deferred imports) | 66 | **SUPPRESS** — structural, requires package refactor |
+| Ruff PLR2004 (magic numbers) | 36 | **SUPPRESS** — domain-specific thresholds |
+| Ruff TRY003 (long messages) | 36 | **SUPPRESS** — detailed errors are correct for research |
+| Test file violations | ~300 | **EXCLUDE** — tests have different standards |
+| Pyright reportMissingTypeArgument | 92 | **FIX in Phase 2** — mechanical, no risk |

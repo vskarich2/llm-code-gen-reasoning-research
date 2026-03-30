@@ -10,47 +10,8 @@ import os
 _llm_log = logging.getLogger("t3.llm")
 _mock_warning_emitted = False
 
-# V1 output instruction (legacy — single code blob)
-_JSON_OUTPUT_INSTRUCTION_V1 = """
-
-Return your response as a single valid JSON object with this exact schema:
-
-{"reasoning": "<your explanation>", "plan": ["<step 1>", "<step 2>"], "code": "<your complete fixed code>"}
-
-ALL THREE fields are REQUIRED and must be non-null strings (or list of strings for plan):
-- "reasoning" MUST be a non-null string explaining your analysis. NEVER set it to null.
-- "plan" MUST be a non-empty list of strings, one step per element.
-- "code" MUST be a non-null string containing the complete fixed source code.
-
-Rules:
-- Do NOT include markdown (no ```python blocks)
-- Do NOT include text outside the JSON
-- Do NOT set any field to null
-- Return ONLY the JSON object, nothing else"""
-
-# V2 output instruction (file-dict format with UNCHANGED sentinel)
-_JSON_OUTPUT_INSTRUCTION_V2_TEMPLATE = """
-
-Return your response as a single valid JSON object with this schema:
-
-{{"reasoning": "<your analysis of the bug and fix>", "files": {{{file_entries}}}}}
-
-RULES:
-- "reasoning" MUST be a non-empty string explaining your analysis.
-- "files" MUST contain one entry for EVERY file listed above.
-- For files you did NOT modify, set the value to the exact string "UNCHANGED".
-- For files you DID modify, include the COMPLETE updated file contents.
-- Do NOT include markdown formatting inside file values.
-- Do NOT omit any file from the "files" object.
-- Return ONLY the JSON object, nothing else."""
-
-
-def build_json_output_instruction_v2(file_paths: list[str] | None = None) -> str:
-    """Build V2 output instruction with file entries matching the prompt."""
-    if not file_paths:
-        return _JSON_OUTPUT_INSTRUCTION_V1
-    entries = ", ".join(f'"{p}": "<complete file contents or UNCHANGED>"' for p in file_paths)
-    return _JSON_OUTPUT_INSTRUCTION_V2_TEMPLATE.format(file_entries=entries)
+# ALL OUTPUT INSTRUCTIONS DELETED — now in prompts/components/output_instruction_v1.j2 and v2.j2
+# Access via: assembly_engine.build(["output_instruction_v1"], {}) or ["output_instruction_v2"]
 
 
 def _get_output_format() -> str:
@@ -103,13 +64,10 @@ def call_model(
 
     api_key = os.environ.get("OPENAI_API_KEY")
 
-    output_fmt = _get_output_format()
-    if raw:
-        full_prompt = prompt
-    elif output_fmt == "v2" and file_paths:
-        full_prompt = prompt + build_json_output_instruction_v2(file_paths)
-    else:
-        full_prompt = prompt + _JSON_OUTPUT_INSTRUCTION_V1
+    # Output instruction is now included in the prompt by AssemblyEngine.
+    # call_model passes the prompt unchanged.
+    # Legacy: output_fmt/raw/file_paths logic has been moved to build_prompt().
+    full_prompt = prompt
 
     if not api_key or api_key == "sk-dummy":
         global _mock_warning_emitted

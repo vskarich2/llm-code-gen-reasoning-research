@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 
 from jinja2 import Environment, StrictUndefined
 
-from prompt_registry import get_component, get_nudge_text, get_cge_instruction, is_loaded
+from prompt_registry import get_component, get_nudge_text, get_cge_instruction, get_condition_spec, is_loaded
 
 _log = logging.getLogger("t3.assembly")
 
@@ -40,6 +40,11 @@ class RenderedPrompt:
     variables_used: tuple[str, ...]
     plan_hash: str
     final_prompt_hash: str
+
+
+def resolve_condition(condition: str) -> dict:
+    """Resolve the prompt manifest spec for a condition."""
+    return get_condition_spec(condition)
 
 
 def resolve_nudge(key: str) -> str:

@@ -200,7 +200,7 @@ class TestVariableExtraction:
 
         load_prompt_registry()
         comp = get_component("output_instruction_v2")
-        assert "file_entries" in comp.required_variables
+        assert "schema_line" in comp.required_variables
 
     def test_output_v1_no_variables(self):
         from prompt_registry import load_prompt_registry, get_component
@@ -219,65 +219,40 @@ class TestVariableExtraction:
         assert "max_internal_revisions" in comp.required_variables
 
 
-class TestContentEquivalence:
-    """Verify registry content matches source strings."""
+class TestRegistryContentIntegrity:
+    """Verify registry content is well-formed and non-empty."""
 
-    def test_diagnostic_nudge_matches_source(self):
+    def test_all_diagnostic_nudges_non_empty(self):
         from prompt_registry import load_prompt_registry, get_nudge_text
-        from prompts import DIAGNOSTIC_NUDGES
-
         load_prompt_registry()
-        for fm, source_text in DIAGNOSTIC_NUDGES.items():
-            key = f"diagnostic__{fm.lower()}"
-            registry_text = get_nudge_text(key)
-            assert registry_text == source_text, (
-                f"Diagnostic nudge '{key}' content mismatch. "
-                f"Source: {len(source_text)} chars, Registry: {len(registry_text)} chars"
-            )
+        for key in ["diagnostic__hidden_dependency", "diagnostic__temporal_causal_error",
+                     "diagnostic__invariant_violation", "diagnostic__state_semantic_violation",
+                     "diagnostic__generic_dependency", "diagnostic__generic_invariant",
+                     "diagnostic__generic_temporal", "diagnostic__generic_state"]:
+            text = get_nudge_text(key)
+            assert len(text) > 100, f"Nudge '{key}' too short ({len(text)} chars)"
+            assert "STOP" in text or "Before" in text or "MANDATORY" in text, \
+                f"Nudge '{key}' missing expected content pattern"
 
-    def test_guardrail_nudge_matches_source(self):
+    def test_all_guardrail_nudges_non_empty(self):
         from prompt_registry import load_prompt_registry, get_nudge_text
-        from prompts import GUARDRAIL_NUDGES
-
         load_prompt_registry()
-        for fm, source_text in GUARDRAIL_NUDGES.items():
-            key = f"guardrail__{fm.lower()}"
-            registry_text = get_nudge_text(key)
-            assert registry_text == source_text, f"Guardrail nudge '{key}' content mismatch"
+        for key in ["guardrail__hidden_dependency", "guardrail__temporal_causal_error",
+                     "guardrail__invariant_violation", "guardrail__state_semantic_violation",
+                     "guardrail__generic_dependency", "guardrail__generic_invariant",
+                     "guardrail__generic_temporal", "guardrail__generic_state"]:
+            text = get_nudge_text(key)
+            assert len(text) > 100, f"Guardrail '{key}' too short"
+            assert "MANDATORY" in text or "may NOT" in text, \
+                f"Guardrail '{key}' missing constraint language"
 
-    def test_generic_nudge_matches_source(self):
+    def test_all_reasoning_nudges_non_empty(self):
         from prompt_registry import load_prompt_registry, get_nudge_text
-        from nudges.operators import _REGISTRY as OP_REG
-        import nudges.core  # trigger registration
-
         load_prompt_registry()
-        for op_name, op in OP_REG.items():
-            source_text = op.build_prompt("")
-            # Map operator name to registry key
-            kind = op.kind  # "diagnostic" or "guardrail"
-            name_map = {
-                "DEPENDENCY_CHECK": "generic_dependency",
-                "INVARIANT_GUARD": "generic_invariant",
-                "TEMPORAL_ROBUSTNESS": "generic_temporal",
-                "STATE_LIFECYCLE": "generic_state",
-                "DEPENDENCY_CHECK_GUARDRAIL": "generic_dependency",
-                "INVARIANT_GUARD_GUARDRAIL": "generic_invariant",
-                "TEMPORAL_ROBUSTNESS_GUARDRAIL": "generic_temporal",
-                "STATE_LIFECYCLE_GUARDRAIL": "generic_state",
-                "COUNTERFACTUAL": None,
-                "REASON_THEN_ACT": None,
-                "SELF_CHECK": None,
-                "COUNTERFACTUAL_CHECK": None,
-                "TEST_DRIVEN": None,
-            }
-            if op_name in name_map and name_map[op_name] is not None:
-                key = f"{kind}__{name_map[op_name]}"
-            elif op_name == "STRICT_GUARDRAIL":
-                continue  # dynamic, tested separately
-            else:
-                key = f"reasoning__{op_name.lower()}"
-            registry_text = get_nudge_text(key)
-            assert registry_text == source_text, (
-                f"Generic nudge '{key}' (from operator '{op_name}') content mismatch. "
-                f"Source: {len(source_text)} chars, Registry: {len(registry_text)} chars"
-            )
+        for key in ["reasoning__counterfactual", "reasoning__reason_then_act",
+                     "reasoning__self_check", "reasoning__counterfactual_check",
+                     "reasoning__test_driven", "reasoning__structured",
+                     "reasoning__free_form", "reasoning__branching",
+                     "reasoning__alignment_extra"]:
+            text = get_nudge_text(key)
+            assert len(text) > 10, f"Reasoning '{key}' too short"

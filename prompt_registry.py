@@ -19,6 +19,7 @@ _log = logging.getLogger("t3.prompt_registry")
 BASE_DIR = Path(__file__).parent
 COMPONENTS_DIR = BASE_DIR / "prompts" / "components"
 REGISTRY_YAML = BASE_DIR / "prompts" / "registry.yaml"
+MANIFEST_YAML = BASE_DIR / "prompts" / "prompt_manifest.yaml"
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class PromptComponent:
 _components: dict[str, PromptComponent] = {}
 _nudge_texts: dict[str, str] = {}
 _cge_instructions: dict[str, str] = {}
+_manifest: dict[str, dict] = {}
 _loaded: bool = False
 
 
@@ -45,7 +47,7 @@ def load_prompt_registry() -> dict[str, PromptComponent]:
     Returns dict of component_name -> PromptComponent.
     Also populates nudge_texts and cge_instructions from registry.yaml.
     """
-    global _components, _nudge_texts, _cge_instructions, _loaded
+    global _components, _nudge_texts, _cge_instructions, _manifest, _loaded
 
     if _loaded:
         raise RuntimeError("Prompt registry already loaded. Call load_prompt_registry() only once.")
@@ -86,16 +88,23 @@ def load_prompt_registry() -> dict[str, PromptComponent]:
         for key, text in raw.get("cge_instructions", {}).items():
             cge_instructions[key] = text
 
+    # Load prompt manifest (condition → component mapping)
+    manifest = {}
+    if MANIFEST_YAML.exists():
+        raw_manifest = yaml.safe_load(MANIFEST_YAML.read_text(encoding="utf-8")) or {}
+        manifest = raw_manifest.get("conditions", {})
+
     _components = components
     _nudge_texts = nudge_texts
     _cge_instructions = cge_instructions
+    _manifest = manifest
     _loaded = True
 
     _log.info(
-        "Prompt registry loaded: %d components, %d nudge texts, %d CGE instructions",
+        "Prompt registry loaded: %d components, %d nudge texts, %d conditions in manifest",
         len(components),
         len(nudge_texts),
-        len(cge_instructions),
+        len(manifest),
     )
     return components
 
@@ -136,6 +145,25 @@ def get_cge_instruction(key: str) -> str:
     return _cge_instructions[key]
 
 
+def get_condition_spec(condition: str) -> dict:
+    """Get the prompt manifest spec for a condition. Fatal if not found."""
+    if not _loaded:
+        raise RuntimeError("Prompt registry not loaded.")
+    if condition not in _manifest:
+        raise KeyError(
+            f"MANIFEST ERROR: Condition '{condition}' not found in prompt_manifest.yaml. "
+            f"Available: {sorted(_manifest.keys())}"
+        )
+    return _manifest[condition]
+
+
+def get_all_conditions() -> dict[str, dict]:
+    """Return all condition specs from the manifest."""
+    if not _loaded:
+        raise RuntimeError("Prompt registry not loaded.")
+    return dict(_manifest)
+
+
 def get_all_components() -> dict[str, PromptComponent]:
     """Return all loaded components."""
     if not _loaded:
@@ -157,8 +185,9 @@ def is_loaded() -> bool:
 
 def _reset_for_testing():
     """Reset registry state. ONLY for test fixtures."""
-    global _components, _nudge_texts, _cge_instructions, _loaded
+    global _components, _nudge_texts, _cge_instructions, _manifest, _loaded
     _components = {}
     _nudge_texts = {}
     _cge_instructions = {}
+    _manifest = {}
     _loaded = False

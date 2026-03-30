@@ -29,6 +29,7 @@ _run_dir: Path | None = None
 _calls_dir: Path | None = None
 _flat_path: Path | None = None
 _call_counter: int = 0
+_call_counter_start: int = 0
 _enabled: bool = False
 
 
@@ -39,7 +40,7 @@ def init_call_logger(run_dir: Path) -> None:
         {run_dir}/calls/          directory
         {run_dir}/calls_flat.txt  empty file (append target)
     """
-    global _run_dir, _calls_dir, _flat_path, _call_counter, _enabled
+    global _run_dir, _calls_dir, _flat_path, _call_counter, _call_counter_start, _enabled
 
     _run_dir = Path(run_dir)
     _calls_dir = _run_dir / "calls"
@@ -47,18 +48,26 @@ def init_call_logger(run_dir: Path) -> None:
     _flat_path = _run_dir / "calls_flat.txt"
     # Touch flat file
     _flat_path.touch()
-    _call_counter = 0
+
+    # Resume support: find highest existing call ID to avoid overwriting
+    existing = [f.stem for f in _calls_dir.glob("*.json")]
+    if existing:
+        _call_counter = max(int(s) for s in existing if s.isdigit())
+        _log.info("Call logger resuming from call_id=%d (%d existing calls)", _call_counter, len(existing))
+    else:
+        _call_counter = 0
+    _call_counter_start = _call_counter
     _enabled = True
     _log.info("Call logger initialized: %s", _calls_dir)
 
 
 def close_call_logger() -> int:
-    """Close the call logger. Returns total call count."""
+    """Close the call logger. Returns number of calls made in this session."""
     global _enabled
-    count = _call_counter
+    session_count = _call_counter - _call_counter_start
     _enabled = False
-    _log.info("Call logger closed: %d calls logged", count)
-    return count
+    _log.info("Call logger closed: %d calls this session (%d total)", session_count, _call_counter)
+    return session_count
 
 
 def _next_call_id() -> int:
@@ -78,6 +87,7 @@ def _sanitize_path(name: str) -> str:
 # ============================================================
 
 _call_context: dict = {}
+_prompt_provenance: dict | None = None
 
 
 def set_call_context(**kwargs) -> None:
@@ -92,12 +102,41 @@ def set_call_context(**kwargs) -> None:
     _call_context = dict(kwargs)
 
 
+def set_prompt_provenance(rendered_prompt, variables: dict, condition: str | None = None,
+                          config_name: str | None = None) -> None:
+    """Set prompt assembly provenance for the next LLM call.
+
+    Called AFTER assembly_engine.build() returns, BEFORE call_model().
+    Stores enough data to reconstruct the exact prompt from logs alone.
+    """
+    import hashlib
+    global _prompt_provenance
+    _prompt_provenance = {
+        "component_names": list(rendered_prompt.component_names),
+        "component_hashes": list(rendered_prompt.component_hashes),
+        "variables": {k: v for k, v in variables.items()},
+        "variables_used": list(rendered_prompt.variables_used),
+        "plan_hash": rendered_prompt.plan_hash,
+        "final_prompt_hash": rendered_prompt.final_prompt_hash,
+        "condition": condition,
+        "config_name": config_name,
+    }
+
+
 def _consume_context() -> dict:
     """Read and clear the call context. Returns the context dict."""
     global _call_context
     ctx = _call_context
     _call_context = {}
     return ctx
+
+
+def _consume_provenance() -> dict | None:
+    """Read and clear prompt provenance. Returns the provenance dict or None."""
+    global _prompt_provenance
+    prov = _prompt_provenance
+    _prompt_provenance = None
+    return prov
 
 
 # ============================================================
@@ -125,6 +164,7 @@ def emit_call(
 
     call_id = _next_call_id()
     ctx = _consume_context()
+    prov = _consume_provenance()
     timestamp = datetime.now().isoformat()
 
     record = {
@@ -142,6 +182,7 @@ def emit_call(
         "response_length": len(response_raw),
         "elapsed_seconds": round(elapsed_seconds, 3),
         "error": error,
+        "prompt_assembly": prov,
     }
 
     # Write JSON file

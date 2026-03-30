@@ -29,7 +29,7 @@ from pathlib import Path
 from llm import call_model, get_model_config
 from parse import extract_code
 from evaluator import evaluate_output, compute_alignment
-from prompts import build_base_prompt, _format_code_files
+from prompts import _format_code_files
 
 _log = logging.getLogger("t3.retry")
 
@@ -214,7 +214,7 @@ def _compute_diff(old_code, new_code):
         "chars_changed": chars_changed,
         "hunks": hunks,
         "edit_dispersion": edit_dispersion,
-        "diff_text": "".join(diff[:50]),
+        "diff_text": "".join(diff),
     }
 
 
@@ -247,12 +247,12 @@ def _build_error_object(ev):
     elif not ex.get("ran"):
         category, message = "load", "could not load module"
     elif not ex.get("invariant_pass"):
-        category, message = "logic", "; ".join(reasons[:3])
+        category, message = "logic", "; ".join(reasons)
     elif not ex.get("mutation_pass"):
-        category, message = "spec", "; ".join(reasons[:3])
+        category, message = "spec", "; ".join(reasons)
     else:
         category = "unknown"
-        message = "; ".join(reasons[:3]) if reasons else "unknown"
+        message = "; ".join(reasons) if reasons else "unknown"
 
     return {
         "type": category,
@@ -695,7 +695,7 @@ def _compute_step_coverage(plan, code):
     per_step = []
     for step in plan["steps"]:
         impl = _step_implemented(step, code)
-        per_step.append({"step": step[:80], "implemented": impl})
+        per_step.append({"step": step, "implemented": impl})
     implemented = sum(1 for s in per_step if s["implemented"])
     coverage = implemented / len(plan["steps"])
     return round(coverage, 3), per_step
@@ -1010,58 +1010,10 @@ Respond with ONLY this JSON:
         return None
 
 
-# ============================================================
-# PROMPT BUILDERS
-# ============================================================
-
-_ALIGNMENT_EXTRA = """
-
-IMPORTANT: In the "plan" field of your JSON response, list each change as a separate step.
-Each step should specify which function you are changing and what you are changing.
-Example: ["In create_config: return DEFAULTS.copy() instead of DEFAULTS", "In reset: clear cache"]"""
-
-
-def _build_initial_prompt(case, use_alignment=False):
-    """Baseline prompt. Adds alignment emphasis if alignment mode."""
-    code_files = case["code_files_contents"]
-    base = build_base_prompt(case["task"], code_files)
-    if use_alignment:
-        return base + _ALIGNMENT_EXTRA
-    return base
-
-
-def _build_retry_prompt(
-    case,
-    original_code,
-    prev_code,
-    test_output,
-    critique,
-    contract,
-    adaptive_hint=None,
-    trajectory_context=None,
-    use_alignment=False,
-):
-    """Retry prompt with test feedback, critique, optional contract/hints."""
-    parts = [case["task"]]
-    parts.append(f"\n=== Original Code ===\n{original_code}")
-    parts.append(f"\n=== Your Previous Attempt ===\n```python\n{prev_code}\n```")
-    parts.append(f"\n=== Test Results (FAILED) ===\n{test_output}")
-    if critique:
-        parts.append(
-            f"\n=== Diagnosis ===\n{json.dumps(_clean_critique_for_log(critique), indent=2)}"
-        )
-    if contract:
-        parts.append(f"\n=== Your Intended Fix ===\n{json.dumps(contract, indent=2)}")
-    if adaptive_hint:
-        parts.append(f"\n=== Hint ===\n{adaptive_hint}")
-    if trajectory_context:
-        parts.append(f"\n=== Trajectory Feedback ===\n{trajectory_context}")
-    parts.append("\nFix the failing tests with minimal changes to your previous attempt.")
-    parts.append("Return the complete updated code.")
-    if use_alignment:
-        parts.append(_ALIGNMENT_EXTRA)
-    return "\n".join(parts)
-    # call_model() appends _JSON_OUTPUT_INSTRUCTION automatically
+# LEGACY PROMPT BUILDERS: DELETED
+# _ALIGNMENT_EXTRA → now in prompts/registry.yaml as reasoning__alignment_extra
+# _build_initial_prompt → replaced by inline AssemblyEngine calls in retry loop
+# _build_retry_prompt → replaced by inline construction in retry loop
 
 
 # ============================================================
@@ -1089,7 +1041,7 @@ def _write_iteration_log(case, model, k, max_iterations, condition, prompt, raw,
         "prompt_length": len(prompt),
         "raw_response_length": len(raw),
         "parsed": {
-            "reasoning": reasoning_text[:200] if isinstance(reasoning_text, str) else "",
+            "reasoning": reasoning_text if isinstance(reasoning_text, str) else "",
             "code_length": len(code_text) if isinstance(code_text, str) else 0,
             "parse_error": parsed.get("parse_error"),
         },
@@ -1219,21 +1171,40 @@ def run_retry_harness(
             _log.warning("TIMEOUT for %s after %.1fs at iteration %d", case["id"], elapsed, k)
             break
 
-        # --- Generate ---
+        # --- Generate (via AssemblyEngine for provenance tracking) ---
+        from assembly_engine import build as _assembly_build
+        from prompts import _format_code_files as _fmt_cf
+        _retry_cb = _fmt_cf(case["code_files_contents"])
+        _retry_base_vars = {"task": case["task"], "code_files_block": _retry_cb}
+
         if k == 0:
-            prompt = _build_initial_prompt(case, use_alignment=use_alignment)
+            from assembly_engine import resolve_nudge
+            if use_alignment:
+                _align_text = resolve_nudge("reasoning__alignment_extra")
+                prompt = _assembly_build(["task_and_code", "nudge_reasoning"],
+                                          {**_retry_base_vars, "reasoning_text": _align_text}).final_prompt
+            else:
+                prompt = _assembly_build(["task_and_code"], _retry_base_vars).final_prompt
         else:
-            prompt = _build_retry_prompt(
-                case,
-                original_code,
-                prev_code,
-                test_output,
-                critique,
-                contract,  # None if use_contract=False
-                adaptive_hint=adaptive_hint,
-                trajectory_context=trajectory_context,
-                use_alignment=use_alignment,
-            )
+            # Build retry prompt inline (no legacy builder dependency)
+            _parts = [case["task"]]
+            _parts.append(f"\n=== Original Code ===\n{original_code}")
+            _parts.append(f"\n=== Your Previous Attempt ===\n```python\n{prev_code}\n```")
+            _parts.append(f"\n=== Test Results (FAILED) ===\n{test_output}")
+            if critique:
+                _parts.append(f"\n=== Diagnosis ===\n{json.dumps(_clean_critique_for_log(critique), indent=2)}")
+            if contract:
+                _parts.append(f"\n=== Your Intended Fix ===\n{json.dumps(contract, indent=2)}")
+            if adaptive_hint:
+                _parts.append(f"\n=== Hint ===\n{adaptive_hint}")
+            if trajectory_context:
+                _parts.append(f"\n=== Trajectory Feedback ===\n{trajectory_context}")
+            _parts.append("\nFix the failing tests with minimal changes to your previous attempt.")
+            _parts.append("Return the complete updated code.")
+            if use_alignment:
+                _align = resolve_nudge("reasoning__alignment_extra")
+                _parts.append(_align)
+            prompt = "\n".join(_parts)
 
         iter_start = time.monotonic()
         from call_logger import set_call_context
@@ -1241,7 +1212,9 @@ def run_retry_harness(
         set_call_context(
             phase="generation", case_id=case["id"], condition=condition, attempt_index=k
         )
-        raw = call_model(prompt, model=model)
+        # Append output instruction via AssemblyEngine component
+        _oi = _assembly_build(["output_instruction_v1"], {}).final_prompt
+        raw = call_model(prompt + _oi, model=model, raw=True)
         model_call_count += 1
         iter_elapsed = time.monotonic() - iter_start
         if iter_elapsed > MAX_ITERATION_SECONDS:
@@ -1447,7 +1420,7 @@ def run_retry_harness(
                                 f"Your plan has {len(alignment['per_step'])} steps, "
                                 f"but only {alignment['step_coverage']:.0%} are implemented.\n\n"
                                 f"Missing steps:\n"
-                                + "\n".join(f"- {s}" for s in missing[:3])
+                                + "\n".join(f"- {s}" for s in missing)
                                 + "\n\nImplement ALL steps in your code."
                             )
 
@@ -1687,7 +1660,7 @@ def run_retry_harness(
         "error_trajectory_detailed": [
             {
                 "category": e["error"]["category"],
-                "message": e["error"]["message"][:200],
+                "message": e["error"]["message"],
                 "invariant": (
                     e["critique"].get("invariant_violated")
                     if e.get("critique") and e.get("critique_valid")

@@ -2,16 +2,18 @@
 
 Responsibilities:
   1. Route to execution-based evaluation (THE ONLY behavioral test)
-  2. LLM-based classification of code_correct + reasoning_correct
-  3. Derived categories: true_success, leg_true, lucky_fix, true_failure
+  2. LLM-based classification of reasoning quality (multi-dimensional)
+  3. Derived categories via compute_category from reasoning.py
   4. Evidence usage scoring (SCM experiment)
 
 TWO sources of truth:
   - exec_evaluate: runs code, tests invariants → behavioral pass/fail
-  - llm_classify: LLM judge → code_correct, reasoning_correct, failure_type
+  - llm_classify: LLM judge → 4 reasoning dimensions + confidence + failure_type
 
 There are NO heuristic keyword-matching classifiers. ALL classification
-comes from the LLM evaluator. This is a core measurement decision.
+comes from the LLM evaluator and reasoning.py derivation logic.
+
+Schema version: 2 (structured reasoning, multi-dimensional classifier).
 """
 
 import json
@@ -22,121 +24,23 @@ import re
 from exec_eval import exec_evaluate
 
 from llm import call_model
-from failure_classifier import FAILURE_TYPE_SET
+
+from reasoning import (
+    parse_classify_output as _parse_classify_dims,
+    compute_reasoning_correct,
+    compute_category,
+    should_run_grounded,
+    VALID_FAILURE_TYPES,
+    NULL_CLASSIFIER_RESULT,
+    REASONING_SCHEMA_VERSION,
+)
 
 _log = logging.getLogger("t3.evaluator")
 
 
 # ============================================================
-# LLM CLASSIFIER — replaces all heuristic reasoning detection
+# LLM CLASSIFIER — multi-dimensional reasoning evaluation
 # ============================================================
-
-_CLASSIFY_PROMPT = """You are evaluating whether a developer's REASONING correctly identifies the root cause of a software bug.
-
-You are ONLY evaluating reasoning quality. You are NOT judging whether the code is correct.
-The code may be correct or incorrect — that is NOT your task.
-
-Do NOT assume the code is correct or incorrect based on appearance.
-Do NOT infer correctness from likely execution success.
-Focus ONLY on whether the reasoning correctly identifies the bug mechanism and proposes a fix consistent with that mechanism.
-
-# Your Task
-
-Determine TWO things:
-
-1. **reasoning_correct**: Does the reasoning correctly identify the TRUE failure mechanism?
-   - TRUE if the reasoning identifies the correct root cause AND explains how the bug manifests
-   - FALSE if the reasoning is wrong, vague, irrelevant, or identifies the wrong mechanism
-
-2. **failure_type**: What type of failure mechanism does this bug involve?
-   Choose EXACTLY one from:
-   {failure_types}
-
-# Inputs
-
-## Task Description
-{task}
-
-## Developer's Reasoning
-{reasoning}
-
-## Code Produced by Developer
-```python
-{code}
-```
-
-# Rules
-- Evaluate ONLY reasoning quality — whether the developer understood the bug
-- Do NOT judge whether the code would pass or fail tests
-- A developer can have perfect reasoning but write broken code, or vice versa
-- Be conservative: only YES if the reasoning clearly identifies the correct mechanism
-- Vague reasoning ("I fixed the bug") is NOT correct reasoning
-- If uncertain, answer NO
-
-# Output
-Return EXACTLY one line:
-<REASONING_CORRECT> ; <FAILURE_TYPE>
-
-Where REASONING_CORRECT is YES or NO.
-
-Examples:
-YES ; HIDDEN_DEPENDENCY
-NO ; INVARIANT_VIOLATION
-YES ; TEMPORAL_ORDERING
-NO ; UNKNOWN
-
-Return ONLY this one line. No explanation."""
-
-_VALID_BOOLS = frozenset(["YES", "NO"])
-
-
-def parse_classify_output(raw: str) -> dict:
-    """Parse LLM reasoning classifier output. Strict contract.
-
-    Expected format: REASONING_CORRECT ; FAILURE_TYPE
-    Any deviation → parse_error, fields set to None.
-    NEVER silently defaults.
-    """
-    result = {
-        "reasoning_correct": None,
-        "failure_type": None,
-        "raw": raw,
-        "parse_error": None,
-    }
-
-    if not raw or not raw.strip():
-        result["parse_error"] = "empty_response"
-        return result
-
-    nonempty_lines = [line.strip() for line in raw.strip().splitlines() if line.strip()]
-
-    if len(nonempty_lines) == 0:
-        result["parse_error"] = "no_nonempty_lines"
-        return result
-
-    if len(nonempty_lines) > 1:
-        result["parse_error"] = f"extra_lines:got_{len(nonempty_lines)}"
-        return result
-
-    parts = nonempty_lines[0].split(";")
-    if len(parts) != 2:
-        result["parse_error"] = f"expected_2_parts_got_{len(parts)}"
-        return result
-
-    reasoning_raw = parts[0].strip().upper()
-    type_raw = parts[1].strip().upper().replace(" ", "_")
-
-    if reasoning_raw not in _VALID_BOOLS:
-        result["parse_error"] = f"invalid_reasoning_correct:{reasoning_raw}"
-        return result
-
-    if type_raw not in FAILURE_TYPE_SET:
-        result["parse_error"] = f"invalid_failure_type:{type_raw}"
-        return result
-
-    result["reasoning_correct"] = reasoning_raw == "YES"
-    result["failure_type"] = type_raw
-    return result
 
 
 def _get_eval_model() -> str:
@@ -146,237 +50,328 @@ def _get_eval_model() -> str:
     return get_config().models.evaluator.name
 
 
-def classify_parse_category(
-    reasoning: str, parse_error: str | None, raw_fallback: bool = False
-) -> str:
-    """Determine parse category for reasoning input.
-
-    Returns one of: CLEAN, REASONING_LOST, CODE_LOST, PARTIAL_JSON_RECOVERED,
-    MALFORMED_BUT_RECOVERED, STRUCTURE_MISSING.
-    """
-    if not parse_error and reasoning and reasoning.strip():
-        return "CLEAN"
-    if parse_error and (not reasoning or not reasoning.strip()):
-        if "STRUCTURE_MISSING" in str(parse_error) or "schema" in str(parse_error).lower():
-            return "STRUCTURE_MISSING"
-        if raw_fallback:
-            return "CODE_LOST"
-        return "REASONING_LOST"
-    if parse_error and reasoning and reasoning.strip():
-        if "lenient" in str(parse_error):
-            return "PARTIAL_JSON_RECOVERED"
-        return "MALFORMED_BUT_RECOVERED"
-    if not parse_error and (not reasoning or not reasoning.strip()):
-        return "CLEAN"
-    return "CLEAN"
-
-
-# Categories where classification is disallowed (reasoning is unrecoverable)
-_CLASSIFICATION_DISALLOWED = frozenset(
-    {
-        "REASONING_LOST",
-        "CODE_LOST",
-        "STRUCTURE_MISSING",
-    }
-)
-
-
 def llm_classify(
     case: dict,
     code: str,
-    reasoning: str,
+    reasoning_obj: dict,
+    reasoning_validation: dict,
     eval_model: str | None = None,
-    parse_error: str | None = None,
-    raw_fallback: bool = False,
 ) -> dict:
     """Run the LLM reasoning classifier on an attempt.
 
-    Evaluates ONLY reasoning correctness. Does NOT judge code correctness.
+    Evaluates ONLY reasoning correctness via 4 dimensions. Does NOT judge code correctness.
     Code correctness comes from execution tests — never from this classifier.
 
-    The prompt deliberately excludes execution results to prevent bias.
-
-    PARSE GATE (Fix D): If reasoning is empty/missing due to a parse failure,
-    classification is skipped and reasoning_correct=None is returned. Parse
-    failures MUST NOT produce reasoning_correct=False.
+    REASONING GATE: If reasoning_present is False (from validate_reasoning),
+    classification is skipped. Returns NULL_CLASSIFIER_RESULT.
 
     Args:
         case: benchmark case dict (has "task", "failure_mode", "id")
         code: extracted code from the model's response
-        reasoning: extracted reasoning from the model's response
+        reasoning_obj: structured reasoning {root_cause, failure_mechanism, broken_invariant, fix_strategy}
+        reasoning_validation: from validate_reasoning() — has reasoning_attempted, reasoning_present
         eval_model: model to use for classifier. If None, uses default.
-        parse_error: parse error from upstream parsing, if any.
-        raw_fallback: True if the response hit the raw_fallback parser tier.
 
     Returns dict with:
-        reasoning_correct: bool or None (None on parse failure OR reasoning lost)
-        failure_type: str or None
-        classify_raw: str or None
+        mechanism_identified, invariant_identified, fix_alignment, reasoning_code_alignment: YES/PARTIAL/NO or None
+        failure_type, failure_type_raw: str or None
+        confidence: HIGH/MEDIUM/LOW or None
+        explanation: str or None
         classify_parse_error: str or None
-        eval_model_actual: str — the model actually used for classification
-        parse_category: str — the parse category of the reasoning input
+        classify_raw: str or None
+        classifier_prompt: str or None
+        eval_model_actual: str or None
+        classifier_mode: str
+        reasoning_correct_mode: str
+        reasoning_correct: bool or None
     """
-    # Determine parse category
-    parse_cat = classify_parse_category(reasoning, parse_error, raw_fallback)
-
-    # PARSE GATE: if reasoning is unrecoverable, do NOT classify.
-    # Return None instead of False. This is a correctness fix.
-    if parse_cat in _CLASSIFICATION_DISALLOWED:
-        _log.warning(
-            "PARSE GATE: skipping classification for case %s — "
-            "parse_category=%s, parse_error=%s, reasoning empty=%s",
-            case.get("id", "?"),
-            parse_cat,
-            parse_error,
-            not (reasoning and reasoning.strip()),
-        )
-        return {
-            "reasoning_correct": None,
-            "failure_type": None,
-            "classify_raw": None,
-            "classify_parse_error": f"GATED:{parse_cat}",
-            "classifier_prompt": None,
-            "eval_model_actual": None,
-            "parse_category": parse_cat,
-        }
-
-    # Truncation limits from config
     from experiment_config import get_config
 
-    eval_cfg = get_config().models.evaluator
+    config = get_config()
+    classifier_mode = config.evaluation.classifier_mode
+    reasoning_correct_mode = config.evaluation.reasoning_correct_mode
+
+    # REASONING GATE: if reasoning is not present, skip classification entirely
+    if not reasoning_validation.get("reasoning_present", False):
+        return {
+            **NULL_CLASSIFIER_RESULT,
+            "classify_raw": None,
+            "classifier_prompt": None,
+            "eval_model_actual": None,
+            "classifier_mode": classifier_mode,
+            "reasoning_correct_mode": reasoning_correct_mode,
+            "reasoning_correct": None,
+        }
+
+    # Build classifier prompt with structured reasoning fields.
+    # Empty fields are marked "[COULD NOT EXTRACT]" — never sent as blank strings.
+    # Blank strings silently mislead the classifier into thinking reasoning is absent.
+    eval_cfg = config.models.evaluator
+
+    def _field_or_missing(val):
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        if isinstance(val, dict) and val:
+            return str(val)
+        return "[COULD NOT EXTRACT]"
+
     _cls_vars = {
-        "failure_types": ", ".join(sorted(FAILURE_TYPE_SET)),
+        "failure_types": ", ".join(sorted(VALID_FAILURE_TYPES)),
         "task": case.get("task", "")[: eval_cfg.max_task_chars],
         "code": (code or "")[: eval_cfg.max_code_chars],
-        "reasoning": (reasoning or "")[: eval_cfg.max_reasoning_chars],
+        "root_cause": _field_or_missing(reasoning_obj.get("root_cause")),
+        "failure_mechanism": _field_or_missing(reasoning_obj.get("failure_mechanism")),
+        "broken_invariant": _field_or_missing(reasoning_obj.get("broken_invariant")),
+        "fix_strategy": _field_or_missing(reasoning_obj.get("fix_strategy")),
+        "self_check": _field_or_missing(reasoning_obj.get("self_check")),
+        "risk_check": _field_or_missing(reasoning_obj.get("risk_check")),
+        "classifier_mode": classifier_mode,
     }
 
-    # New path: AssemblyEngine
+    # Grounded mode: add ground truth if available
+    if classifier_mode == "grounded":
+        can_ground, reason = should_run_grounded(case, classifier_mode)
+        if can_ground:
+            _cls_vars["ground_truth_failure_mode"] = case.get("failure_mode", "")
+            _cls_vars["ground_truth_trap"] = case.get("trap_description", "")
+            _cls_vars["ground_truth_invariant"] = case.get("ground_truth_invariant", "")
+        else:
+            # Fall back to blind if ground truth is missing
+            _cls_vars["classifier_mode"] = "blind"
+
     from assembly_engine import build as _assembly_build
+
     _rendered = _assembly_build(["classify_reasoning"], _cls_vars)
     prompt = _rendered.final_prompt
 
-    # Evaluator model from config — no hardcoded fallback
     model = eval_model or _get_eval_model()
 
     try:
         from call_logger import set_call_context
 
         set_call_context(
-            phase="classifier", case_id=case.get("id", "?"), condition=case.get("_condition", "?")
+            phase="classifier",
+            case_id=case.get("id", "?"),
+            condition=case.get("_condition", "?"),
         )
         raw = call_model(prompt, model=model, raw=True)
-        parsed = parse_classify_output(raw)
+        dims = _parse_classify_dims(raw)
+
+        # Derive reasoning_correct from classifier dimensions
+        reasoning_correct = None
+        if dims.get("parse_error") is None:
+            schema_matched = reasoning_validation.get("schema_matched", "baseline")
+            reasoning_correct = compute_reasoning_correct(dims, reasoning_correct_mode, schema_matched=schema_matched)
+
         return {
-            "reasoning_correct": parsed["reasoning_correct"],
-            "failure_type": parsed["failure_type"],
+            "mechanism_identified": dims.get("mechanism_identified"),
+            "invariant_identified": dims.get("invariant_identified"),
+            "causal_chain_complete": dims.get("causal_chain_complete"),
+            "fix_alignment": dims.get("fix_alignment"),
+            "reasoning_code_alignment": dims.get("reasoning_code_alignment"),
+            "failure_type": dims.get("failure_type"),
+            "failure_type_raw": dims.get("failure_type_raw"),
+            "confidence": dims.get("confidence"),
+            "counterfactual": dims.get("counterfactual"),
+            "evidence": dims.get("evidence"),
+            "judgment": dims.get("judgment"),
+            "explanation": dims.get("explanation"),
+            "classify_parse_error": dims.get("parse_error"),
             "classify_raw": raw,
-            "classify_parse_error": parsed["parse_error"],
             "classifier_prompt": prompt,
             "eval_model_actual": model,
-            "parse_category": parse_cat,
+            "classifier_mode": classifier_mode,
+            "reasoning_correct_mode": reasoning_correct_mode,
+            "reasoning_correct": reasoning_correct,
         }
     except Exception as e:
         _log.error("LLM classifier call failed: %s", e)
         return {
-            "reasoning_correct": None,
-            "failure_type": None,
+            **NULL_CLASSIFIER_RESULT,
             "classify_raw": None,
             "classify_parse_error": f"exception:{e}",
             "classifier_prompt": prompt,
             "eval_model_actual": model,
-            "parse_category": parse_cat,
+            "classifier_mode": classifier_mode,
+            "reasoning_correct_mode": reasoning_correct_mode,
+            "reasoning_correct": None,
         }
 
 
 # ============================================================
-# DERIVED CATEGORIES (pure computation — no LLM, no heuristics)
+# MAIN DISPATCH
 # ============================================================
 
 
-def compute_category(code_correct: bool | None, reasoning_correct: bool | None) -> str:
-    """Compute the alignment category.
+def evaluate_output(case: dict, parsed: dict, eval_model: str | None = None) -> dict:
+    """Evaluate model output from a canonical ParsedResponse.
 
-    code_correct comes from execution tests (ground truth).
-    reasoning_correct comes from LLM classifier.
+    parsed MUST contain: code, raw_output, parse_error, _raw_fallback,
+    reasoning_obj, reasoning_validation.
 
-    Returns one of: true_success, leg, lucky_fix, true_failure, unclassified.
-    "unclassified" ONLY if reasoning classifier failed (None).
+    Pipeline:
+      1. exec_evaluate(case, parsed["code"]) → behavioral pass/fail
+      2. llm_classify(structured reasoning) → multi-dimensional classification
+      3. compute_category → 8 explicit categories
+      4. Evidence metrics on parsed["raw_output"] (SCM cases only)
+      5. Propagate parse_error and _raw_fallback into result
     """
-    if code_correct is None or reasoning_correct is None:
-        return "unclassified"
-    if reasoning_correct and code_correct:
-        return "true_success"
-    if reasoning_correct and not code_correct:
-        return "leg"
-    if not reasoning_correct and code_correct:
-        return "lucky_fix"
-    return "true_failure"
+    code = parsed["code"]
+    raw_output = parsed["raw_output"]
+    reasoning_obj = parsed.get("reasoning_obj", {})
+    reasoning_validation = parsed.get("reasoning_validation", {})
+
+    # All-UNCHANGED is a legal reconstruction outcome: SUCCESS + empty code.
+    if parsed.get("_reconstruction_status") == "SUCCESS" and (not code or not code.strip()):
+        _log.info(
+            "RECONSTRUCTION SUCCESS with empty code for case %s — "
+            "model marked all files UNCHANGED.",
+            case.get("id", "?"),
+        )
+
+    # Step 1: execution-based behavioral test — SOLE authority for code correctness
+    result = exec_evaluate(case, code)
+    exec_pass = result["pass"]
+    result["code_correct"] = exec_pass
+
+    # Step 2: LLM reasoning classifier — structured, multi-dimensional
+    classify = llm_classify(
+        case, code, reasoning_obj, reasoning_validation, eval_model=eval_model
+    )
+
+    # Merge classifier results into ev
+    result["reasoning_correct"] = classify.get("reasoning_correct")
+    result["mechanism_identified"] = classify.get("mechanism_identified")
+    result["invariant_identified"] = classify.get("invariant_identified")
+    result["causal_chain_complete"] = classify.get("causal_chain_complete")
+    result["fix_alignment"] = classify.get("fix_alignment")
+    result["reasoning_code_alignment"] = classify.get("reasoning_code_alignment")
+    result["failure_type"] = classify.get("failure_type")
+    result["failure_type_raw"] = classify.get("failure_type_raw")
+    result["confidence"] = classify.get("confidence")
+    result["counterfactual"] = classify.get("counterfactual")
+    result["evidence"] = classify.get("evidence")
+    result["judgment"] = classify.get("judgment")
+    result["explanation"] = classify.get("explanation")
+    result["classify_raw"] = classify.get("classify_raw")
+    result["classify_parse_error"] = classify.get("classify_parse_error")
+    result["classifier_prompt"] = classify.get("classifier_prompt")
+    result["eval_model_intended"] = eval_model
+    result["eval_model_actual"] = classify.get("eval_model_actual")
+    result["classifier_mode"] = classify.get("classifier_mode")
+    result["reasoning_correct_mode"] = classify.get("reasoning_correct_mode")
+
+    # Step 3: Category — 8 explicit categories via reasoning.py
+    reasoning_present = reasoning_validation.get("reasoning_present", False)
+    parse_failed = bool(parsed.get("_raw_fallback", False))
+
+    category = compute_category(
+        code_correct=exec_pass,
+        reasoning_correct=classify.get("reasoning_correct"),
+        reasoning_present=reasoning_present,
+        classifier_parse_error=classify.get("classify_parse_error"),
+        parse_failed=parse_failed,
+    )
+    result["category"] = category
+
+    # alignment dict for backward compatibility
+    result["alignment"] = {
+        "category": category,
+        "code_correct": exec_pass,
+        "reasoning_correct": classify.get("reasoning_correct"),
+    }
+
+    # Reasoning validation metadata
+    result["reasoning_attempted"] = reasoning_validation.get("reasoning_attempted", False)
+    result["reasoning_present"] = reasoning_present
+    result["reasoning_lengths"] = reasoning_validation.get("reasoning_lengths", {})
+
+    # Schema version
+    result["reasoning_schema_version"] = REASONING_SCHEMA_VERSION
+
+    # Backward-compat fields
+    result["identified_correct_issue"] = classify.get("reasoning_correct") or False
+    result["final_output_correct"] = exec_pass
+    result["reasoning_action_gap"] = (classify.get("reasoning_correct") is True) and (
+        not exec_pass
+    )
+
+    # Step 4: Evidence metrics
+    ev_metrics = compute_evidence_metrics(case, raw_output)
+    result.update(ev_metrics)
+
+    if ev_metrics["evidence_usage_score"] is not None:
+        result["evidence_action_gap"] = (
+            ev_metrics["evidence_usage_score"] >= 2 and not result["pass"]
+        )
+        r_gap = 1 if result["reasoning_action_gap"] else 0
+        e_gap = 1 if result["evidence_action_gap"] else 0
+        result["delta_gap"] = r_gap - e_gap
+
+    # Step 5: Propagate parse metadata
+    result["parse_error"] = parsed["parse_error"]
+    result["_raw_fallback"] = parsed["_raw_fallback"]
+
+    return result
+
+
+# ============================================================
+# BACKWARD COMPATIBILITY — compute_alignment (DEPRECATED)
+# ============================================================
+# Used by retry_harness.py. Will be removed when retry_harness is updated.
 
 
 def compute_alignment(code_correct: bool | None, reasoning_correct: bool | None) -> dict:
-    """Compute alignment dict.
+    """DEPRECATED: use compute_category from reasoning.py directly.
 
-    code_correct: from execution tests (ground truth).
-    reasoning_correct: from LLM reasoning classifier.
+    Kept for backward compatibility with retry_harness.
     """
-    category = compute_category(code_correct, reasoning_correct)
+    if code_correct is None or reasoning_correct is None:
+        cat = "unclassified"
+    elif reasoning_correct and code_correct:
+        cat = "true_success"
+    elif reasoning_correct and not code_correct:
+        cat = "leg"
+    elif not reasoning_correct and code_correct:
+        cat = "lucky_fix"
+    else:
+        cat = "true_failure"
     return {
-        "category": category,
+        "category": cat,
         "code_correct": code_correct,
         "reasoning_correct": reasoning_correct,
-        "leg_true": category == "leg",
-        "lucky_fix": category == "lucky_fix",
-        "true_success": category == "true_success",
-        "true_failure": category == "true_failure",
+        "leg_true": cat == "leg",
+        "lucky_fix": cat == "lucky_fix",
+        "true_success": cat == "true_success",
+        "true_failure": cat == "true_failure",
     }
 
 
 # ============================================================
 # BACKWARD COMPATIBILITY — heuristic reasoning detection (DEPRECATED)
 # ============================================================
+# Used by retry_harness.py for heuristic_signal logging only.
+# NOT used for any classification decision.
 
-# _has and _low are still importable for any code that needs them,
-# but they are NOT used for classification decisions.
 from eval_cases import _has, _low  # noqa: F401
 
-# _REASONING_SIGNALS is retained ONLY for the retry_harness heuristic_signal
-# (which is logged but NOT used for classification decisions).
 _REASONING_SIGNALS = {
     "HIDDEN_DEPENDENCY": [
-        "overwrite",
-        "cache_put_if_absent.*different",
-        "not interchangeable",
-        "stale",
-        "live.*write",
-        "always.*overwrite",
-        "won't overwrite",
+        "overwrite", "cache_put_if_absent.*different", "not interchangeable",
+        "stale", "live.*write", "always.*overwrite", "won't overwrite",
     ],
     "TEMPORAL_ORDERING": ["order", "before", "after", "sequence", "timing", "first"],
     "TEMPORAL_CAUSAL_ERROR": [
-        "original data",
-        "raw data",
-        "before transform",
-        "different keys",
-        "different semantic",
-        "not.*replacement",
+        "original data", "raw data", "before transform", "different keys",
+        "different semantic", "not.*replacement",
     ],
     "INVARIANT_VIOLATION": [
-        "partial failure",
-        "money.*lost",
-        "rollback",
-        "inconsistent",
-        "atomicity",
-        "failure window",
-        "debit.*credit",
+        "partial failure", "money.*lost", "rollback", "inconsistent",
+        "atomicity", "failure window", "debit.*credit",
     ],
     "STATE_SEMANTIC_VIOLATION": [
-        "frozen",
-        "get_committed_total",
-        "preview",
-        "stage.*without.*commit",
-        "none.*not.*zero",
-        "returns none",
+        "frozen", "get_committed_total", "preview", "stage.*without.*commit",
+        "none.*not.*zero", "returns none",
     ],
     "RACE_CONDITION": ["race", "lock", "concurren", "thread.*safe"],
     "IDEMPOTENCY_VIOLATION": ["idempoten", "accumulate", "double", "not.*safe.*retry"],
@@ -408,14 +403,42 @@ _REASONING_SIGNALS = {
 
 
 def _detected_correct_reasoning(case: dict, output: str) -> bool:
-    """DEPRECATED: heuristic keyword matching for reasoning detection.
-
-    Retained ONLY for backward compatibility with retry_harness heuristic_signal.
-    This is NOT used for any classification decision in evaluate_output.
-    The LLM classifier (llm_classify) is the sole source of truth.
-    """
+    """DEPRECATED: heuristic keyword matching. Used ONLY by retry_harness."""
     signals = _REASONING_SIGNALS.get(case.get("failure_mode", ""), [])
     return len(_has(output, signals)) >= 1
+
+
+# DEPRECATED: kept for test_evaluator_fixes.py backward compat
+_VALID_BOOLS = frozenset(["YES", "NO"])
+
+_CLASSIFICATION_DISALLOWED = frozenset(
+    {"REASONING_LOST", "CODE_LOST", "STRUCTURE_MISSING"}
+)
+
+
+def classify_parse_category(
+    reasoning: str, parse_error: str | None, raw_fallback: bool = False
+) -> str:
+    """DEPRECATED: replaced by reasoning_validation.reasoning_present."""
+    if not parse_error and reasoning and reasoning.strip():
+        return "CLEAN"
+    if parse_error and (not reasoning or not reasoning.strip()):
+        if "STRUCTURE_MISSING" in str(parse_error) or "schema" in str(parse_error).lower():
+            return "STRUCTURE_MISSING"
+        if raw_fallback:
+            return "CODE_LOST"
+        return "REASONING_LOST"
+    if parse_error and reasoning and reasoning.strip():
+        if "lenient" in str(parse_error):
+            return "PARTIAL_JSON_RECOVERED"
+        return "MALFORMED_BUT_RECOVERED"
+    if not parse_error and (not reasoning or not reasoning.strip()):
+        return "CLEAN"
+    return "CLEAN"
+
+
+# Re-export FAILURE_TYPE_SET for backward compat (used by test_v2_bridge.py)
+from failure_classifier import FAILURE_TYPE_SET  # noqa: F401
 
 
 # ============================================================
@@ -538,17 +561,8 @@ def _classify_id_usage(vid: str, definition: str, output: str) -> str:
         has_claim = any(
             w in window
             for w in [
-                "writes",
-                "reads",
-                "sets",
-                "returns",
-                "calls",
-                "checks",
-                "overwrites",
-                "always",
-                "never",
-                "must",
-                "not",
+                "writes", "reads", "sets", "returns", "calls", "checks",
+                "overwrites", "always", "never", "must", "not",
             ]
         )
         if not has_claim:
@@ -564,96 +578,3 @@ def _classify_id_usage(vid: str, definition: str, output: str) -> str:
                 return "incorrect"
         return "correct"
     return "uncertain"
-
-
-# ============================================================
-# MAIN DISPATCH
-# ============================================================
-
-
-def evaluate_output(case: dict, parsed: dict, eval_model: str | None = None) -> dict:
-    """Evaluate model output from a canonical ParsedResponse.
-
-    parsed MUST contain: code, reasoning, raw_output, parse_error, _raw_fallback.
-    This function does NOT parse raw output. Parsing happens once at the boundary.
-
-    Pipeline:
-      1. exec_evaluate(case, parsed["code"]) → behavioral pass/fail
-      2. llm_classify(... parsed["code"], parsed["reasoning"]) → classification
-      3. Derive categories: true_success, leg, lucky_fix, true_failure
-      4. Evidence metrics on parsed["raw_output"] (SCM cases only)
-      5. Propagate parse_error and _raw_fallback into result
-    """
-    code = parsed["code"]
-    reasoning = parsed["reasoning"]
-    raw_output = parsed["raw_output"]
-
-    # All-UNCHANGED is a legal reconstruction outcome: SUCCESS + empty code.
-    # The model believes original code is correct. exec_evaluate will handle it
-    # (empty code → "no extractable code" → pass=False).
-    if parsed.get("_reconstruction_status") == "SUCCESS" and (not code or not code.strip()):
-        _log.info(
-            "RECONSTRUCTION SUCCESS with empty code for case %s — "
-            "model marked all files UNCHANGED.",
-            case.get("id", "?"),
-        )
-
-    # Step 1: execution-based behavioral test — SOLE authority for code correctness
-    result = exec_evaluate(case, code)
-    exec_pass = result["pass"]
-
-    # Step 2: LLM reasoning classifier — ONLY judges reasoning, NOT code
-    # Pass parse_error and _raw_fallback for the parse gate (Fix D)
-    classify = llm_classify(
-        case,
-        code,
-        reasoning,
-        eval_model=eval_model,
-        parse_error=parsed.get("parse_error"),
-        raw_fallback=parsed.get("_raw_fallback", False),
-    )
-
-    # code_correct comes from EXECUTION, never from classifier
-    result["code_correct"] = exec_pass
-    result["reasoning_correct"] = classify["reasoning_correct"]
-    result["failure_type"] = classify["failure_type"]
-    result["classify_raw"] = classify["classify_raw"]
-    result["classify_parse_error"] = classify["classify_parse_error"]
-    result["classifier_prompt"] = classify.get("classifier_prompt")
-    result["eval_model_intended"] = eval_model
-    result["eval_model_actual"] = classify.get("eval_model_actual")
-    result["parse_category"] = classify.get("parse_category")
-
-    # Classifier's code opinion — logged for diagnostics only, NEVER used in metrics
-    classifier_code_correct = classify.get("classifier_code_correct")
-    result["classifier_code_correct"] = classifier_code_correct
-
-    # Disagreement detection
-    result["classifier_disagreement"] = None
-    result["classifier_disagreement_type"] = None
-
-    # Step 3: Derive categories — uses exec_pass for code, classifier for reasoning
-    result["alignment"] = compute_alignment(exec_pass, classify["reasoning_correct"])
-
-    # Backward-compat fields
-    result["identified_correct_issue"] = classify["reasoning_correct"] or False
-    result["final_output_correct"] = exec_pass
-    result["reasoning_action_gap"] = (classify["reasoning_correct"] is True) and (not exec_pass)
-
-    # Step 4: Evidence metrics
-    ev_metrics = compute_evidence_metrics(case, raw_output)
-    result.update(ev_metrics)
-
-    if ev_metrics["evidence_usage_score"] is not None:
-        result["evidence_action_gap"] = (
-            ev_metrics["evidence_usage_score"] >= 2 and not result["pass"]
-        )
-        r_gap = 1 if result["reasoning_action_gap"] else 0
-        e_gap = 1 if result["evidence_action_gap"] else 0
-        result["delta_gap"] = r_gap - e_gap
-
-    # Step 5: Propagate parse metadata
-    result["parse_error"] = parsed["parse_error"]
-    result["_raw_fallback"] = parsed["_raw_fallback"]
-
-    return result

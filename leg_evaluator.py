@@ -24,73 +24,8 @@ _VALID_VERDICTS = frozenset(["YES", "NO"])
 # EVALUATOR PROMPTS
 # ============================================================
 
-_CRIT_LITE_BLIND_PROMPT = """You are evaluating whether a developer's reasoning correctly identifies the ROOT CAUSE of a code failure.
-
-You are ONLY evaluating whether the reasoning correctly identifies the failure mechanism. You are NOT evaluating code quality, style, or whether the fix works.
-
-# Inputs
-
-## Code (FAILED)
-```python
-{code}
-```
-
-## Test Failure
-Category: {error_category}
-Message: {error_message}
-Failed assertions:
-{test_reasons}
-
-## Developer's Reasoning
-{reasoning}
-
-# Task
-
-## Phase 1: Evaluate reasoning correctness
-1. Does the reasoning identify the type of failure?
-2. Does the reasoning explain HOW the failure occurs (the mechanism)?
-3. Does the reasoning connect the mechanism to the observed test failure?
-
-## Phase 2: Infer failure type
-Based on the code, test failure, and reasoning, classify the failure.
-
-Choose EXACTLY one:
-- TEMPORAL_ORDERING
-- HIDDEN_DEPENDENCY
-- INVARIANT_VIOLATION
-- PARTIAL_STATE_UPDATE
-- RETRY_LOGIC_BUG
-- EDGE_CASE_MISSED
-- LOGGING_INCONSISTENCY
-- UNKNOWN
-
-## Phase 3: Verdict
-- YES: reasoning correctly identifies the failure type AND mechanism AND connects to the error
-- NO: reasoning is incorrect, vague, irrelevant, or identifies the wrong mechanism
-
-Rules:
-- Be conservative. Only YES if clearly correct.
-- Do NOT reward vague reasoning.
-- Do NOT infer correctness if the mechanism is missing.
-- If uncertain, answer NO.
-
-# Output
-
-Return EXACTLY one line in this format:
-
-VERDICT ; FAILURE_TYPE
-
-Examples:
-YES ; TEMPORAL_ORDERING
-NO ; HIDDEN_DEPENDENCY
-NO ; UNKNOWN
-
-Return ONLY this one line. No explanation. No commentary."""
-
-_CRIT_LITE_CONDITIONED_PROMPT = _CRIT_LITE_BLIND_PROMPT.replace(
-    "## Developer's Reasoning\n{reasoning}",
-    "## Developer's Reasoning\n{reasoning}\n\n## System-Detected Failure Type\n{classifier_type}",
-)
+# _CRIT_LITE_BLIND_PROMPT: DELETED — now in prompts/components/evaluate_reasoning_blind.j2
+# _CRIT_LITE_CONDITIONED_PROMPT: DELETED — now in prompts/components/evaluate_reasoning_conditioned.j2
 
 
 # ============================================================
@@ -170,15 +105,15 @@ def evaluate_reasoning(
     }
     """
     error_category = error_obj.get("category", "unknown")
-    error_message = (error_obj.get("message") or "")[:300]
-    test_reasons = "\n".join(f"- {r}" for r in (error_obj.get("reasons") or [])[:5])
+    error_message = error_obj.get("message") or ""
+    test_reasons = "\n".join(f"- {r}" for r in (error_obj.get("reasons") or []))
 
     _eval_vars = {
-        "code": code_k[:1200],
+        "code": code_k,
         "error_category": error_category,
         "error_message": error_message,
         "test_reasons": test_reasons,
-        "reasoning": reasoning_text[:800],
+        "reasoning": reasoning_text,
     }
     if blind:
         from assembly_engine import build as _assembly_build

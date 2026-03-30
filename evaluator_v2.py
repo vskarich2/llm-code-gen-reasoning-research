@@ -1,0 +1,296 @@
+"""V2 classifier invocation, output parsing, and result assembly.
+
+This module owns:
+- Building classifier v2 prompt variables
+- Invoking the classifier LLM
+- Parsing classifier v2 output (dedicated parser, not v1)
+- Assembling the final v2 result dict
+"""
+
+import logging
+import re
+from dataclasses import dataclass, field, asdict
+
+from contracts_v2 import (
+    V2_CLASSIFIER_DIMENSIONS, V2_VALID_DIMENSION_VALUES, V2_VALID_CONFIDENCE,
+)
+
+_log = logging.getLogger("t3.evaluator_v2")
+
+# Debug section delimiter — everything at and after this is ignored
+_DEBUG_DELIMITER = "---DEBUG---"
+
+
+@dataclass
+class ClassifierResultV2:
+    """Parsed v2 classifier output."""
+    mechanism_identified: str | None = None
+    commitments_extracted: str | None = None
+    commitments_satisfied: str | None = None
+    reasoning_code_alignment: str | None = None
+    failure_type: str = "UNKNOWN"
+    failure_type_raw: str = ""
+    confidence: str = ""
+    counterfactual: str = ""
+    evidence: str = ""
+    judgment: str = ""
+    parse_error: str | None = None
+    classify_raw: str = ""
+    classifier_schema_variant: str = "v2_5line"
+    classifier_prompt_variant: str = "classify_reasoning_v2"
+    commitment_source_for_classifier: str = ""
+
+
+# ============================================================
+# CLASSIFIER V2 PROMPT BUILDER
+# ============================================================
+
+# Valid failure types (imported at call time to avoid circular imports)
+_VALID_FAILURE_TYPES = None
+
+def _get_valid_failure_types():
+    global _VALID_FAILURE_TYPES
+    if _VALID_FAILURE_TYPES is None:
+        from reasoning import VALID_FAILURE_TYPES
+        _VALID_FAILURE_TYPES = VALID_FAILURE_TYPES
+    return _VALID_FAILURE_TYPES
+
+
+def build_classifier_v2_vars(artifact, case: dict, code: str, config) -> dict:
+    """Build template variables for classify_reasoning_v2.j2.
+
+    artifact: NormalizedReasoningArtifactV2
+    """
+    eval_cfg = config.models.evaluator
+
+    def _field_or_missing(val):
+        if isinstance(val, str) and val.strip() and val != "[EMPTY]":
+            return val.strip()
+        return "[COULD NOT EXTRACT]"
+
+    # Determine what commitment source the classifier should see
+    if artifact.commitments_source == "explicit":
+        source_for_classifier = "explicit"
+    elif artifact.commitments_source == "spontaneous":
+        source_for_classifier = "spontaneous"
+    else:
+        source_for_classifier = "none"
+
+    # Canonical family
+    canonical = artifact.canonical_family or "[UNMAPPED]"
+
+    variables = {
+        "root_cause": _field_or_missing(artifact.normalized_root_cause),
+        "fix_strategy": _field_or_missing(artifact.normalized_fix_strategy),
+        "risk_check": _field_or_missing(artifact.normalized_risk_check),
+        "task": case.get("task", "")[:eval_cfg.max_task_chars],
+        "code": (code or "")[:eval_cfg.max_code_chars],
+        "failure_types": ", ".join(sorted(_get_valid_failure_types())),
+        "classifier_mode": config.evaluation.classifier_mode,
+    }
+
+    # Grounded mode fields
+    if config.evaluation.classifier_mode == "grounded":
+        variables["ground_truth_failure_mode"] = case.get("failure_mode", "")
+        variables["ground_truth_trap"] = case.get("trap", "")
+        gt_bug = case.get("ground_truth_bug", {})
+        variables["ground_truth_invariant"] = gt_bug.get("invariant", "") if isinstance(gt_bug, dict) else ""
+
+    return variables, source_for_classifier
+
+
+# ============================================================
+# CLASSIFIER V2 OUTPUT PARSER
+# ============================================================
+
+def _strip_debug(raw: str) -> str:
+    """Strip optional ---DEBUG--- section."""
+    idx = raw.find(_DEBUG_DELIMITER)
+    if idx != -1:
+        return raw[:idx]
+    return raw
+
+
+def parse_classifier_v2_output(raw: str) -> ClassifierResultV2:
+    """Parse v2 classifier output. Dedicated parser — does NOT use v1 parser.
+
+    Expected structure (Evidence/Judgment may span multiple lines):
+      Line 1: <mechanism>;<commitments_extracted>;<commitments_satisfied>;<alignment>;<failure_type>
+      Line 2: <confidence>
+      Counterfactual: <sentence>
+      Evidence: <bullets — may span multiple lines>
+      Judgment: <sentence — may span multiple lines>
+    """
+    result = ClassifierResultV2(classify_raw=raw)
+
+    if not raw or not raw.strip():
+        result.parse_error = "empty classifier response"
+        return result
+
+    stripped = _strip_debug(raw)
+    lines = [l.strip() for l in stripped.strip().split("\n") if l.strip()]
+
+    if len(lines) < 5:
+        result.parse_error = f"expected at least 5 lines, got {len(lines)}"
+        return result
+
+    # Line 1: 5 semicolon-separated fields (4 dimensions + failure_type)
+    parts = [p.strip().upper() for p in lines[0].split(";")]
+    if len(parts) != 5:
+        result.parse_error = f"line 1: expected 5 fields, got {len(parts)}"
+        return result
+
+    dims = {}
+    for name, val in zip(V2_CLASSIFIER_DIMENSIONS, parts[:4]):
+        if val not in V2_VALID_DIMENSION_VALUES:
+            result.parse_error = f"invalid dimension {name}={val}"
+            return result
+        dims[name] = val
+
+    result.mechanism_identified = dims["mechanism_identified"]
+    result.commitments_extracted = dims["commitments_extracted"]
+    result.commitments_satisfied = dims["commitments_satisfied"]
+    result.reasoning_code_alignment = dims["reasoning_code_alignment"]
+
+    # Failure type
+    ft_raw = parts[4]
+    result.failure_type_raw = ft_raw
+    valid_fts = _get_valid_failure_types()
+    result.failure_type = ft_raw if ft_raw in valid_fts else "UNKNOWN"
+
+    # Line 2: confidence
+    confidence = lines[1].strip().upper()
+    if confidence not in V2_VALID_CONFIDENCE:
+        result.parse_error = f"invalid confidence: {confidence}"
+        return result
+    result.confidence = confidence
+
+    # Lines 3+: Collect Counterfactual, Evidence, Judgment sections
+    # These may span multiple lines (especially Evidence with bullet points)
+    remaining = lines[2:]
+    sections = {"counterfactual": [], "evidence": [], "judgment": []}
+    current_section = None
+    _prefixes = {
+        "counterfactual:": "counterfactual",
+        "evidence:": "evidence",
+        "judgment:": "judgment",
+    }
+
+    for line in remaining:
+        lower = line.lower()
+        matched = False
+        for prefix, section_name in _prefixes.items():
+            if lower.startswith(prefix):
+                current_section = section_name
+                # Strip the prefix from the first line
+                content = line[len(prefix):].strip()
+                if content:
+                    sections[section_name].append(content)
+                matched = True
+                break
+        if not matched and current_section:
+            sections[current_section].append(line)
+
+    result.counterfactual = " ".join(sections["counterfactual"]).strip()
+    result.evidence = " ".join(sections["evidence"]).strip()
+    result.judgment = " ".join(sections["judgment"]).strip()
+
+    if not result.counterfactual:
+        result.parse_error = "missing counterfactual"
+        return result
+    if not result.evidence:
+        result.parse_error = "missing evidence"
+        return result
+    if not result.judgment:
+        result.parse_error = "missing judgment"
+        return result
+
+    result.parse_error = None
+    return result
+
+
+# ============================================================
+# RESULT ASSEMBLY
+# ============================================================
+
+def assemble_v2_result(
+    exec_result: dict,
+    artifact,       # NormalizedReasoningArtifactV2
+    classifier: ClassifierResultV2,
+    signals,        # V2Signals
+    case: dict,
+    condition: str,
+    model: str,
+) -> dict:
+    """Assemble the final ev dict for a v2 evaluation.
+
+    This dict is what gets logged. It contains ALL v2 fields.
+    """
+    ev = dict(exec_result)  # start with execution results (pass, score, reasons, etc.)
+
+    # V2 identity
+    ev["condition"] = condition
+    ev["schema_variant"] = artifact.schema_variant
+    ev["operator_used"] = condition.upper()
+
+    # V2 artifact (full normalized reasoning)
+    ev["v2_artifact"] = {
+        "raw_root_cause": artifact.raw_root_cause,
+        "raw_fix_strategy": artifact.raw_fix_strategy,
+        "raw_risk_check": artifact.raw_risk_check,
+        "raw_code_commitments": artifact.raw_code_commitments,
+        "normalized_root_cause": artifact.normalized_root_cause,
+        "normalized_fix_strategy": artifact.normalized_fix_strategy,
+        "normalized_risk_check": artifact.normalized_risk_check,
+        "normalized_code_commitments": artifact.normalized_code_commitments,
+        "normalization_notes": artifact.normalization_notes,
+        "normalization_status": artifact.normalization_status,
+        "commitment_count": artifact.commitment_count,
+        "commitments_source": artifact.commitments_source,
+        "commitment_extractability_status": artifact.commitment_extractability_status,
+        "canonical_family": artifact.canonical_family,
+        "canonical_family_mapped": artifact.canonical_family_mapped,
+        "validation_status": artifact.validation_status,
+        "validation_errors": artifact.validation_errors,
+        "parse_status": artifact.parse_status,
+    }
+
+    # V2 primary signals
+    ev["mechanism_correct"] = signals.mechanism_correct
+    ev["commitments_valid"] = signals.commitments_valid
+    ev["alignment_positive"] = signals.alignment_positive
+    ev["commitments_satisfied_positive"] = signals.commitments_satisfied_positive
+
+    # V2 classifier dimensions (raw)
+    ev["mechanism_identified_dim"] = classifier.mechanism_identified
+    ev["commitments_extracted_dim"] = classifier.commitments_extracted
+    ev["commitments_satisfied_dim"] = classifier.commitments_satisfied
+    ev["reasoning_code_alignment_dim"] = classifier.reasoning_code_alignment
+
+    # V2 classifier metadata
+    ev["classify_v2_raw"] = classifier.classify_raw
+    ev["classify_v2_parse_error"] = classifier.parse_error
+    ev["failure_type"] = classifier.failure_type
+    ev["confidence"] = classifier.confidence
+    ev["counterfactual"] = classifier.counterfactual
+    ev["evidence"] = classifier.evidence
+    ev["judgment"] = classifier.judgment
+    ev["commitment_source_for_classifier"] = classifier.commitment_source_for_classifier
+
+    # V2 categories
+    ev["v2_category"] = signals.v2_category
+    ev["legacy_compat_category"] = signals.legacy_compat_category
+    ev["category"] = signals.v2_category  # primary category field
+
+    # V2 compatibility rollup (NOT primary)
+    ev["reasoning_correct_compat"] = signals.reasoning_correct_compat
+
+    # Backward compat fields
+    ev["reasoning_correct"] = signals.reasoning_correct_compat
+    ev["alignment"] = {
+        "category": signals.v2_category,
+        "code_correct": exec_result.get("pass", False),
+        "reasoning_correct": signals.reasoning_correct_compat,
+    }
+
+    return ev

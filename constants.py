@@ -36,6 +36,10 @@ ALL_CONDITIONS = [
     "retry_alignment",
     # LEG-reduction (intra-call self-correction)
     "leg_reduction",
+    # V2 ablation conditions
+    "baseline_v2",
+    "leg_reduction_v2",
+    "leg_reduction_lean_v2",
 ]
 
 VALID_CONDITIONS = frozenset(ALL_CONDITIONS)
@@ -98,6 +102,9 @@ COND_LABELS = {
     "retry_adaptive": "AD",
     "retry_alignment": "AL",
     "leg_reduction": "LR",
+    "baseline_v2": "B2",
+    "leg_reduction_v2": "L2",
+    "leg_reduction_lean_v2": "LL",
 }
 
 # INVARIANT: condition labels must be unique

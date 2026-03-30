@@ -2,11 +2,17 @@
 
 All type coercions and fallbacks are logged as warnings.
 No silent empty-string defaults.
+
+Reasoning schema v2: every parse result includes reasoning_obj and
+reasoning_validation, extracted from the already-parsed JSON at the
+orchestrator level. No re-parsing. No fallbacks.
 """
 
 import json
 import logging
 import re
+
+from reasoning import extract_reasoning_obj, validate_reasoning
 
 log = logging.getLogger("t3.parse")
 
@@ -75,6 +81,7 @@ def _try_json_direct(raw: str) -> dict | None:
                 "code": code,
                 "confidence": parsed.get("confidence"),
                 "parse_error": None,
+                "_raw_json": parsed,
             }
     except (json.JSONDecodeError, TypeError):
         pass
@@ -109,6 +116,7 @@ def _try_json_lenient(raw: str) -> dict | None:
                     "code": code,
                     "confidence": None,
                     "parse_error": "lenient-json: extracted from malformed JSON",
+                    "_raw_json": None,
                 }
     except Exception:
         pass
@@ -137,6 +145,7 @@ def _try_json_substring(raw: str) -> dict | None:
                 "code": code,
                 "confidence": parsed.get("confidence"),
                 "parse_error": None,
+                "_raw_json": parsed,
             }
         except json.JSONDecodeError:
             pass
@@ -158,6 +167,7 @@ def _try_code_block(raw: str) -> dict | None:
             "code": code,
             "confidence": None,
             "parse_error": "non-json: extracted from code block",
+            "_raw_json": None,
         }
     return None
 
@@ -182,6 +192,7 @@ def _try_file_dict(raw: str) -> dict | None:
                     "confidence": parsed.get("confidence"),
                     "parse_error": None,
                     "response_format": "file_dict",
+                    "_raw_json": parsed,
                 }
     except (json.JSONDecodeError, TypeError):
         pass
@@ -189,45 +200,81 @@ def _try_file_dict(raw: str) -> dict | None:
 
 
 def _try_file_dict_lenient(raw: str) -> dict | None:
-    """Tier 0b: Handle file-dict JSON with literal newlines in string values.
+    """Tier 0b: Handle file-dict JSON with malformed string values.
 
-    Models (especially nano) return {"reasoning": "...", "files": {"path": "code"}}
-    with literal unescaped newlines inside the code strings. json.loads() rejects this.
-    This tier extracts reasoning and files via regex, analogous to _try_json_lenient
-    for code-key format.
+    Models (especially nano) produce JSON with unescaped quotes, literal newlines,
+    or triple-quoted Python docstrings inside string values. json.loads() rejects this.
+
+    Strategy: find "files": { ... } region, then for each file entry, extract the
+    content between the opening quote after the colon and the closing pattern
+    (either '", "next_path"' or '"}}' at end). This handles unescaped quotes
+    inside the content because we anchor on structural delimiters, not quote matching.
     """
     if not raw.strip().startswith("{") or '"files"' not in raw:
         return None
 
     try:
-        # Extract reasoning (before "files" key)
-        reasoning = ""
-        reasoning_match = re.search(r'"reasoning"\s*:\s*"(.*?)"\s*,\s*"files"', raw, re.DOTALL)
-        if reasoning_match:
-            reasoning = reasoning_match.group(1).replace("\\n", "\n").replace('\\"', '"')
-
-        # Extract the files dict content: everything between "files": { and the final }
+        # Extract the files region: from "files": { to the final }}
         files_match = re.search(r'"files"\s*:\s*\{(.*)\}\s*\}', raw, re.DOTALL)
         if not files_match:
             return None
 
         files_content = files_match.group(1)
 
-        # Parse individual file entries: "path": "content" or "path": "UNCHANGED"
+        # Find all file paths: "path/to/file.py": "
+        # Then extract content between that opening quote and the next file entry or end
+        path_pattern = re.compile(r'"([^"]+\.(?:py|txt|json|yaml|yml|md|cfg|ini|toml))"\s*:\s*"')
+        path_matches = list(path_pattern.finditer(files_content))
+
+        if not path_matches:
+            return None
+
         files = {}
-        # Split on pattern: "path": "
-        entries = re.finditer(
-            r'"([^"]+)"\s*:\s*"((?:[^"\\]|\\.)*)(?:"|$)', files_content, re.DOTALL
-        )
-        for m in entries:
-            path = m.group(1)
-            content = m.group(2)
+        for i, pm in enumerate(path_matches):
+            path = pm.group(1)
+            content_start = pm.end()  # position right after the opening quote
+
+            if i + 1 < len(path_matches):
+                # Content ends before the next file entry: look for '", "next_path"'
+                # Scan backwards from next match to find the closing '"'
+                next_start = path_matches[i + 1].start()
+                # The content region is between content_start and the last '"' before next entry
+                region = files_content[content_start:next_start]
+                # Strip trailing '", ' or '",\n'
+                region = region.rstrip()
+                if region.endswith('",'):
+                    region = region[:-2]
+                elif region.endswith('"'):
+                    region = region[:-1]
+            else:
+                # Last file: content ends at the closing quote before }}
+                region = files_content[content_start:]
+                region = region.rstrip()
+                if region.endswith('"'):
+                    region = region[:-1]
+
             # Unescape JSON string escapes
-            content = content.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"')
+            content = region.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"')
             files[path] = content
 
         if not files:
             return None
+
+        # Extract reasoning fields from the text before "files"
+        reasoning = ""
+        reasoning_match = re.search(r'"reasoning"\s*:\s*"(.*?)"\s*,\s*"files"', raw, re.DOTALL)
+        if reasoning_match:
+            reasoning = reasoning_match.group(1).replace("\\n", "\n").replace('\\"', '"')
+
+        # Also try to extract structured reasoning fields for _raw_json
+        raw_json = None
+        for field in ("root_cause", "failure_mechanism", "broken_invariant", "fix_strategy",
+                       "risk_check"):
+            m = re.search(rf'"{field}"\s*:\s*"(.*?)"\s*,\s*"', raw, re.DOTALL)
+            if m:
+                if raw_json is None:
+                    raw_json = {}
+                raw_json[field] = m.group(1).replace("\\n", "\n").replace('\\"', '"')
 
         log.warning(
             "Used lenient file-dict parser for malformed response (len=%d, %d files)",
@@ -241,6 +288,7 @@ def _try_file_dict_lenient(raw: str) -> dict | None:
             "confidence": None,
             "parse_error": "lenient-file-dict: extracted from malformed JSON",
             "response_format": "file_dict_lenient",
+            "_raw_json": raw_json,
         }
     except Exception:
         pass
@@ -269,21 +317,47 @@ def _try_code_dict(raw: str) -> dict | None:
                     "confidence": parsed.get("confidence"),
                     "parse_error": None,
                     "response_format": "code_dict",
+                    "_raw_json": parsed,
                 }
     except (json.JSONDecodeError, TypeError):
         pass
     return None
 
 
-def parse_model_response(raw: str) -> dict:
-    """Parse model response into {reasoning, code, files, confidence, parse_error, response_format}.
+def _apply_reasoning_extraction(result):
+    """Extract reasoning_obj and reasoning_validation from parse result.
+
+    Uses _raw_json (the already-parsed JSON dict stashed by the tier).
+    If _raw_json is None (non-JSON tier), reasoning fields are empty.
+    Mutates result in place. Called ONCE per parse at the orchestrator level.
+    """
+    raw_json = result.get("_raw_json")
+    if raw_json is not None and isinstance(raw_json, dict):
+        result["reasoning_obj"] = extract_reasoning_obj(raw_json)
+        result["reasoning_validation"] = validate_reasoning(result["reasoning_obj"], raw_json)
+    else:
+        result["reasoning_obj"] = extract_reasoning_obj({})
+        result["reasoning_validation"] = validate_reasoning(result["reasoning_obj"], {})
+
+
+def parse_model_response(raw):
+    """Parse model response. Single entry point for ALL response parsing.
+
+    Returns dict with: reasoning, code, files, confidence, parse_error,
+    response_format, reasoning_obj, reasoning_validation, and observability fields.
+
+    reasoning_obj and reasoning_validation are ALWAYS present (schema v2).
+    """
+    result = _parse_model_response_tiers(raw)
+    _apply_reasoning_extraction(result)
+    return result
+
+
+def _parse_model_response_tiers(raw):
+    """Internal: tier-based parsing. Returns result with _raw_json stashed.
 
     Tiers: file_dict → code_dict → JSON direct → JSON lenient → JSON substring → code block → raw fallback.
     Never raises. Logs SEVERE warnings for type mismatches and empty fields.
-
-    New fields added:
-      - response_format: str identifying which parser tier succeeded
-      - files: dict | None — per-file content when model returns file-dict format
     """
     if not raw or not raw.strip():
         log.warning("SEVERE: model returned empty response")
@@ -294,6 +368,7 @@ def parse_model_response(raw: str) -> dict:
             "confidence": None,
             "parse_error": "SEVERE: empty model response",
             "response_format": "empty",
+            "_raw_json": None,
             # Observability fields (Phase 1)
             "code_present": False,
             "code_empty_reason": "model_no_output",
@@ -421,6 +496,7 @@ def parse_model_response(raw: str) -> dict:
         "parse_error": "SEVERE: raw_fallback — no code blocks found, entire response used as code",
         "_raw_fallback": True,
         "response_format": "raw_fallback",
+        "_raw_json": None,
         "code_present": False,
         "code_empty_reason": "filtered_invalid",
         "parse_tier": 7,
@@ -614,12 +690,42 @@ def extract_all_code_blocks(output: str) -> list[tuple[str, str]]:
 from _stdlib import STDLIB_MODULES
 
 
-def strip_local_imports(code: str) -> str:
+def classify_import(module_name: str, case_local_modules: frozenset | None = None) -> str:
+    """Classify an import as 'stdlib', 'local', or 'unknown'.
+
+    Args:
+        module_name: the imported module name (e.g., 'config', 'os', 'decimal')
+        case_local_modules: set of known local module names for the current case.
+            If None, any non-stdlib module is treated as local.
+
+    Returns: 'stdlib', 'local', or 'unknown'
+    """
+    if module_name in STDLIB_MODULES:
+        return "stdlib"
+    if case_local_modules is not None:
+        if module_name in case_local_modules:
+            return "local"
+        return "unknown"
+    # No case context — treat all non-stdlib as local (backward compat for assembly)
+    return "local"
+
+
+def strip_local_imports(code: str, case_local_modules: frozenset | None = None,
+                         strict: bool = False) -> str:
     """Remove import statements that reference sibling modules.
 
-    Preserves stdlib imports. Handles multi-line from X import (...) blocks.
+    Preserves stdlib imports. Strips local (sibling) imports since all code
+    is concatenated into one module during assembly.
+
+    Args:
+        code: source code to process
+        case_local_modules: known local module names. If provided, enables strict mode.
+        strict: if True, raise RuntimeError on unknown imports instead of stripping.
+
+    Raises:
+        RuntimeError: if strict=True and an unknown (non-stdlib, non-local) import is found.
     """
-    # Pass 1: multi-line local imports
+    # Pass 1: multi-line local imports (from X import (...))
     code = re.sub(
         r"^from\s+(?!(?:"
         + "|".join(re.escape(m) for m in STDLIB_MODULES)
@@ -629,19 +735,56 @@ def strip_local_imports(code: str) -> str:
         flags=re.MULTILINE | re.DOTALL,
     )
 
-    # Pass 2: single-line local imports
+    # Pass 2: single-line imports
     lines = []
     for line in code.split("\n"):
         stripped = line.strip()
+
+        # Relative imports → always strip (local)
         if stripped.startswith(("from .", "import .")):
             continue
+
+        # from X import Y
         if stripped.startswith("from ") and " import " in stripped:
             mod = stripped.split("from ", 1)[1].split(" import")[0].strip()
-            if "." not in mod and mod not in STDLIB_MODULES:
+            base_mod = mod.split(".")[0] if "." in mod else mod
+            classification = classify_import(base_mod, case_local_modules)
+
+            if classification == "stdlib":
+                lines.append(line)
                 continue
+            elif classification == "local":
+                continue  # strip local imports
+            else:
+                if strict:
+                    raise RuntimeError(
+                        f"Unknown import in model code: 'from {mod} import ...' — "
+                        f"module '{base_mod}' is not in STDLIB_MODULES and not a known "
+                        f"case-local module. Add to _stdlib.py if it is a stdlib module, "
+                        f"or investigate why the model imported it."
+                    )
+                continue  # non-strict: strip like local
+
+        # import X
         elif stripped.startswith("import "):
             mod = stripped.split("import ", 1)[1].split()[0].strip().rstrip(",")
-            if mod not in STDLIB_MODULES:
+            classification = classify_import(mod, case_local_modules)
+
+            if classification == "stdlib":
+                lines.append(line)
                 continue
-        lines.append(line)
+            elif classification == "local":
+                continue
+            else:
+                if strict:
+                    raise RuntimeError(
+                        f"Unknown import in model code: 'import {mod}' — "
+                        f"module '{mod}' is not in STDLIB_MODULES and not a known "
+                        f"case-local module."
+                    )
+                continue
+
+        else:
+            lines.append(line)
+
     return "\n".join(lines)

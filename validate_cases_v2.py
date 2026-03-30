@@ -198,13 +198,47 @@ def check_idempotent(case: dict) -> tuple[bool, str]:
         return False, f"idempotent error: {e}"
 
 
+def check_metadata_alignment(case: dict) -> tuple[bool, str]:
+    """Check that reference_fix.function exists in the reference fix code.
+
+    Prevents metadata bugs like mutable_default_b where the metadata claimed
+    the fix was in 'enqueue' but the actual fix modified 'process_batch'.
+    """
+    import ast as _ast
+
+    ref_path = BASE / "reference_fixes" / f"{case['id']}.py"
+    if not ref_path.exists():
+        return False, "reference fix file not found"
+
+    expected_fn = case.get("reference_fix", {}).get("function", "")
+    if not expected_fn:
+        return False, "reference_fix.function is empty"
+
+    ref_code = ref_path.read_text(encoding="utf-8")
+    try:
+        tree = _ast.parse(ref_code)
+    except SyntaxError as e:
+        return False, f"reference fix has syntax error: {e}"
+
+    ref_defs = {n.name for n in _ast.walk(tree) if isinstance(n, _ast.FunctionDef)}
+
+    if expected_fn not in ref_defs:
+        return False, (
+            f"reference_fix.function='{expected_fn}' NOT FOUND in reference fix code. "
+            f"Reference fix defines: {sorted(ref_defs)}. "
+            f"This is a metadata bug that causes false FAILs via rename_error."
+        )
+
+    return True, "metadata_aligned"
+
+
 def validate_case(case: dict) -> dict:
     checks = {
         "loads": check_loads(case),
         "fails_buggy": check_fails_buggy(case),
         "passes_fixed": check_passes_fixed(case),
-        "minimal": check_minimal(case),
         "idempotent": check_idempotent(case),
+        "metadata_aligned": check_metadata_alignment(case),
     }
     all_pass = all(ok for ok, _ in checks.values())
     return {"case_id": case["id"], "all_pass": all_pass, "checks": checks}

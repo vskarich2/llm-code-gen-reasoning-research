@@ -223,6 +223,8 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
     NOTE: Metrics are computed at the EVENT LEVEL (not case-aggregated).
     These may differ from paper results which use case-level aggregation.
     """
+    from collections import defaultdict
+
     m = {}
     n = len(events)
     m["total_jobs"] = total_jobs
@@ -287,14 +289,74 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
         # Count how many events have reasoning_correct=None (parse failures / gated)
         rc_none = sum(1 for e in ce if e.get("reasoning_correct") is None)
 
+            # Per-condition category counts
+        cond_cats = defaultdict(int)
+        for e in ce:
+            cond_cats[e.get("category", "unknown")] += 1
+
+        # Per-condition reasoning quality
+        cond_dims = [e for e in ce if e.get("mechanism_identified") is not None]
+        n_cd = len(cond_dims)
+        reasoning_quality = {}
+        if n_cd > 0:
+            for dim in ("mechanism_identified", "invariant_identified", "causal_chain_complete",
+                         "fix_alignment", "reasoning_code_alignment"):
+                correct = sum(1 for e in cond_dims if e.get(dim) == "CORRECT")
+                partial = sum(1 for e in cond_dims if e.get(dim) == "PARTIAL")
+                wrong = sum(1 for e in cond_dims if e.get(dim) == "WRONG")
+                reasoning_quality[dim] = {
+                    "correct": round(correct / n_cd, 4),
+                    "partial": round(partial / n_cd, 4),
+                    "wrong": round(wrong / n_cd, 4),
+                }
+
+        # Per-condition confidence
+        cond_conf = [e for e in ce if e.get("confidence") is not None]
+        n_cc = len(cond_conf)
+        confidence_dist = {}
+        if n_cc > 0:
+            confidence_dist = {
+                "HIGH": round(sum(1 for e in cond_conf if e.get("confidence") == "HIGH") / n_cc, 4),
+                "MEDIUM": round(sum(1 for e in cond_conf if e.get("confidence") == "MEDIUM") / n_cc, 4),
+                "LOW": round(sum(1 for e in cond_conf if e.get("confidence") == "LOW") / n_cc, 4),
+            }
+
+        # Per-condition failure rates
+        parse_fail = cond_cats.get("parse_failed", 0)
+        cls_fail = cond_cats.get("classifier_parse_failed", 0)
+        no_reas = cond_cats.get("no_reasoning", 0)
+
         cond_metrics[cond] = {
             "n": cn,
             "pass_rate": round(pass_rate, 4),
-            # Reasoning-derived (UNRELIABLE — see reasoning_evaluator_audit/phase0_report.md)
             "leg_rate": round(leg_rate, 4),
             "lucky_fix_rate": round(lucky_rate, 4),
             "exec_reasoning": round(exec_reasoning, 4) if exec_reasoning is not None else None,
             "reasoning_unknown": rc_none,
+            # Regime distribution per condition
+            "regime_distribution": {
+                "true_success": {"count": cond_cats.get("true_success", 0), "pct": round(cond_cats.get("true_success", 0) / cn, 4)},
+                "leg": {"count": cond_cats.get("leg", 0), "pct": round(cond_cats.get("leg", 0) / cn, 4)},
+                "lucky_fix": {"count": cond_cats.get("lucky_fix", 0), "pct": round(cond_cats.get("lucky_fix", 0) / cn, 4)},
+                "true_failure": {"count": cond_cats.get("true_failure", 0), "pct": round(cond_cats.get("true_failure", 0) / cn, 4)},
+            },
+            # Reasoning quality per condition
+            "reasoning_quality": reasoning_quality,
+            "reasoning_evaluated": n_cd,
+            # Confidence per condition
+            "confidence_distribution": confidence_dist,
+            # Failure rates per condition
+            "parse_failure_rate": round(parse_fail / cn, 4),
+            "classifier_failure_rate": round(cls_fail / cn, 4),
+            "no_reasoning_rate": round(no_reas / cn, 4),
+            # Failure type breakdown per condition
+            "failure_type_counts": dict(
+                sorted(
+                    ((ft, sum(1 for e in ce if e.get("failure_type") == ft))
+                     for ft in set(e.get("failure_type") for e in ce if e.get("failure_type"))),
+                    key=lambda x: -x[1]
+                )
+            ),
         }
 
     m["condition_metrics"] = cond_metrics
@@ -313,8 +375,6 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
 
     # --- CASE STABILITY ---
     # Per (case_id, condition): count distinct pass values across trials
-    from collections import defaultdict
-
     case_cond_passes = defaultdict(set)
     for e in events:
         key = (e.get("case_id"), e.get("condition"))
@@ -386,7 +446,140 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
 
     # --- OVERALL RATES ---
     m["pass_rate"] = round(sum(1 for e in events if e.get("pass")) / n, 4)
+    overall_leg = sum(
+        1 for e in events
+        if e.get("reasoning_correct") is True and e.get("code_correct") is not True
+    ) / n
     m["leg_rate"] = round(overall_leg, 4)
+
+    # ================================================================
+    # SECTION 1 — SYSTEM HEALTH
+    # ================================================================
+    cats = defaultdict(int)
+    for e in events:
+        cats[e.get("category", "unknown")] += 1
+
+    m["category_counts"] = dict(cats)
+    m["parse_failure_rate"] = round(cats.get("parse_failed", 0) / n, 4)
+    m["classifier_parse_failure_rate"] = round(cats.get("classifier_parse_failed", 0) / n, 4)
+    m["no_reasoning_rate"] = round(cats.get("no_reasoning", 0) / n, 4)
+
+    # Coverage
+    unique_cases = set(e.get("case_id") for e in events)
+    m["evaluated_cases"] = len(unique_cases)
+
+    # Latency
+    latencies = [e.get("elapsed_seconds") for e in events if e.get("elapsed_seconds") is not None]
+    if latencies:
+        m["avg_latency"] = round(sum(latencies) / len(latencies), 2)
+        m["max_latency"] = round(max(latencies), 2)
+    else:
+        m["avg_latency"] = None
+        m["max_latency"] = None
+
+    # ================================================================
+    # SECTION 2 — REGIME DISTRIBUTION
+    # ================================================================
+    m["true_success_count"] = cats.get("true_success", 0)
+    m["leg_count"] = cats.get("leg", 0)
+    m["lucky_fix_count"] = cats.get("lucky_fix", 0)
+    m["true_failure_count"] = cats.get("true_failure", 0)
+
+    m["true_success_rate"] = round(cats.get("true_success", 0) / n, 4)
+    m["lucky_fix_rate"] = round(cats.get("lucky_fix", 0) / n, 4)
+    m["true_failure_rate"] = round(cats.get("true_failure", 0) / n, 4)
+
+    # ================================================================
+    # SECTION 3 — INTERVENTION TRANSITIONS
+    # ================================================================
+    # Per-case: baseline category → leg_reduction category
+    transitions = defaultdict(int)
+    case_bl_cat = {}
+    case_lr_cat = {}
+    for e in events:
+        cid = e.get("case_id")
+        cat = e.get("category", "unknown")
+        if e.get("condition") == "baseline":
+            case_bl_cat[cid] = cat
+        elif e.get("condition") == "leg_reduction":
+            case_lr_cat[cid] = cat
+
+    for cid in case_bl_cat:
+        if cid in case_lr_cat:
+            bl_c = case_bl_cat[cid]
+            lr_c = case_lr_cat[cid]
+            transitions[(bl_c, lr_c)] += 1
+
+    m["transitions"] = {f"{a}->{b}": count for (a, b), count in
+                        sorted(transitions.items(), key=lambda x: -x[1])}
+
+    # Key transition metrics
+    m["leg_to_success"] = transitions.get(("leg", "true_success"), 0)
+    m["failure_to_success"] = transitions.get(("true_failure", "true_success"), 0)
+    m["success_to_worse"] = sum(
+        transitions.get(("true_success", dest), 0)
+        for dest in ("leg", "true_failure", "lucky_fix", "parse_failed", "no_reasoning")
+    )
+
+    # ================================================================
+    # SECTION 4 — REASONING QUALITY
+    # ================================================================
+    dims_events = [e for e in events if e.get("mechanism_identified") is not None]
+    n_dims = len(dims_events)
+    if n_dims > 0:
+        for dim in ("mechanism_identified", "invariant_identified", "causal_chain_complete",
+                     "fix_alignment", "reasoning_code_alignment"):
+            correct = sum(1 for e in dims_events if e.get(dim) == "CORRECT")
+            partial = sum(1 for e in dims_events if e.get(dim) == "PARTIAL")
+            wrong = sum(1 for e in dims_events if e.get(dim) == "WRONG")
+            m[f"{dim}_correct_rate"] = round(correct / n_dims, 4)
+            m[f"{dim}_partial_rate"] = round(partial / n_dims, 4)
+            m[f"{dim}_wrong_rate"] = round(wrong / n_dims, 4)
+        m["reasoning_evaluated_count"] = n_dims
+    else:
+        m["reasoning_evaluated_count"] = 0
+
+    # 2x2 matrix
+    m["matrix_correct_pass"] = cats.get("true_success", 0)
+    m["matrix_correct_fail"] = cats.get("leg", 0)
+    m["matrix_wrong_pass"] = cats.get("lucky_fix", 0)
+    m["matrix_wrong_fail"] = cats.get("true_failure", 0)
+
+    # ================================================================
+    # SECTION 5 — CLASSIFIER HEALTH
+    # ================================================================
+    conf_events = [e for e in events if e.get("confidence") is not None]
+    n_conf = len(conf_events)
+    if n_conf > 0:
+        m["confidence_high_rate"] = round(
+            sum(1 for e in conf_events if e.get("confidence") == "HIGH") / n_conf, 4)
+        m["confidence_medium_rate"] = round(
+            sum(1 for e in conf_events if e.get("confidence") == "MEDIUM") / n_conf, 4)
+        m["confidence_low_rate"] = round(
+            sum(1 for e in conf_events if e.get("confidence") == "LOW") / n_conf, 4)
+    else:
+        m["confidence_high_rate"] = None
+        m["confidence_medium_rate"] = None
+        m["confidence_low_rate"] = None
+
+    # ================================================================
+    # SECTION 6 — CASE ANOMALIES (top 5 each)
+    # ================================================================
+    # LEG cases (reasoning correct + code fail)
+    m["anomaly_leg_cases"] = [(cid, r) for cid, r in case_leg_rates if r > 0][:5]
+    # Lucky fix cases (reasoning wrong + code pass)
+    m["anomaly_lucky_cases"] = [(cid, r) for cid, r in case_lucky_rates if r > 0][:5]
+    # Baseline→LEG flips (different pass outcome)
+    flips = []
+    for cid in sorted(case_bl_cat.keys()):
+        if cid not in case_lr_cat:
+            continue
+        bl_e = next((e for e in events if e.get("case_id") == cid and e.get("condition") == "baseline"), None)
+        lr_e = next((e for e in events if e.get("case_id") == cid and e.get("condition") == "leg_reduction"), None)
+        if bl_e and lr_e and bl_e.get("pass") != lr_e.get("pass"):
+            direction = "BL_pass->LR_fail" if bl_e["pass"] else "BL_fail->LR_pass"
+            flips.append((cid, direction))
+    m["anomaly_flips"] = flips[:5]
 
     return m
 
@@ -443,144 +636,272 @@ def _fmt_num(val, width=8):
 
 
 def write_dashboard(metrics: dict, dashboard_path: Path) -> None:
-    """Write dashboard to file atomically (temp + fsync + replace)."""
+    """Write 7-section research dashboard to file atomically."""
     lines = []
     w = lines.append
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    w("=" * 72)
-    w("  LIVE METRICS DASHBOARD")
-    w(f"  Last updated: {now}")
-    w("=" * 72)
-    w("")
-    w("  NOTE: Metrics are computed at the EVENT LEVEL (not case-aggregated).")
-    w("  These may differ from paper results which use case-level aggregation.")
-    w("")
-
-    # --- PROGRESS ---
-    w("[PROGRESS]")
     completed = metrics.get("completed_jobs", 0)
     total = metrics.get("total_jobs", "?")
     pct = metrics.get("percent_complete", 0)
-    w(f"  Completed:  {completed} / {total} eval calls  ({pct:.1f}%)")
-    w("")
+
+    w("=" * 78)
+    w("  T3 LIVE METRICS DASHBOARD")
+    w(f"  Updated: {now}    Progress: {completed}/{total} ({pct:.1f}%)")
+    w("=" * 78)
 
     # --- TRIAL PROGRESS ---
     trial_progress = metrics.get("trial_progress", [])
     if trial_progress:
         complete_count = sum(1 for t in trial_progress if t["status"] == "COMPLETE")
         total_trials = len(trial_progress)
-        w(f"  Completed trials: {complete_count} / {total_trials}")
-        for t in sorted(trial_progress, key=lambda x: x["trial"]):
-            status = t["status"]
-            actual = t["actual"]
-            expected = t["expected"]
-            w(f"    Trial {t['trial']}: {actual:>3}/{expected} {status}")
-        w("")
+        w(f"  Trials: {complete_count}/{total_trials} complete")
 
     if completed == 0:
         w("  (no events yet)")
-        w("")
-        w("=" * 72)
+        w("=" * 78)
         _write_atomic(lines, dashboard_path)
         return
 
-    # --- CONDITION COMPARISON ---
     cond_metrics = metrics.get("condition_metrics", {})
-    if cond_metrics:
-        w("[CONDITION COMPARISON]")
-        w("  Pass  = code passes execution tests (PRIMARY — trustworthy)")
-        w("  LEG   = reasoning correct but code wrong (UNRELIABLE — classifier disqualified)")
-        w("  Lucky = code correct but reasoning wrong (UNRELIABLE — classifier disqualified)")
-        w("  E|R   = P(code correct | reasoning correct) (UNRELIABLE)")
-        w("  NOTE: LEG/Lucky/E|R depend on reasoning classifier which failed Phase 0 controls.")
-        w(
-            "        See reasoning_evaluator_audit/phase0_report.md. Only Pass rate is scientifically valid."
-        )
-        w("")
-        w(f"  {'Condition':<20} {'N':>5} {'Pass':>8} {'LEG':>8} {'Lucky':>8} {'E|R':>8}")
-        w(f"  {'─' * 60}")
-        for cond, cm in sorted(cond_metrics.items()):
-            er = f"{cm['exec_reasoning']:.4f}" if cm["exec_reasoning"] is not None else "N/A"
-            w(
-                f"  {cond:<20} {cm['n']:>5} {cm['pass_rate']:>7.4f} {cm['leg_rate']:>7.4f} "
-                f"{cm['lucky_fix_rate']:>7.4f} {er:>8}"
-            )
-        w("")
 
-    # --- DELTAS ---
+    # ==================================================================
+    # SECTION 1 — SYSTEM HEALTH
+    # ==================================================================
+    w("")
+    w("─" * 78)
+    w("  S1: SYSTEM HEALTH")
+    w("─" * 78)
+
+    pf = metrics.get("parse_failure_rate", 0)
+    cf = metrics.get("classifier_parse_failure_rate", 0)
+    nr = metrics.get("no_reasoning_rate", 0)
+    health_ok = pf < 0.05 and cf < 0.05 and nr < 0.05
+
+    w(f"  parse_failure:      {pf:>7.2%}  {'OK' if pf < 0.05 else 'ALERT >5%'}")
+    w(f"  classifier_failure: {cf:>7.2%}  {'OK' if cf < 0.05 else 'ALERT >5%'}")
+    w(f"  no_reasoning:       {nr:>7.2%}  {'OK' if nr < 0.05 else 'ALERT >5%'}")
+    w(f"  coverage:           {metrics.get('evaluated_cases', 0)} cases evaluated")
+    avg_lat = metrics.get("avg_latency")
+    if avg_lat is not None:
+        w(f"  avg_latency:        {avg_lat:.1f}s   max: {metrics.get('max_latency', 0):.1f}s")
+    w(f"  status:             {'HEALTHY' if health_ok else 'DEGRADED'}")
+
+    # Per-condition failure rates
+    if cond_metrics:
+        w("")
+        w(f"  {'Condition':<20} {'Parse':>8} {'Cls.Fail':>8} {'NoReas':>8}")
+        w(f"  {'─' * 48}")
+        for cond, cm in sorted(cond_metrics.items()):
+            w(f"  {cond:<20} {cm.get('parse_failure_rate',0):>7.2%} "
+              f"{cm.get('classifier_failure_rate',0):>7.2%} "
+              f"{cm.get('no_reasoning_rate',0):>7.2%}")
+
+    # ==================================================================
+    # SECTION 2 — REGIME DISTRIBUTION
+    # ==================================================================
+    w("")
+    w("─" * 78)
+    w("  S2: REGIME DISTRIBUTION")
+    w("─" * 78)
+
+    ts = metrics.get("true_success_count", 0)
+    lg = metrics.get("leg_count", 0)
+    lf = metrics.get("lucky_fix_count", 0)
+    tf = metrics.get("true_failure_count", 0)
+
+    w(f"  true_success:  {ts:>4}  ({metrics.get('true_success_rate',0):>7.2%})")
+    w(f"  LEG:           {lg:>4}  ({metrics.get('leg_rate',0):>7.2%})")
+    w(f"  lucky_fix:     {lf:>4}  ({metrics.get('lucky_fix_rate',0):>7.2%})")
+    w(f"  true_failure:  {tf:>4}  ({metrics.get('true_failure_rate',0):>7.2%})")
+
+    # Signal check
+    signals = []
+    if lg == 0:
+        signals.append("LEG=0 — classifier may be broken")
+    if lf == 0 and completed > 10:
+        signals.append("lucky_fix=0 — reasoning eval may not be working")
+    if ts / completed > 0.9 and completed > 10:
+        signals.append("true_success >90% — check difficulty")
+    if signals:
+        for s in signals:
+            w(f"  WARNING: {s}")
+
+    # Per-condition regime
+    if cond_metrics:
+        w("")
+        w(f"  {'Condition':<20} {'N':>5} {'Pass':>7} {'LEG':>7} {'Lucky':>7} {'Fail':>7}")
+        w(f"  {'─' * 58}")
+        for cond, cm in sorted(cond_metrics.items()):
+            rd = cm.get("regime_distribution", {})
+            w(f"  {cond:<20} {cm['n']:>5} "
+              f"{rd.get('true_success',{}).get('pct',0):>6.2%} "
+              f"{rd.get('leg',{}).get('pct',0):>6.2%} "
+              f"{rd.get('lucky_fix',{}).get('pct',0):>6.2%} "
+              f"{rd.get('true_failure',{}).get('pct',0):>6.2%}")
+
+    # ==================================================================
+    # SECTION 3 — INTERVENTION EFFECT
+    # ==================================================================
+    w("")
+    w("─" * 78)
+    w("  S3: INTERVENTION EFFECT")
+    w("─" * 78)
+
     if "delta_pass" in metrics:
-        w("[DELTAS (leg_reduction - baseline)]")
-        w("  How much the leg_reduction intervention changed each rate vs baseline.")
-        w(f"  Pass:  {metrics['delta_pass']:+.4f}  (PRIMARY — trustworthy)")
-        w(f"  LEG:   {metrics['delta_leg']:+.4f}  (UNRELIABLE)")
-        w(f"  Lucky: {metrics['delta_lucky']:+.4f}  (UNRELIABLE)")
+        dp = metrics["delta_pass"]
+        dl = metrics.get("delta_leg", 0)
+        dlk = metrics.get("delta_lucky", 0)
+        w(f"  delta_pass:   {dp:>+.4f}  {'HELPS' if dp > 0.05 else 'HURTS' if dp < -0.05 else 'NEUTRAL'}")
+        w(f"  delta_leg:    {dl:>+.4f}")
+        w(f"  delta_lucky:  {dlk:>+.4f}")
+        w(f"  regime:       {metrics.get('regime', 'N/A')}")
+    else:
+        w("  (need both baseline and leg_reduction for deltas)")
+
+    # Transitions
+    trans = metrics.get("transitions", {})
+    if trans:
         w("")
+        w("  Transitions (baseline -> intervention):")
+        l2s = metrics.get("leg_to_success", 0)
+        f2s = metrics.get("failure_to_success", 0)
+        s2w = metrics.get("success_to_worse", 0)
+        w(f"    LEG -> true_success:      {l2s:>3}  {'GOOD' if l2s > 0 else ''}")
+        w(f"    true_failure -> success:   {f2s:>3}  {'GOOD' if f2s > 0 else ''}")
+        w(f"    true_success -> worse:     {s2w:>3}  {'BAD' if s2w > 0 else ''}")
+        w("")
+        w("  All transitions:")
+        for t, count in sorted(trans.items(), key=lambda x: -x[1]):
+            w(f"    {t:<40s} {count:>3}")
 
-    # --- CI STATUS ---
-    w(f"[CI STATUS] {metrics.get('ci_status', 'N/A')}")
-    w("  Whether enough samples exist per condition to compute standard errors.")
-    w("  'SE computed' = ≥10 events per condition. 'CI NOT STABLE' = <10.")
+    # ==================================================================
+    # SECTION 4 — REASONING QUALITY
+    # ==================================================================
     w("")
+    w("─" * 78)
+    w("  S4: REASONING QUALITY")
+    w("─" * 78)
 
-    # --- STABILITY ---
-    w("[CASE STABILITY]")
-    w("  A case is 'stable' if it passes or fails consistently across all trials.")
-    w("  'Unstable' = mixed pass/fail across trials (nondeterministic).")
-    w(f"  Stable cases:   {metrics.get('stable_cases', 0)}")
-    w(f"  Unstable cases: {metrics.get('unstable_cases', 0)}")
+    n_eval = metrics.get("reasoning_evaluated_count", 0)
+    w(f"  evaluated: {n_eval}/{completed}")
+    if n_eval > 0:
+        w("")
+        w(f"  {'Dimension':<30s} {'CORRECT':>8} {'PARTIAL':>8} {'WRONG':>8}")
+        w(f"  {'─' * 56}")
+        for dim in ("mechanism_identified", "invariant_identified", "causal_chain_complete",
+                     "fix_alignment", "reasoning_code_alignment"):
+            cr = metrics.get(f"{dim}_correct_rate", 0)
+            pr = metrics.get(f"{dim}_partial_rate", 0)
+            wr = metrics.get(f"{dim}_wrong_rate", 0)
+            w(f"  {dim:<30s} {cr:>7.2%} {pr:>7.2%} {wr:>7.2%}")
+
+    # 2x2 matrix
     w("")
+    w("  Reasoning x Execution Matrix:")
+    w(f"  {'':20s} {'code PASS':>12} {'code FAIL':>12}")
+    w(f"  {'reasoning CORRECT':<20s} {metrics.get('matrix_correct_pass',0):>12} {metrics.get('matrix_correct_fail',0):>12}")
+    w(f"  {'reasoning WRONG':<20s} {metrics.get('matrix_wrong_pass',0):>12} {metrics.get('matrix_wrong_fail',0):>12}")
 
-    # --- REGIME ---
-    w(f"[REGIME CLASSIFICATION] {metrics.get('regime', 'N/A')}")
-    w("  EXECUTION-LIMITED = LEG >15%: models reason correctly but fail to produce")
-    w("    correct code. The bottleneck is code generation, not understanding.")
-    w("  ALIGNED = LEG <10% and pass delta >5%: reasoning and code quality track.")
-    w("  MIXED = neither pattern dominates.")
-    w("")
-
-    # --- TOP CASES ---
-    for label, key, desc in [
-        ("LEG Rate", "top5_leg", "Cases with the highest reasoning-correct-but-code-wrong rate."),
-        (
-            "Lucky Fix Rate",
-            "top5_lucky",
-            "Cases with the highest code-correct-but-reasoning-wrong rate.",
-        ),
-        (
-            "Intervention Delta",
-            "top5_delta",
-            "Cases where leg_reduction improved pass rate the most vs baseline.",
-        ),
-    ]:
-        top = metrics.get(key, [])
-        if top:
-            w(f"[TOP 5 — {label}]")
-            w(f"  {desc}")
-            for cid, val in top:
-                w(f"  {cid:<36} {val:>8.4f}")
-            w("")
-
-    # --- FIGURE READINESS ---
-    w(f"[FIGURE READINESS] {metrics.get('figure_readiness', 'NOT READY')}")
-    w("  READY = all trials complete. PRELIMINARY = ≥1 trial done. NOT READY = none.")
-    w("")
-
-    # --- PAPER FIGURES + STATS PREVIEW ---
-    w("[PAPER FIGURES + STATS PREVIEW]")
+    # Per-condition reasoning quality
     if cond_metrics:
         for cond, cm in sorted(cond_metrics.items()):
-            w(f"  {cond}:")
-            w(f"    Pass rate:  {cm['pass_rate']:.4f}")
-            w(f"    LEG rate:   {cm['leg_rate']:.4f}")
-            w(f"    Lucky fix:  {cm['lucky_fix_rate']:.4f}")
-            er_str = f"{cm['exec_reasoning']:.4f}" if cm["exec_reasoning"] is not None else "N/A"
-            w(f"    Exec|Reas:  {er_str}")
-    w("")
+            rq = cm.get("reasoning_quality", {})
+            if rq:
+                w(f"")
+                w(f"  {cond} ({cm.get('reasoning_evaluated',0)} evaluated):")
+                for dim, vals in rq.items():
+                    w(f"    {dim:<28s} C={vals['correct']:>5.2%}  P={vals['partial']:>5.2%}  W={vals['wrong']:>5.2%}")
 
-    w("=" * 72)
+    # ==================================================================
+    # SECTION 5 — CLASSIFIER HEALTH
+    # ==================================================================
+    w("")
+    w("─" * 78)
+    w("  S5: CLASSIFIER HEALTH")
+    w("─" * 78)
+
+    ch = metrics.get("confidence_high_rate")
+    if ch is not None:
+        cm_rate = metrics.get("confidence_medium_rate", 0)
+        cl = metrics.get("confidence_low_rate", 0)
+        w(f"  HIGH:   {ch:>7.2%}")
+        w(f"  MEDIUM: {cm_rate:>7.2%}")
+        w(f"  LOW:    {cl:>7.2%}")
+        if ch > 0.9:
+            w("  WARNING: >90% HIGH — classifier may be too lenient")
+        if cl > 0.3:
+            w("  WARNING: >30% LOW — classifier may be confused")
+    else:
+        w("  (no classifier results yet)")
+
+    # Per-condition confidence
+    if cond_metrics:
+        w("")
+        w(f"  {'Condition':<20} {'HIGH':>8} {'MEDIUM':>8} {'LOW':>8}")
+        w(f"  {'─' * 48}")
+        for cond, cm_data in sorted(cond_metrics.items()):
+            cd = cm_data.get("confidence_distribution", {})
+            if cd:
+                w(f"  {cond:<20} {cd.get('HIGH',0):>7.2%} {cd.get('MEDIUM',0):>7.2%} {cd.get('LOW',0):>7.2%}")
+
+    # ==================================================================
+    # SECTION 6 — CASE ANOMALIES
+    # ==================================================================
+    w("")
+    w("─" * 78)
+    w("  S6: CASE ANOMALIES")
+    w("─" * 78)
+
+    anomaly_leg = metrics.get("anomaly_leg_cases", [])
+    anomaly_lucky = metrics.get("anomaly_lucky_cases", [])
+    anomaly_flips = metrics.get("anomaly_flips", [])
+
+    if anomaly_leg:
+        w("  LEG cases (reasoning correct, code wrong):")
+        for cid, rate in anomaly_leg:
+            w(f"    {cid:<36s} {rate:>6.2%}")
+
+    if anomaly_lucky:
+        w("  Lucky fix cases (reasoning wrong, code correct):")
+        for cid, rate in anomaly_lucky:
+            w(f"    {cid:<36s} {rate:>6.2%}")
+
+    if anomaly_flips:
+        w("  Baseline/LEG flips (different pass outcome):")
+        for cid, direction in anomaly_flips:
+            w(f"    {cid:<36s} {direction}")
+
+    if not anomaly_leg and not anomaly_lucky and not anomaly_flips:
+        w("  (no anomalies detected)")
+
+    # ==================================================================
+    # SECTION 7 — FAILURE TYPE BREAKDOWN
+    # ==================================================================
+    w("")
+    w("─" * 78)
+    w("  S7: FAILURE TYPE BREAKDOWN")
+    w("─" * 78)
+
+    if cond_metrics:
+        for cond, cm_data in sorted(cond_metrics.items()):
+            ftc = cm_data.get("failure_type_counts", {})
+            if ftc:
+                w(f"  {cond}:")
+                for ft, count in ftc.items():
+                    w(f"    {ft:<30s} {count:>4}")
+                w("")
+
+    # ==================================================================
+    # FOOTER
+    # ==================================================================
+    w("─" * 78)
+    w(f"  CI: {metrics.get('ci_status', 'N/A')}  |  "
+      f"Stable: {metrics.get('stable_cases', 0)}  Unstable: {metrics.get('unstable_cases', 0)}  |  "
+      f"Figures: {metrics.get('figure_readiness', 'NOT READY')}")
+    w("=" * 78)
     w(f"  END — {completed}/{total} eval calls")
-    w("=" * 72)
+    w("=" * 78)
 
     _write_atomic(lines, dashboard_path)
 

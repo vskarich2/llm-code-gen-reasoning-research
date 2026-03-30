@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from experiment_config import load_config, get_config
-from evaluator import llm_classify, parse_classify_output, _CLASSIFY_PROMPT
+from evaluator import llm_classify, parse_classify_output
 from failure_classifier import FAILURE_TYPE_SET
 from runner import load_cases
 from validate_cases_v2 import load_reference_code, load_case_code

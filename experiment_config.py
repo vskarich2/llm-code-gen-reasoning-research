@@ -37,7 +37,7 @@ _log = logging.getLogger("t3.config")
 class ModelSpec:
     name: str
     temperature: float = 0.0
-    max_tokens: int = 4096
+    max_tokens: int = 128000
     top_p: float = 1.0
 
 
@@ -45,10 +45,10 @@ class ModelSpec:
 class EvaluatorModelSpec:
     name: str
     temperature: float = 0.0
-    max_tokens: int = 1024
-    max_task_chars: int = 800
-    max_code_chars: int = 2000
-    max_reasoning_chars: int = 1000
+    max_tokens: int = 128000
+    max_task_chars: int = 128000
+    max_code_chars: int = 128000
+    max_reasoning_chars: int = 128000
 
 
 @dataclass
@@ -113,6 +113,8 @@ class EvaluationConfig:
     leg_enabled: bool = True
     failure_classification_enabled: bool = True
     alignment_enabled: bool = True
+    classifier_mode: str = "blind"  # "blind" or "grounded"
+    reasoning_correct_mode: str = "strict"  # "strict", "lenient", or "raw"
 
 
 @dataclass
@@ -297,7 +299,7 @@ def _parse_config(raw: dict) -> ExperimentConfig:
         ModelSpec(
             name=m["name"],
             temperature=m.get("temperature", 0.0),
-            max_tokens=m.get("max_tokens", 4096),
+            max_tokens=m.get("max_tokens", 128000),
             top_p=m.get("top_p", 1.0),
         )
         for m in gen_list
@@ -312,10 +314,10 @@ def _parse_config(raw: dict) -> ExperimentConfig:
     evaluator = EvaluatorModelSpec(
         name=eval_raw["name"],
         temperature=eval_raw.get("temperature", 0.0),
-        max_tokens=eval_raw.get("max_tokens", 1024),
-        max_task_chars=eval_raw.get("max_task_chars", 800),
-        max_code_chars=eval_raw.get("max_code_chars", 2000),
-        max_reasoning_chars=eval_raw.get("max_reasoning_chars", 1000),
+        max_tokens=eval_raw.get("max_tokens", 128000),
+        max_task_chars=eval_raw.get("max_task_chars", 128000),
+        max_code_chars=eval_raw.get("max_code_chars", 128000),
+        max_reasoning_chars=eval_raw.get("max_reasoning_chars", 128000),
     )
 
     fc_raw = models_raw.get("failure_classifier", {})
@@ -373,6 +375,8 @@ def _parse_config(raw: dict) -> ExperimentConfig:
             "enabled", True
         ),
         alignment_enabled=eval_section.get("alignment", {}).get("enabled", True),
+        classifier_mode=eval_section.get("classifier_mode", "blind"),
+        reasoning_correct_mode=eval_section.get("reasoning_correct_mode", "strict"),
     )
 
     # Execution

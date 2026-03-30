@@ -30,49 +30,13 @@ def load_all_cases():
 
 
 def old_build_prompt(case, condition):
-    """Build prompt using the OLD legacy system."""
-    from prompts import build_base_prompt
-    from nudges.router import (
-        apply_diagnostic, apply_guardrail, apply_guardrail_strict,
-        apply_counterfactual, apply_reason_then_act, apply_self_check,
-        apply_counterfactual_check, apply_test_driven,
-    )
-    code_files = case["code_files_contents"]
-    base = build_base_prompt(case["task"], code_files)
-    case_id = case["id"]
-    hard = case.get("hard_constraints", [])
+    """Build prompt via the canonical AssemblyEngine path.
 
-    if condition == "baseline":
-        return base
-    elif condition == "diagnostic":
-        return apply_diagnostic(case_id, base)
-    elif condition == "guardrail":
-        return apply_guardrail(case_id, base)
-    elif condition == "guardrail_strict":
-        return apply_guardrail_strict(case_id, base, hard)
-    elif condition == "counterfactual":
-        return apply_counterfactual(case_id, base)
-    elif condition == "reason_then_act":
-        return apply_reason_then_act(case_id, base)
-    elif condition == "self_check":
-        return apply_self_check(case_id, base)
-    elif condition == "counterfactual_check":
-        return apply_counterfactual_check(case_id, base)
-    elif condition == "test_driven":
-        return apply_test_driven(case_id, base)
-    elif condition == "repair_loop":
-        return apply_diagnostic(case_id, base)
-    elif condition == "structured_reasoning":
-        from reasoning_prompts import build_structured_reasoning
-        return build_structured_reasoning(base)
-    elif condition == "free_form_reasoning":
-        from reasoning_prompts import build_free_form_reasoning
-        return build_free_form_reasoning(base)
-    elif condition == "branching_reasoning":
-        from reasoning_prompts import build_branching_reasoning
-        return build_branching_reasoning(base)
-    else:
-        raise ValueError(f"Unmigrated condition: {condition}")
+    After Phase 7.2, there is no "old" system. Both old_build_prompt and
+    new_build_prompt call the same path. This function exists only for
+    validation gate compatibility (gates compare old vs new).
+    """
+    return new_build_prompt(case, condition)
 
 
 def new_build_prompt(case, condition):

@@ -13,18 +13,7 @@ from evaluator import *
 from llm import call_model, get_model_config
 from call_logger import set_call_context
 from parse import parse_model_response
-from prompts import build_base_prompt
-from nudges.router import (
-    apply_diagnostic,
-    apply_guardrail,
-    apply_guardrail_strict,
-    apply_counterfactual,
-    apply_reason_then_act,
-    apply_self_check,
-    apply_counterfactual_check,
-    apply_test_driven,
-    get_operator_names,
-)
+from nudges.router import get_operator_names
 
 BASE_DIR = Path(__file__).parent
 
@@ -37,21 +26,43 @@ BASE_DIR = Path(__file__).parent
 def build_prompt(case: dict, condition: str) -> tuple[str, str | None]:
     """Return (prompt, operator_used) for a condition.
 
-    Uses AssemblyEngine for all nudge/reasoning conditions.
-    SCM conditions still use legacy builders (migrated in Step 4).
+    Driven by prompts/prompt_manifest.yaml — no hardcoded condition logic.
     """
-    from assembly_engine import build as _assembly_build, resolve_nudge
-    from prompts import build_base_prompt, _format_code_files
+    from assembly_engine import build as _assembly_build, resolve_nudge, resolve_condition
+    from prompts import _format_code_files
+    from llm import _get_output_format
+
+    spec = resolve_condition(condition)
+    components = list(spec["components"])
+    nudge_cfg = spec.get("nudge", {})
+    nudge_type = nudge_cfg.get("type", "none")
+    include_oi = spec.get("include_output_instruction", True)
+    is_strict = spec.get("guardrail_strict", False)
 
     code_files = case["code_files_contents"]
     code_block = _format_code_files(code_files)
     task = case["task"]
     case_id = case["id"]
-    hard = case.get("hard_constraints", [])
-    ops = get_operator_names(case_id)
-    base_vars = {"task": task, "code_files_block": code_block}
+    file_paths = list(code_files.keys()) or None
+    variables = {"task": task, "code_files_block": code_block}
 
-    # Operator name → registry key mapping
+    # Output instruction
+    if include_oi:
+        _output_fmt = _get_output_format()
+        if _output_fmt == "v2" and file_paths:
+            _oi_component = "output_instruction_v2"
+            _oi_entries = ", ".join(f'"{p}": "<complete file contents or UNCHANGED>"' for p in file_paths)
+            variables["schema_line"] = (
+                '{"root_cause": "<...>", "failure_mechanism": "<...>", '
+                '"broken_invariant": "<...>", "fix_strategy": "<...>", '
+                '"files": {' + _oi_entries + '}}'
+            )
+        else:
+            _oi_component = "output_instruction_v1"
+        components.append(_oi_component)
+
+    # Resolve nudge
+    label = spec.get("label")
     _OP_TO_KEY = {
         "DEPENDENCY_CHECK": "diagnostic__generic_dependency",
         "INVARIANT_GUARD": "diagnostic__generic_invariant",
@@ -68,104 +79,47 @@ def build_prompt(case: dict, condition: str) -> tuple[str, str | None]:
         "TEST_DRIVEN": "reasoning__test_driven",
     }
 
-    def _resolve_nudge_text(op_name):
-        return resolve_nudge(_OP_TO_KEY[op_name])
+    if nudge_type == "operator":
+        op_name = _require_assignment_op(case_id, nudge_cfg["field"])
+        text = resolve_nudge(_OP_TO_KEY[op_name])
+        if is_strict:
+            hard = case.get("hard_constraints", [])
+            if hard:
+                bullets = "\n".join(f"  * {c}" for c in hard)
+                text += (
+                    "\n\nHARD CONSTRAINTS — your solution MUST obey ALL of the following.\n"
+                    "Any violation makes your solution INCORRECT. Do NOT proceed with\n"
+                    "a solution that violates any of these:\n\n"
+                    f"{bullets}\n\n"
+                    "If your solution violates ANY of these constraints, it is wrong.\n"
+                    "You must find an alternative approach that satisfies all of them.\n"
+                )
+            label = "STRICT+" + (op_name or "HARD_ONLY")
+        elif label is None:
+            label = op_name
+        variables[nudge_cfg["variable"]] = text
 
-    if condition == "baseline":
-        r = _assembly_build(["task_and_code"], base_vars)
-        return r.final_prompt, None
+    elif nudge_type == "registry":
+        text = resolve_nudge(nudge_cfg["key"])
+        variables[nudge_cfg["variable"]] = text
 
-    elif condition == "diagnostic":
-        op_name = _require_assignment_op(case_id, "diagnostic")
-        text = _resolve_nudge_text(op_name)
-        r = _assembly_build(["task_and_code", "nudge_diagnostic"],
-                            {**base_vars, "diagnostic_text": text})
-        return r.final_prompt, op_name
+    elif nudge_type == "scm":
+        from scm_data import get_scm_vars
+        scm_vars = get_scm_vars(case_id, nudge_cfg["scm_mode"])
+        variables.update(scm_vars)
 
-    elif condition == "guardrail":
-        op_name = _require_assignment_op(case_id, "guardrail")
-        text = _resolve_nudge_text(op_name)
-        r = _assembly_build(["task_and_code", "nudge_diagnostic"],
-                            {**base_vars, "diagnostic_text": text})
-        return r.final_prompt, op_name
+    r = _assembly_build(components, variables)
 
-    elif condition == "guardrail_strict":
-        op_name = _require_assignment_op(case_id, "guardrail")
-        guardrail_text = _resolve_nudge_text(op_name)
-        # Build base + guardrail via assembly, then append strict section via legacy
-        # (exact replication of old: build_strict_guardrail(soft, hard_constraints))
-        r = _assembly_build(["task_and_code", "nudge_diagnostic"],
-                            {**base_vars, "diagnostic_text": guardrail_text})
-        from nudges.core import build_strict_guardrail
-        prompt = build_strict_guardrail(r.final_prompt, hard)
-        return prompt, "STRICT+" + (op_name or "HARD_ONLY")
+    # Set prompt provenance for call logger (consumed by next emit_call)
+    from call_logger import set_prompt_provenance
+    try:
+        from experiment_config import get_config
+        _cfg_name = get_config().experiment.name
+    except Exception:
+        _cfg_name = None
+    set_prompt_provenance(r, variables, condition=condition, config_name=_cfg_name)
 
-    elif condition in ("counterfactual", "reason_then_act", "self_check",
-                       "counterfactual_check", "test_driven"):
-        op_name = ops.get(condition) or condition.upper()
-        text = _resolve_nudge_text(op_name)
-        r = _assembly_build(["task_and_code", "nudge_reasoning"],
-                            {**base_vars, "reasoning_text": text})
-        return r.final_prompt, op_name
-
-    elif condition == "repair_loop":
-        op_name = _require_assignment_op(case_id, "diagnostic")
-        text = _resolve_nudge_text(op_name)
-        r = _assembly_build(["task_and_code", "nudge_diagnostic"],
-                            {**base_vars, "diagnostic_text": text})
-        return r.final_prompt, "REPAIR_LOOP"
-
-    # SCM conditions — still use legacy builders (migrated in Step 4)
-    elif condition == "scm_descriptive":
-        from scm_prompts import build_scm_descriptive
-        base = build_base_prompt(task, code_files)
-        return build_scm_descriptive(base, case_id), "SCM_DESCRIPTIVE"
-    elif condition == "scm_constrained":
-        from scm_prompts import build_scm_constrained
-        base = build_base_prompt(task, code_files)
-        return build_scm_constrained(base, case_id), "SCM_CONSTRAINED"
-    elif condition == "scm_constrained_evidence":
-        from scm_prompts import build_scm_constrained_evidence
-        base = build_base_prompt(task, code_files)
-        return build_scm_constrained_evidence(base, case_id), "SCM_EVIDENCE"
-    elif condition == "scm_constrained_evidence_minimal":
-        from scm_prompts import build_scm_constrained_evidence_minimal
-        base = build_base_prompt(task, code_files)
-        return build_scm_constrained_evidence_minimal(base, case_id), "SCM_EVIDENCE_MIN"
-    elif condition == "evidence_only":
-        from scm_prompts import build_evidence_only
-        base = build_base_prompt(task, code_files)
-        return build_evidence_only(base, case_id), "EVIDENCE_ONLY"
-    elif condition == "length_matched_control":
-        from scm_prompts import build_length_matched_control
-        base = build_base_prompt(task, code_files)
-        return build_length_matched_control(base, case_id), "LENGTH_CONTROL"
-
-    # Reasoning interface conditions
-    elif condition == "structured_reasoning":
-        text = resolve_nudge("reasoning__structured")
-        r = _assembly_build(["task_and_code", "nudge_reasoning"],
-                            {**base_vars, "reasoning_text": text})
-        return r.final_prompt, "STRUCTURED_REASONING"
-    elif condition == "free_form_reasoning":
-        text = resolve_nudge("reasoning__free_form")
-        r = _assembly_build(["task_and_code", "nudge_reasoning"],
-                            {**base_vars, "reasoning_text": text})
-        return r.final_prompt, "FREE_FORM_REASONING"
-    elif condition == "branching_reasoning":
-        text = resolve_nudge("reasoning__branching")
-        r = _assembly_build(["task_and_code", "nudge_reasoning"],
-                            {**base_vars, "reasoning_text": text})
-        return r.final_prompt, "BRANCHING_REASONING"
-
-    elif condition == "contract_gated":
-        base = build_base_prompt(task, code_files)
-        return base, "CONTRACT_GATED"
-    elif condition == "leg_reduction":
-        base = build_base_prompt(task, code_files)
-        return base, "LEG_REDUCTION"
-    else:
-        raise ValueError(f"Unknown condition: {condition}")
+    return r.final_prompt, label
 
 
 def _require_assignment_op(case_id: str, kind: str) -> str:
@@ -226,39 +180,70 @@ def _emit_metrics_event(
     if _ablation_events_path is not None:
         # Ablation mode: strict event emission with schema validation
         from live_metrics import emit_event
+        from reasoning import REASONING_SCHEMA_VERSION
 
         alignment = ev.get("alignment", {})
-        emit_event(
-            {
-                "case_id": case["id"],
-                "model": model,
-                "condition": condition,
-                "trial": _ablation_trial,
-                "run_id": _ablation_run_id,
-                "pass": ev.get("pass", False),
-                "score": ev.get("score", 0),
-                "reasoning_correct": ev.get("reasoning_correct"),
-                "code_correct": ev.get("code_correct"),
-                "failure_type": ev.get("failure_type"),
-                "category": alignment.get("category"),
-                "num_attempts": ev.get("num_attempts", 1),
-                "elapsed_seconds": elapsed_seconds,
-                # Phase 1 observability
-                "code_present": ev.get("code_present", False),
-                "code_empty_reason": ev.get("code_empty_reason"),
-                "code_source": ev.get("code_source", "unknown"),
-                "case_validity": ev.get("case_validity", "unknown"),
-                "parse_tier": ev.get("parse_tier", -1),
-                "parse_repaired": ev.get("parse_repaired", False),
-                "recovery_applied": ev.get("recovery_applied", False),
-                "reconstruction_status": ev.get("reconstruction_status"),
-                "reconstruction_recovered": ev.get("reconstruction_recovered", False),
-                "content_normalized": ev.get("content_normalized", False),
-                "failure_source": ev.get("failure_source", "unknown"),
-                "failure_source_detail": ev.get("failure_source_detail", "unknown"),
-            },
-            _ablation_events_path,
-        )
+        event = {
+            "case_id": case["id"],
+            "model": model,
+            "condition": condition,
+            "trial": _ablation_trial,
+            "run_id": _ablation_run_id,
+            "pass": ev.get("pass", False),
+            "score": ev.get("score", 0),
+            "reasoning_correct": ev.get("reasoning_correct"),
+            "code_correct": ev.get("code_correct"),
+            "failure_type": ev.get("failure_type"),
+            "category": alignment.get("category"),
+            "num_attempts": ev.get("num_attempts", 1),
+            "elapsed_seconds": elapsed_seconds,
+            # Schema version
+            "reasoning_schema_version": REASONING_SCHEMA_VERSION,
+            # Reasoning validation (v2)
+            "reasoning_attempted": ev.get("reasoning_attempted", False),
+            "reasoning_present": ev.get("reasoning_present", False),
+            "reasoning_lengths": ev.get("reasoning_lengths", {}),
+            # Multi-dimensional classifier (v3)
+            "mechanism_identified": ev.get("mechanism_identified"),
+            "invariant_identified": ev.get("invariant_identified"),
+            "causal_chain_complete": ev.get("causal_chain_complete"),
+            "fix_alignment": ev.get("fix_alignment"),
+            "reasoning_code_alignment": ev.get("reasoning_code_alignment"),
+            "confidence": ev.get("confidence"),
+            "classifier_mode": ev.get("classifier_mode"),
+            "reasoning_correct_mode": ev.get("reasoning_correct_mode"),
+            "classify_parse_error": ev.get("classify_parse_error"),
+            # Phase 1 observability
+            "code_present": ev.get("code_present", False),
+            "code_empty_reason": ev.get("code_empty_reason"),
+            "code_source": ev.get("code_source", "unknown"),
+            "case_validity": ev.get("case_validity", "unknown"),
+            "parse_tier": ev.get("parse_tier", -1),
+            "parse_repaired": ev.get("parse_repaired", False),
+            "recovery_applied": ev.get("recovery_applied", False),
+            "reconstruction_status": ev.get("reconstruction_status"),
+            "reconstruction_recovered": ev.get("reconstruction_recovered", False),
+            "content_normalized": ev.get("content_normalized", False),
+            "failure_source": ev.get("failure_source", "unknown"),
+            "failure_source_detail": ev.get("failure_source_detail", "unknown"),
+        }
+        # V2 conditions: include ALL v2 fields from ev dict
+        if condition in ("baseline_v2", "leg_reduction_v2", "leg_reduction_lean_v2"):
+            v2_keys = [
+                "v2_artifact", "v2_category", "legacy_compat_category",
+                "mechanism_correct", "commitments_valid", "alignment_positive",
+                "commitments_satisfied_positive",
+                "mechanism_identified_dim", "commitments_extracted_dim",
+                "commitments_satisfied_dim", "reasoning_code_alignment_dim",
+                "classify_v2_raw", "classify_v2_parse_error",
+                "counterfactual", "evidence", "judgment",
+                "commitment_source_for_classifier", "schema_variant",
+                "operator_used", "reasoning_correct_compat",
+            ]
+            for k in v2_keys:
+                if k in ev:
+                    event[k] = ev[k]
+        emit_event(event, _ablation_events_path)
         return
 
     # Legacy mode: old emit_event path (for non-ablation runs)
@@ -306,6 +291,9 @@ def _build_parsed_response(parse_result: dict, raw_output: str) -> dict:
 
     Guarantees: parsed["code"] is always str (never None).
     file_dict parser returns code=None; we normalize to "" here.
+
+    reasoning_obj and reasoning_validation MUST already be set by the parser
+    (parse_model_response or _leg_to_parse_format). This function does NOT parse.
     """
     parse_result["raw_output"] = raw_output
     parse_result.setdefault("_raw_fallback", False)
@@ -322,6 +310,20 @@ def _build_parsed_response(parse_result: dict, raw_output: str) -> dict:
     parse_result.setdefault("parse_repaired", False)
     parse_result.setdefault("parse_repair_type", None)
     parse_result.setdefault("data_lineage", ["raw_output_received"])
+
+    # reasoning_obj and reasoning_validation are REQUIRED from the parser.
+    # If missing, the parser has a bug. Crash.
+    if "reasoning_obj" not in parse_result:
+        raise RuntimeError(
+            "PIPELINE INVARIANT VIOLATION: parse_result missing 'reasoning_obj'. "
+            "All parse tiers MUST set this field."
+        )
+    if "reasoning_validation" not in parse_result:
+        raise RuntimeError(
+            "PIPELINE INVARIANT VIOLATION: parse_result missing 'reasoning_validation'. "
+            "All parse tiers MUST set this field."
+        )
+
     return parse_result
 
 
@@ -337,7 +339,23 @@ def _leg_to_parse_format(lr_parsed: dict) -> dict:
 
     This is a FORMAT CONVERTER, not a constructor. The result feeds into
     _build_parsed_response (the ONE constructor) for normalization.
+
+    reasoning_obj is extracted from lr_parsed (the already-parsed LEG JSON).
+    No re-parsing. The LEG parser already did json.loads.
     """
+    from reasoning import extract_reasoning_obj, validate_reasoning
+
+    # Use _raw_json (the original json.loads result) for reasoning extraction.
+    # lr_parsed is the LEG parser's output which may not contain the v2 reasoning fields.
+    # _raw_json is the model's actual JSON response.
+    raw_json = lr_parsed.get("_raw_json")
+    if raw_json is not None and isinstance(raw_json, dict):
+        reasoning_obj = extract_reasoning_obj(raw_json)
+        reasoning_validation = validate_reasoning(reasoning_obj, raw_json)
+    else:
+        reasoning_obj = extract_reasoning_obj({})
+        reasoning_validation = validate_reasoning(reasoning_obj, {})
+
     return {
         "code": lr_parsed.get("code", ""),
         "reasoning": lr_parsed.get("bug_diagnosis", ""),
@@ -346,6 +364,9 @@ def _leg_to_parse_format(lr_parsed: dict) -> dict:
         "parse_error": lr_parsed.get("parse_error"),
         "response_format": "leg_reduction",
         "_raw_fallback": False,
+        # Structured reasoning (schema v2)
+        "reasoning_obj": reasoning_obj,
+        "reasoning_validation": reasoning_validation,
         # Observability from LEG parser
         "code_present": lr_parsed.get(
             "code_extracted", bool((lr_parsed.get("code") or "").strip())
@@ -577,10 +598,10 @@ def evaluate_case(case: dict, raw_output: str, parser: str = "standard") -> tupl
     """
     # Step 1: Parse (ONE constructor for all paths)
     if parser == "leg":
-        from leg_reduction import parse_leg_reduction_output
+        from leg_reduction import parse_leg_output
 
-        lr_parsed = parse_leg_reduction_output(raw_output)
-        parse_result = _leg_to_parse_format(lr_parsed)
+        # New LAG parser uses SAME recovery pipeline as baseline (parser fairness)
+        parse_result = parse_leg_output(raw_output)
     else:
         parse_result = parse_model_response(raw_output)
     parsed = _build_parsed_response(parse_result, raw_output)
@@ -641,7 +662,9 @@ def _attempt_and_evaluate(
         phase=call_phase, case_id=case["id"], condition=call_condition, attempt_index=call_attempt
     )
     case["_condition"] = call_condition  # propagate to classifier context
-    raw_output = call_model(prompt, model=model, file_paths=file_paths)
+    # Output instruction is now included in the prompt by build_prompt().
+    # Pass raw=True to prevent call_model from appending it again.
+    raw_output = call_model(prompt, model=model, raw=True)
     parsed, ev = evaluate_case(case, raw_output)
     return raw_output, parsed, ev
 
@@ -754,7 +777,7 @@ def run_repair_loop(case: dict, model: str) -> tuple[str, str, dict]:
         return case["id"], "repair_loop", ev
 
     # Attempt 2: feed errors back
-    error_reasons = "; ".join(ev.get("reasons", [])[:3])
+    error_reasons = "; ".join(ev.get("reasons", []))
     repair_prompt = (
         prompt
         + f"\n\nYour previous attempt FAILED with:\n{error_reasons}\n\nFix and return corrected code."
@@ -803,12 +826,7 @@ def run_repair_loop(case: dict, model: str) -> tuple[str, str, dict]:
 def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
     """Multi-step CGE: elicit contract → generate code → gate → retry → eval."""
     import logging
-    from contract import (
-        parse_contract,
-        build_contract_prompt,
-        build_code_from_contract_prompt,
-        build_retry_prompt,
-    )
+    from contract import parse_contract
     from diff_gate import validate as gate_validate
 
     cid = case["id"]
@@ -819,8 +837,21 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
     # Reference code for must_not_change comparison
     ref_code = "\n\n".join(code_files.values())
 
-    # Step 1: Elicit contract (raw=True to avoid JSON output instruction override)
-    contract_prompt = build_contract_prompt(task, code_files)
+    # Step 1: Elicit contract (raw=True, no output instruction)
+    from assembly_engine import build as _assembly_build
+    from prompts import _format_code_files as _fmt_cf
+    from contract import CONTRACT_SCHEMA_TEXT
+    _cge_code_block = _fmt_cf(code_files)
+
+    _elicit_vars = {
+        "task": task, "code_files_block": _cge_code_block,
+        "stage": "elicit", "contract_schema_text": CONTRACT_SCHEMA_TEXT,
+        "contract_json": "", "violations_text": "",
+    }
+    _elicit_r = _assembly_build(["cge_stage"], _elicit_vars)
+    contract_prompt = _elicit_r.final_prompt
+    from call_logger import set_prompt_provenance
+    set_prompt_provenance(_elicit_r, _elicit_vars, condition="contract_gated")
     set_call_context(
         phase="generation",
         case_id=cid,
@@ -837,8 +868,17 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
 
     contract_verifiable = contract.get("_verifiable", False)
 
-    # Step 2: Generate code conditioned on contract
-    code_prompt = build_code_from_contract_prompt(task, code_files, contract)
+    # Step 2: Generate code conditioned on contract (with output instruction)
+    import json as _json
+    _code_vars = {
+        "task": task, "code_files_block": _cge_code_block,
+        "stage": "code", "contract_schema_text": "",
+        "contract_json": _json.dumps(contract, indent=2, default=str),
+        "violations_text": "",
+    }
+    _code_r = _assembly_build(["cge_stage", "output_instruction_v1"], _code_vars)
+    code_prompt = _code_r.final_prompt
+    set_prompt_provenance(_code_r, _code_vars, condition="contract_gated")
     set_call_context(
         phase="generation",
         case_id=cid,
@@ -846,7 +886,7 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
         attempt_index=0,
         step="code_gen",
     )
-    code_raw = call_model(code_prompt, model=model)
+    code_raw = call_model(code_prompt, model=model, raw=True)
 
     # Step 3: Gate validation (extraction-only, NOT evaluation)
     candidate_code = extract_code_from_raw(code_raw)
@@ -859,7 +899,16 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
     if not gate_1["valid"]:
         # Step 4: Retry with violations
         _log.info("Gate failed for %s (%d violations) — retrying", cid, len(gate_1["violations"]))
-        retry_prompt = build_retry_prompt(task, code_files, contract, gate_1["violations"])
+        _v_text = "\n".join(f"  - {v}" for v in gate_1["violations"])
+        _retry_vars = {
+            "task": task, "code_files_block": _cge_code_block,
+            "stage": "retry", "contract_schema_text": "",
+            "contract_json": _json.dumps(contract, indent=2, default=str),
+            "violations_text": _v_text,
+        }
+        _retry_r = _assembly_build(["cge_stage", "output_instruction_v1"], _retry_vars)
+        retry_prompt = _retry_r.final_prompt
+        set_prompt_provenance(_retry_r, _retry_vars, condition="contract_gated")
         set_call_context(
             phase="generation",
             case_id=cid,
@@ -867,7 +916,7 @@ def run_contract_gated(case: dict, model: str) -> tuple[str, str, dict]:
             attempt_index=1,
             step="code_retry",
         )
-        retry_raw = call_model(retry_prompt, model=model)
+        retry_raw = call_model(retry_prompt, model=model, raw=True)
         retry_code = extract_code_from_raw(retry_raw)
 
         gate_2 = gate_validate(contract, retry_code, ref_code)
@@ -935,14 +984,30 @@ def run_leg_reduction(case: dict, model: str) -> tuple[str, str, dict]:
 
     Returns (case_id, condition, eval_dict).
     """
-    from leg_reduction import build_leg_reduction_prompt
+    from assembly_engine import build as _assembly_build
+    from prompts import _format_code_files
 
     cid = case["id"]
     code_files = case["code_files_contents"]
     task = case["task"]
 
-    # Build prompt and make ONE LLM call (raw=True, prompt has its own schema)
-    prompt = build_leg_reduction_prompt(task, code_files)
+    # Build file_keys_example for the prompt template
+    file_paths = list(code_files.keys())
+    file_keys_example = ", ".join(
+        f'"{p}": "<complete file contents or UNCHANGED>"' for p in file_paths
+    )
+
+    # Build prompt via AssemblyEngine
+    code_block = _format_code_files(code_files)
+    _leg_vars = {
+        "task": task,
+        "code_files_block": code_block,
+        "file_keys_example": file_keys_example,
+    }
+    _rendered = _assembly_build(["leg_reduction"], _leg_vars)
+    prompt = _rendered.final_prompt
+    from call_logger import set_prompt_provenance
+    set_prompt_provenance(_rendered, _leg_vars, condition="leg_reduction")
     set_call_context(phase="generation", case_id=cid, condition="leg_reduction", attempt_index=0)
     raw_output = call_model(prompt, model=model, raw=True)
 
@@ -953,32 +1018,16 @@ def run_leg_reduction(case: dict, model: str) -> tuple[str, str, dict]:
     # Phase 1 observability
     _propagate_observability(parsed, ev)
 
-    # Attach LEG-reduction metadata from stashed lr_parsed
-    lr = parsed.get("_lr_parsed", {})
+    # Attach LAG metadata (minimal schema: root_cause, fix_strategy, risk_check)
+    leg_fields = parsed.get("leg_fields", {})
     ev["operator_used"] = "LEG_REDUCTION"
     ev["condition"] = "leg_reduction"
-    ev["code_extracted"] = lr.get("code_extracted", bool((lr.get("code") or "").strip()))
-    ev["schema_compliant"] = lr.get("schema_compliant", lr.get("valid", False))
-    ev["schema_violations"] = lr.get("schema_violations", lr.get("validation_errors", []))
-    ev["extraction_source"] = lr.get("extraction_source", "strict")
-    ev["extraction_conflict"] = False
-    ev["leg_reduction"] = {
-        "valid_schema": lr.get("valid"),
-        "parse_error": lr.get("parse_error"),
-        "validation_errors": lr.get("validation_errors", []),
-        "schema_compliant": lr.get("schema_compliant", lr.get("valid", False)),
-        "bug_diagnosis": lr.get("bug_diagnosis", ""),
-        "plan_steps": lr.get("plan_steps", []),
-        "revision_history": lr.get("revision_history", []),
-        "verification": lr.get("verification", []),
-        "internal_revisions": lr.get("internal_revisions", 0),
-        "all_steps_verified": lr.get("all_steps_verified"),
-        "exceeded_max_revisions": lr.get("leg_reduction_exceeded_max_revisions", False),
-        "plan_step_count": len(lr.get("plan_steps", [])),
-        "verified_step_count": sum(
-            1 for v in lr.get("verification", []) if v.get("status") == "PASS"
-        ),
-        "revision_count": len(lr.get("revision_history", [])),
+    ev["leg_valid"] = parsed.get("leg_valid", False)
+    ev["leg_warnings"] = parsed.get("leg_warnings", [])
+    ev["leg_fields"] = {
+        "root_cause": leg_fields.get("root_cause", ""),
+        "fix_strategy": leg_fields.get("fix_strategy", ""),
+        "risk_check": leg_fields.get("risk_check", ""),
     }
 
     write_log(cid, "leg_reduction", model, prompt, raw_output, parsed, ev)
@@ -1056,6 +1105,8 @@ class RunLogger:
         reasoning_text = parsed.get("reasoning") or ""
         code_text = parsed.get("code") or ""
         recovery_method = self._derive_recovery_method(parsed)
+        reasoning_obj = parsed.get("reasoning_obj", {})
+        reasoning_validation = parsed.get("reasoning_validation", {})
 
         record = {
             "run_id": self.run_id,
@@ -1067,55 +1118,24 @@ class RunLogger:
             "raw_response_length": len(raw_output),
             "parsed": {
                 "reasoning": (
-                    reasoning_text[:200]
+                    reasoning_text
                     if isinstance(reasoning_text, str)
-                    else str(reasoning_text)[:200]
+                    else str(reasoning_text)
                 ),
                 "code_length": (
                     len(code_text) if isinstance(code_text, str) else len(str(code_text))
                 ),
                 "parse_error": parse_error,
                 "_raw_fallback": parsed.get("_raw_fallback", False),
-            },
-            "execution": ev.get("execution", {}),
-            "evaluation": {
-                "pass": ev["pass"],
-                "score": ev["score"],
-                "reasoning_valid": ev.get("identified_correct_issue", False),
-                "alignment": ev.get("alignment", {}),
-                "num_attempts": ev.get("num_attempts"),
-            },
-            # ── AUDIT FIELDS ──
-            # Prompts/responses are in calls/*.json (call logger).
-            # Classifier prompt/response are in calls/*.json (phase=classifier).
-            # Only non-redundant audit fields remain here.
-            "audit": {
-                "case_id": case_id,
-                "condition": condition,
-                "parsed_reasoning": (
-                    reasoning_text[:500]
-                    if isinstance(reasoning_text, str)
-                    else str(reasoning_text)[:500]
-                ),
-                "parse_error": parse_error,
-                "parse_category": ev.get("parse_category"),
-                "recovery_method": recovery_method,
-                "classifier_verdict": ev.get("reasoning_correct"),
-                "classifier_failure_type": ev.get("failure_type"),
-                "classifier_parse_error": ev.get("classify_parse_error"),
-                "eval_model_intended": ev.get("eval_model_intended"),
-                "eval_model_actual": ev.get("eval_model_actual"),
-                "code_present": ev.get("code_present"),
-                "code_empty_reason": ev.get("code_empty_reason"),
-                "code_source": ev.get("code_source"),
-                "case_validity": ev.get("case_validity"),
-                "failure_source": ev.get("failure_source"),
-                "failure_source_detail": ev.get("failure_source_detail"),
-                "recovery_applied": ev.get("recovery_applied"),
-                "recovery_types": ev.get("recovery_types"),
-                "content_normalized": ev.get("content_normalized"),
+                "response_format": parsed.get("response_format"),
                 "data_lineage": parsed.get("data_lineage"),
             },
+            "execution": ev.get("execution", {}),
+            # Full evaluation dict — no truncation, no cherry-picking.
+            # Every field that run_single/run_leg_reduction/etc. sets on ev
+            # is preserved here for downstream analysis.
+            "evaluation": {k: v for k, v in ev.items()
+                          if k != "execution"},  # execution is already a top-level key
         }
 
         for path, data in [

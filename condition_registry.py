@@ -88,6 +88,22 @@ CONDITION_SPECS: dict[str, ConditionSpec] = {
         universal=True,
         description="Intra-call self-correction: plan → code → verify → revise",
     ),
+    # === V2 ABLATION CONDITIONS ===
+    "baseline_v2": ConditionSpec(
+        name="baseline_v2",
+        universal=True,
+        description="V2 baseline: root_cause + fix_strategy + files (no commitments)",
+    ),
+    "leg_reduction_v2": ConditionSpec(
+        name="leg_reduction_v2",
+        universal=True,
+        description="V2 LEG: structured 5-step with code_commitments + risk_check",
+    ),
+    "leg_reduction_lean_v2": ConditionSpec(
+        name="leg_reduction_lean_v2",
+        universal=True,
+        description="V2 LEG lean: lighter prompt, same schema as leg_reduction_v2",
+    ),
     # === RESTRICTED — need per-case nudge mappings ===
     "diagnostic": ConditionSpec(
         name="diagnostic",

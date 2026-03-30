@@ -15,6 +15,69 @@ def get_scm(case_id: str) -> dict | None:
     return SCM_REGISTRY.get(case_id)
 
 
+def get_scm_vars(case_id: str, mode: str) -> dict:
+    """Return SCM data as a dict of template variables.
+
+    Pure data formatting. No instruction text. Returns empty dict if no SCM data.
+    """
+    scm = get_scm(case_id)
+    if not scm:
+        return {}
+
+    MODE_MAP = {
+        "scm_descriptive": "descriptive",
+        "scm_constrained": "constrained",
+        "scm_constrained_evidence": "constrained_evidence",
+        "scm_constrained_evidence_minimal": "minimal",
+        "evidence_only": "evidence_only",
+        "length_matched_control": "length_control",
+    }
+
+    edges = "\n".join(f"  {eid}: {desc}" for eid, desc in scm["edges"].items())
+    constraints = "\n".join(
+        f"  {cid}: {c['text']}\n    \u2192 protects: {', '.join(c['invariants'])}"
+        for cid, c in scm["constraints"].items()
+    )
+    constraints_flat = "\n".join(f"  {cid}: {c['text']}" for cid, c in scm["constraints"].items())
+    invariants = "\n".join(f"  {iid}: {desc}" for iid, desc in scm["invariants"].items())
+    functions = "\n".join(f"  {fid} = {desc}" for fid, desc in scm["functions"].items())
+    variables = "\n".join(f"  {vid} = {desc}" for vid, desc in scm["variables"].items())
+    cc = scm.get("critical_constraint", {})
+    inv_checks = "\n".join(
+        f"  {iid}: Does this still hold? Verified by which F*, E*?"
+        for iid in scm["invariants"]
+    )
+
+    # Minimal evidence set
+    ces = scm.get("critical_evidence_set", {})
+    min_edges = "\n".join(f"  {e}: {scm['edges'].get(e, '?')}" for e in ces.get("edges", []))
+    min_constraints = "\n".join(
+        f"  {c}: {scm['constraints'].get(c, {}).get('text', '?')}" for c in ces.get("constraints", [])
+    )
+    min_invariants = "\n".join(
+        f"  {i}: {scm['invariants'].get(i, '?')}" for i in ces.get("invariants", [])
+    )
+
+    scm_mode = MODE_MAP.get(mode, mode)
+
+    base = {
+        "scm_mode": scm_mode,
+        "scm_edges": edges if scm_mode not in ("minimal",) else min_edges,
+        "scm_constraints": constraints if scm_mode in ("constrained", "constrained_evidence") else (
+            min_constraints if scm_mode == "minimal" else constraints_flat
+        ),
+        "scm_invariants": invariants if scm_mode != "minimal" else min_invariants,
+        "scm_functions": functions,
+        "scm_variables": variables,
+        "scm_failure": cc.get("failure_trace", ""),
+        "scm_cc_id": cc.get("id", "?"),
+        "scm_cc_why": cc.get("why_fragile", ""),
+        "scm_cc_trace": cc.get("failure_trace", ""),
+        "scm_inv_checks": inv_checks,
+    }
+    return base
+
+
 # ════════════════════════════════════════════════════════════
 # hidden_dep_multihop
 # ════════════════════════════════════════════════════════════
