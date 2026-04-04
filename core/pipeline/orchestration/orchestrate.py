@@ -80,7 +80,7 @@ import sys
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -401,7 +401,7 @@ def acquire_lock(run_dir: Path, force: bool = False) -> bool:
             else:
                 try:
                     hb = datetime.fromisoformat(lock["heartbeat_at"].rstrip("Z"))
-                    if (datetime.utcnow() - hb).total_seconds() < 300:
+                    if (datetime.now(timezone.utc) - hb).total_seconds() < 300:
                         print(
                             f"ERROR: Lock held by PID {lock['holder_pid']} on "
                             f"{lock['holder_hostname']} (heartbeat {lock['heartbeat_at']}). "
@@ -427,8 +427,8 @@ def acquire_lock(run_dir: Path, force: bool = False) -> bool:
     atomic_write_json(lock_path, {
         "holder_pid": os.getpid(),
         "holder_hostname": socket.gethostname(),
-        "acquired_at": datetime.utcnow().isoformat() + "Z",
-        "heartbeat_at": datetime.utcnow().isoformat() + "Z",
+        "acquired_at": datetime.now(timezone.utc).isoformat() + "Z",
+        "heartbeat_at": datetime.now(timezone.utc).isoformat() + "Z",
     })
     return True
 
@@ -449,7 +449,7 @@ def refresh_lock_heartbeat(run_dir: Path) -> None:
         return
     try:
         lock = json.loads(lock_path.read_text())
-        lock["heartbeat_at"] = datetime.utcnow().isoformat() + "Z"
+        lock["heartbeat_at"] = datetime.now(timezone.utc).isoformat() + "Z"
         atomic_write_json(lock_path, lock)
     except (json.JSONDecodeError, OSError):
         pass
@@ -461,7 +461,7 @@ def refresh_lock_heartbeat(run_dir: Path) -> None:
 
 def resolve_case_ids(config) -> list[str]:
     """Resolve case IDs from config. Returns frozen list."""
-    from core.pipeline.orchestration.runner import load_cases
+    from core.pipeline.orchestration.shared import load_cases
     cases = load_cases(case_id=None, cases_file=config.cases.source)
     if config.cases.case_ids:
         case_id_set = set(config.cases.case_ids)
@@ -511,7 +511,7 @@ def initialize_manifest(config, work_items: list[WorkItem], run_id: str) -> Mani
         schema_version="1.0",
         run_id=run_id,
         config_sha256=config._config_sha256,
-        created_at=datetime.utcnow().isoformat() + "Z",
+        created_at=datetime.now(timezone.utc).isoformat() + "Z",
         status="initializing",
         work_items=items,
     )
@@ -886,14 +886,34 @@ def launch_worker(item: WorkItemState, config, run_dir: Path) -> ActiveWorker:
     worker_dir = run_dir / item.worker_dir
     worker_dir.mkdir(parents=True, exist_ok=True)
 
+    # Clear ALL stale artifacts from prior failed runs in this directory.
+    # The logger opens events.jsonl in "w" mode (truncating), but other
+    # artifacts (stdout, stderr, calls/, calls_flat/) must also be fresh.
+    import shutil
+    for stale_file in ("events.jsonl", "run.jsonl", "stdout.log",
+                        "stderr.log", "heartbeat.json", "run_summary.json",
+                        "metrics.json", "calls_index.json", "trial_config.yaml"):
+        stale_path = worker_dir / stale_file
+        if stale_path.exists():
+            stale_path.unlink()
+    for stale_dir in ("calls", "calls_flat"):
+        stale_path = worker_dir / stale_dir
+        if stale_path.exists():
+            shutil.rmtree(stale_path)
+
     # Write derived config
     trial_config = derive_trial_config(config, WorkItem(
         work_id=item.work_id, model=item.model, condition=item.condition,
         trial=item.trial, case_id=item.case_id, expected_cases=item.expected_cases,
     ), item.attempt, worker_dir)
     trial_config_path = worker_dir / TRIAL_CONFIG_FILENAME
+    yaml_str = yaml.safe_dump(trial_config, default_flow_style=False)
+    reloaded = yaml.safe_load(yaml_str)
+    if reloaded != trial_config:
+        raise RuntimeError(
+            f"Config is not YAML round-trip safe for {item.work_id}")
     with open(trial_config_path, "w") as f:
-        yaml.dump(trial_config, f, default_flow_style=False)
+        f.write(yaml_str)
 
     stdout_path = worker_dir / STDOUT_LOG_FILENAME
     stderr_path = worker_dir / STDERR_LOG_FILENAME
@@ -1003,7 +1023,7 @@ def shutdown(active: dict[str, ActiveWorker], manifest: Manifest,
 # ============================================================
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).isoformat() + "Z"
 
 
 def _print_manifest_summary(manifest: Manifest) -> None:
@@ -1061,9 +1081,10 @@ def _smoke_execute_case(config, case, condition, run_dir, label,
     logger = RunLogger(
         smoke_dir, run_id=f"smoke_{label}",
         model=model_name, condition=condition, trial=0)
-    logger.start_run(model=model_name, condition=condition)
+    case_handle = logger.start_case(case["id"])
     try:
-        _, _, ev = run_v2(case, model_name, condition, logger)
+        _, _, ev = run_v2(case, model_name, condition, logger,
+                          case_start_eid=case_handle[1])
     except Exception as e:
         raise RuntimeError(
             f"SMOKE GATE FAILED ({label}): {type(e).__name__}: {e}"
@@ -1125,7 +1146,7 @@ def _smoke_gate(config, cases, run_dir):
 
 def preflight_validate(config, case_ids: list[str]) -> None:
     """Run all preflight checks. Raises on failure."""
-    from core.pipeline.orchestration.runner import load_cases, preflight_verify_tests
+    from core.pipeline.orchestration.shared import load_cases, preflight_verify_tests
     from core.registry.condition_registry import validate_run
 
     cases = load_cases(case_id=None, cases_file=config.cases.source)
@@ -1147,8 +1168,16 @@ def run_experiment(config, args) -> int:
     """Main orchestrator entry point. Returns exit code."""
     global _stop_requested
 
-    run_dir = Path(config.run.run_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    from core.pipeline.orchestration.shared import create_run_timestamp_dir
+    base_dir = Path(config.run.run_dir)
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.resume:
+        # Resume: use existing run_dir (caller specifies exact path)
+        run_dir = base_dir
+    else:
+        # Fresh run: create timestamped subdirectory
+        run_dir = create_run_timestamp_dir(base_dir, run_id=config.run.run_id or config.experiment.name)
 
     # Lock
     if not acquire_lock(run_dir, force=getattr(args, "force_lock_recovery", False)):
@@ -1181,11 +1210,11 @@ def _run_experiment_inner(config, args, run_dir: Path) -> int:
             kill_orphans=getattr(args, "kill_orphans", False),
         )
     else:
-        run_id = f"{config.experiment.name}__{datetime.utcnow().strftime('%Y-%m-%dT%H-%M-%S')}"
+        run_id = f"{config.experiment.name}__{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H-%M-%S')}"
         preflight_validate(config, case_ids)
 
         # Smoke gate: end-to-end validation before fan-out
-        from core.pipeline.orchestration.runner import load_cases as _load_cases
+        from core.pipeline.orchestration.shared import load_cases as _load_cases
         smoke_cases = _load_cases(case_id=None, cases_file=config.cases.source)
         if case_ids:
             smoke_cases = [c for c in smoke_cases if c["id"] in set(case_ids)]
@@ -1289,14 +1318,9 @@ def _run_experiment_inner(config, args, run_dir: Path) -> int:
                 if worker.process.poll() is None:
                     mark_state(manifest, wid, "RUNNING", started_at=_now_iso())
                 else:
-                    # Process died immediately
-                    worker.stdout_fh.close()
-                    worker.stderr_fh.close()
-                    mark_state(manifest, wid, "FAILED",
-                               finished_at=_now_iso(),
-                               exit_code=worker.process.returncode,
-                               error=f"exit code {worker.process.returncode} (immediate)")
-                    del active[wid]
+                    # Process exited before next poll — still mark RUNNING
+                    # so it follows normal harvest path (RUNNING→MERGING→SUCCEEDED).
+                    mark_state(manifest, wid, "RUNNING", started_at=_now_iso())
                 atomic_write_json(run_dir / MANIFEST_FILENAME,
                                   manifest_to_dict(manifest))
 

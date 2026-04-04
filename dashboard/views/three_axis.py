@@ -13,7 +13,10 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from dashboard.components.charts import static_bar_chart
+from dashboard.components.example_detail import render_example_detail
 from dashboard.components.styling import style_dataframe
+from dashboard.tab_docs import render_tab_docs
 
 
 OUTCOME_ORDER = [
@@ -35,6 +38,7 @@ OUTCOME_COLORS = {
 
 def render_three_axis_evaluation(df: pd.DataFrame) -> None:
     st.subheader("Three-Axis Evaluation (5-Class Taxonomy)")
+    render_tab_docs("three_axis")
 
     if "outcome_class" not in df.columns:
         st.warning("outcome_class not available. Apply evaluation fields first.")
@@ -69,7 +73,7 @@ def render_three_axis_evaluation(df: pd.DataFrame) -> None:
 
     col_chart, col_table = st.columns([2, 1])
     with col_chart:
-        st.bar_chart(dist, use_container_width=True)
+        static_bar_chart(dist)
     with col_table:
         dist_df = pd.DataFrame({"count": dist, "pct": dist_pct}).reset_index()
         dist_df.columns = ["outcome_class", "count", "pct"]
@@ -91,7 +95,7 @@ def render_three_axis_evaluation(df: pd.DataFrame) -> None:
 
         col_c1, col_c2 = st.columns([2, 1])
         with col_c1:
-            st.bar_chart(cond_dist, use_container_width=True)
+            static_bar_chart(cond_dist)
         with col_c2:
             cond_df = pd.DataFrame({
                 "outcome": cond_dist.index,
@@ -136,7 +140,7 @@ def render_three_axis_evaluation(df: pd.DataFrame) -> None:
         # Reorder columns
         ordered_cols = [c for c in OUTCOME_ORDER if c in outcome_by_cond.columns]
         outcome_by_cond = outcome_by_cond[ordered_cols]
-        st.bar_chart(outcome_by_cond, use_container_width=True)
+        static_bar_chart(outcome_by_cond)
 
     # ── 2.5 LEG SUBTYPE ──
     st.markdown("---")
@@ -151,7 +155,7 @@ def render_three_axis_evaluation(df: pd.DataFrame) -> None:
             st.metric("Congruent", f"{(leg_df['LEG_subtype'] == 'congruent').sum():,}")
             st.metric("Incongruent", f"{(leg_df['LEG_subtype'] == 'incongruent').sum():,}")
         with col_s2:
-            st.bar_chart(subtype_dist, use_container_width=True)
+            static_bar_chart(subtype_dist)
     else:
         st.info("No LEG events in current selection.")
 
@@ -194,31 +198,36 @@ def render_three_axis_evaluation(df: pd.DataFrame) -> None:
     n_examples = min(5, len(examples))
     if n_examples > 0:
         sample = examples.sample(n_examples, random_state=42)
-        display_cols = [
-            c for c in [
-                "case_id", "model", "condition", "outcome_class",
+        # Summary columns vary by outcome class
+        summary_cols = ["case_id", "model", "condition"]
+        if example_class == "serialization_failure":
+            summary_cols += [c for c in [
+                "parse_status", "recon_status", "reconstruction_status",
+                "serialization_failure_type",
+            ] if c in sample.columns]
+        elif example_class == "LEG":
+            summary_cols += [c for c in [
+                "mechanism_dim", "alignment_dim", "LEG_subtype",
+                "exec_category",
+            ] if c in sample.columns]
+        elif example_class == "unsupported_success":
+            summary_cols += [c for c in [
+                "mechanism_dim", "alignment_dim", "exec_category",
+            ] if c in sample.columns]
+        else:
+            summary_cols += [c for c in [
                 "exec_pass", "mechanism_dim", "alignment_dim",
-                "LEG_subtype", "exec_category",
-            ]
-            if c in sample.columns
-        ]
-        st.dataframe(sample[display_cols], use_container_width=True, hide_index=True)
+                "exec_category",
+            ] if c in sample.columns]
+        st.dataframe(
+            sample[summary_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
 
         for idx, row in sample.iterrows():
-            with st.expander(f"{row.get('case_id', '?')} | {row.get('model', '?')} | {row.get('condition', '?')}"):
-                detail_cols = st.columns(3)
-                detail_cols[0].markdown(f"**Execution:** {'PASS' if row.get('exec_pass') else 'FAIL'}")
-                detail_cols[1].markdown(f"**Mechanism:** {row.get('mechanism_dim', '—')}")
-                detail_cols[2].markdown(f"**Alignment:** {row.get('alignment_dim', '—')}")
-
-                code = row.get("_extracted_code")
-                if code and pd.notna(code) and str(code).strip():
-                    st.code(str(code)[:3000], language="python")
-                else:
-                    st.caption("No extracted code available.")
-
-                reasons = row.get("exec_reasons")
-                if reasons and pd.notna(reasons):
-                    st.markdown(f"**Failure Reasons:** {reasons}")
+            label = f"{row.get('case_id', '?')} | {row.get('model', '?')} | {row.get('condition', '?')}"
+            with st.expander(label):
+                render_example_detail(row, example_class)
     else:
         st.info(f"No {example_class} events in current selection.")

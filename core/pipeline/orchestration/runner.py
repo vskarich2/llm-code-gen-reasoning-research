@@ -39,66 +39,6 @@ COND_DESCRIPTIONS = [
 # LOAD CASES
 # ============================================================
 
-_LOGICAL_KEY_ROOT = "code_snippets_v2"
-
-
-def _compute_logical_key(rel_path: str) -> str:
-    """Derive stable prompt-facing key from storage path.
-
-    Input:  "code_snippets_v2/alias_config_b/config.py"
-    Output: "alias_config_b/config.py"
-
-    Preserves arbitrary nesting below the root.
-    """
-    from pathlib import Path as _Path
-    parts = _Path(rel_path).parts
-    if _LOGICAL_KEY_ROOT not in parts:
-        raise RuntimeError(
-            f"Cannot derive logical key: '{_LOGICAL_KEY_ROOT}' not found "
-            f"in path '{rel_path}'. All code_files paths must contain "
-            f"'{_LOGICAL_KEY_ROOT}' as a path component."
-        )
-    idx = parts.index(_LOGICAL_KEY_ROOT)
-    logical_parts = parts[idx + 1:]
-    if not logical_parts:
-        raise RuntimeError(
-            f"Cannot derive logical key: nothing after "
-            f"'{_LOGICAL_KEY_ROOT}' in path '{rel_path}'"
-        )
-    return str(_Path(*logical_parts))
-
-
-def load_cases(case_id: str, cases_file: str) -> list[dict]:
-    cases_path = BASE_DIR / cases_file
-    cases = json.loads(cases_path.read_text(encoding="utf-8"))
-    for case in cases:
-        code_files = {}
-        for rel_path in case["code_files"]:
-            full_path = BASE_DIR / "case_data" / rel_path
-            content = full_path.read_text(encoding="utf-8").strip()
-            assert content, (
-                f"PREFLIGHT: Empty file {rel_path} in case {case['id']}. "
-                f"Empty files are not allowed in the benchmark."
-            )
-            code_files[rel_path] = content
-        case["code_files_contents"] = code_files
-        # Compute stable prompt-facing keys (decoupled from storage paths)
-        logical_keys = {}
-        for rp, content in code_files.items():
-            lk = _compute_logical_key(rp)
-            if lk in logical_keys:
-                raise RuntimeError(
-                    f"Logical key collision: '{lk}' from '{rp}' "
-                    f"collides with a previous path in case {case['id']}"
-                )
-            logical_keys[lk] = content
-        case["logical_file_keys"] = logical_keys
-        validate_import_consistency(case)
-    if case_id:
-        cases = [c for c in cases if c["id"] == case_id]
-        if not cases:
-            raise ValueError(f"No case with id={case_id!r}")
-    return cases
 
 
 def validate_import_consistency(case: dict) -> None:
@@ -584,6 +524,7 @@ def run_ablation_mode(args):
             raise ValueError(f"Invalid condition {c!r} in config")
 
     cases_file = get_config().cases.source
+    from core.pipeline.orchestration.shared import load_cases
     cases = load_cases(case_id=args.case_id, cases_file=cases_file)
 
     # Apply case_ids filter from config (set by orchestrator for per-case work items)
@@ -643,72 +584,97 @@ def run_ablation_mode(args):
         attempt=_attempt,
     )
 
-    # Step 3: Log run.start
+    # Step 3-6: Run with guaranteed finalize.
+    # Exception policy:
+    #   - If body raises: finalize is attempted, original exception re-raised.
+    #   - If finalize raises after body success: finalize exception propagates.
+    #   - If finalize raises after body failure: finalize exception is logged,
+    #     original exception re-raised (original is not masked).
+    primary_exception = None
     try:
-        git_hash = (
-            _sp.check_output(["git", "rev-parse", "HEAD"], stderr=_sp.DEVNULL).decode().strip()
+        try:
+            git_hash = (
+                _sp.check_output(["git", "rev-parse", "HEAD"], stderr=_sp.DEVNULL).decode().strip()
+            )
+        except Exception:
+            git_hash = "unknown"
+
+        logger.log_event("run.start", {
+            "total_cases": len(cases),
+            "conditions": conditions,
+            "cases_file": cases_file,
+            "model": model,
+            "trial": trial,
+            "git_hash": git_hash,
+            "command_line": sys.argv,
+        }, phase="run")
+
+        logger.log_lifecycle_event("worker.start", {
+            "pid": os.getpid(),
+            "config_sha256": _cfg._config_sha256,
+            "case_ids": [c["id"] for c in cases],
+        })
+
+        remaining = n_calls - (len(skip) if skip else 0)
+        print(f"T3 Ablation — {len(cases)} cases x {len(conditions)} conditions = {n_calls} evals")
+        if skip:
+            print(f"  Resuming: {len(skip)} already done, {remaining} remaining")
+        print(f"  Model: {model}, Trial: {trial}, Run ID: {run_id}")
+        print(f"  Run dir: {run_dir}")
+        print(f"  Output:  {output_dir}")
+
+        _t0_run = time.monotonic()
+        results = run_all(cases, model, conditions, logger, quiet=args.quiet, skip=skip)
+        _elapsed_run = time.monotonic() - _t0_run
+        print_results(results, conditions, model)
+
+        validate_execution_sanity(results, conditions)
+
+        _total_cases = len(results)
+        _pass_count = sum(
+            1 for r in results for c in conditions if r.get(c, {}).get("pass")
         )
-    except Exception:
-        git_hash = "unknown"
+        _fail_count = sum(
+            1 for r in results for c in conditions if not r.get(c, {}).get("pass")
+        )
+        logger.log_lifecycle_event("worker.end", {
+            "completed_cases": _total_cases,
+            "failed_cases": _fail_count,
+            "pass_rate": round(_pass_count / max(_total_cases * len(conditions), 1), 4),
+            "elapsed_seconds": round(_elapsed_run, 2),
+        })
 
-    logger.log_event("run.start", {
-        "total_cases": len(cases),
-        "conditions": conditions,
-        "cases_file": cases_file,
-        "model": model,
-        "trial": trial,
-        "git_hash": git_hash,
-        "command_line": sys.argv,
-    }, phase="run")
+        logger.log_event("run.end", {
+            "total_cases": len(cases),
+            "total_evals": n_calls,
+        }, phase="run")
 
-    # Step 3b: Emit worker.start lifecycle event
-    logger.log_lifecycle_event("worker.start", {
-        "pid": os.getpid(),
-        "config_sha256": _cfg._config_sha256,
-        "case_ids": [c["id"] for c in cases],
-    })
+    except Exception as e:
+        primary_exception = e
+        # Best-effort: log run.failed event before finalize
+        try:
+            logger.log_event("run.failed", {
+                "error": f"{type(e).__name__}: {e}",
+            }, phase="run")
+        except Exception:
+            pass  # Cannot log — finalize will still run
 
-    remaining = n_calls - (len(skip) if skip else 0)
-    print(f"T3 Ablation — {len(cases)} cases x {len(conditions)} conditions = {n_calls} evals")
-    if skip:
-        print(f"  Resuming: {len(skip)} already done, {remaining} remaining")
-    print(f"  Model: {model}, Trial: {trial}, Run ID: {run_id}")
-    print(f"  Run dir: {run_dir}")
-    print(f"  Output:  {output_dir}")
+    finally:
+        try:
+            stats = logger.finalize()
+            if primary_exception is None:
+                print(f"\n  Run complete: pass_rate={stats['pass_rate']:.1%} ({stats['total_cases']} cases)")
+                print(f"  Output: {output_dir}")
+        except Exception as finalize_exc:
+            if primary_exception is not None:
+                # Don't mask the original exception
+                logging.getLogger("t3.runner").error(
+                    "finalize() failed AFTER primary exception: %s", finalize_exc)
+                raise primary_exception from finalize_exc
+            raise
 
-    # Step 4: Run evaluations — logger is passed explicitly
-    _t0_run = time.monotonic()
-    results = run_all(cases, model, conditions, logger, quiet=args.quiet, skip=skip)
-    _elapsed_run = time.monotonic() - _t0_run
-    print_results(results, conditions, model)
-
-    # Step 5: Execution sanity guard (warns, does not crash)
-    validate_execution_sanity(results, conditions)
-
-    # Step 5b: Emit worker.end lifecycle event
-    _total_cases = len(results)
-    _pass_count = sum(
-        1 for r in results for c in conditions if r.get(c, {}).get("pass")
-    )
-    _fail_count = sum(
-        1 for r in results for c in conditions if not r.get(c, {}).get("pass")
-    )
-    logger.log_lifecycle_event("worker.end", {
-        "completed_cases": _total_cases,
-        "failed_cases": _fail_count,
-        "pass_rate": round(_pass_count / max(_total_cases * len(conditions), 1), 4),
-        "elapsed_seconds": round(_elapsed_run, 2),
-    })
-
-    # Step 6: Log run.end and finalize
-    logger.log_event("run.end", {
-        "total_cases": len(cases),
-        "total_evals": n_calls,
-    }, phase="run")
-
-    stats = logger.finalize()
-    print(f"\n  Run complete: pass_rate={stats['pass_rate']:.1%} ({stats['total_cases']} cases)")
-    print(f"  Output: {output_dir}")
+    if primary_exception is not None:
+        raise primary_exception
 
 
 def main():

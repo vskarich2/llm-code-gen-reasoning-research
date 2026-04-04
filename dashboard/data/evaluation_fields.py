@@ -28,41 +28,46 @@ def _safe_str_col(df: pd.DataFrame, col: str, default: str = "") -> pd.Series:
 # THREE-AXIS EVALUATION (5-class taxonomy)
 # =====================================================================
 
-def add_three_axis_fields(df: pd.DataFrame) -> pd.DataFrame:
-    """Add the 3-axis evaluation fields to the attempt table.
+def add_evaluation_fields(df: pd.DataFrame) -> pd.DataFrame:
+    """Add evaluation fields to the attempt table.
 
-    If v3 pipeline fields exist (payload.evaluation.*), use them directly.
-    Otherwise, derive from v2 payload fields.
+    V4 path: reads from payload.evaluation.* (4-axis: S, E, R, T)
+    V2 fallback: derives from raw classifier dimensions (legacy 3-axis)
     """
     out = df.copy()
 
-    # ── V3 path: fields already computed by pipeline ──
+    # ── V4 path: fields already computed by pipeline ──
     if "outcome_class" in out.columns and out["outcome_class"].notna().any():
-        # Use LEG_field from schema extraction if LEG not already set
         if "LEG" not in out.columns and "LEG_field" in out.columns:
             out["LEG"] = out["LEG_field"].fillna(False).astype(bool)
-        # Ensure all expected fields exist
+        # Ensure all expected fields exist with safe defaults
         for col, default in [
             ("serialization_success", False),
             ("execution_success", False),
-            ("mechanism_correct", False),
-            ("commitments_valid", False),
-            ("alignment_positive", False),
-            ("reasoning_sufficient", False),
+            ("reasoning_correct", None),
+            ("translation_consistent", None),
             ("LEG", False),
             ("LEG_subtype", ""),
             ("serialization_failure_type", ""),
+            ("quadrant_RT", ""),
+            ("quadrant_RE", ""),
+            # Legacy compat
+            ("reasoning_sufficient", None),
         ]:
             if col not in out.columns:
                 out[col] = default
             elif out[col].dtype == object and default is False:
                 out[col] = out[col].fillna(False).astype(bool)
+
+        # Derive reasoning_sufficient from reasoning_correct for legacy views
+        if "reasoning_sufficient" not in out.columns or out["reasoning_sufficient"].isna().all():
+            if "reasoning_correct" in out.columns:
+                out["reasoning_sufficient"] = out["reasoning_correct"]
+
         return out
 
-    # ── V2 path: derive from raw classifier dimensions ──
+    # ── V2 fallback: derive from raw classifier dimensions ──
 
-    # ── Axis 1: Serialization (S) ──
-    # Parse succeeded AND reconstruction succeeded
     parse_ok = _safe_str_col(out, "parse_status").eq("success")
     recon_ok = ~_safe_str_col(out, "reconstruction_status").str.contains(
         "fail|invalid|error", case=False, na=False
@@ -74,23 +79,21 @@ def add_three_axis_fields(df: pd.DataFrame) -> pd.DataFrame:
 
     out["serialization_success"] = parse_ok & recon_ok & recon_v2 & eligible
 
-    # Serialization failure type
     s_fail = pd.Series("", index=out.index, dtype=object)
     s_fail = s_fail.mask(~parse_ok, "parse_failure")
     s_fail = s_fail.mask(parse_ok & ~(recon_ok & recon_v2), "reconstruction_failure")
     s_fail = s_fail.mask(parse_ok & recon_ok & recon_v2 & ~eligible, "not_eligible")
     out["serialization_failure_type"] = s_fail
 
-    # ── Axis 2: Execution (E) ──
     out["execution_success"] = _safe_bool_col(out, "exec_pass")
 
-    # ── Axis 3: Reasoning (R = M ∧ C) ──
-    out["mechanism_correct"] = _safe_str_col(out, "mechanism_dim").eq("CORRECT")
-    out["commitments_valid"] = _safe_str_col(out, "satisfied_dim").isin(["CORRECT", "PARTIAL"])
-    out["alignment_positive"] = _safe_str_col(out, "alignment_dim").eq("CORRECT")
-    out["reasoning_sufficient"] = out["mechanism_correct"] & out["commitments_valid"]
+    # Legacy classifier-based reasoning (v2 only)
+    mechanism_correct = _safe_str_col(out, "mechanism_dim").eq("CORRECT")
+    commitments_valid = _safe_str_col(out, "satisfied_dim").isin(["CORRECT", "PARTIAL"])
+    out["reasoning_sufficient"] = mechanism_correct & commitments_valid
+    out["reasoning_correct"] = out["reasoning_sufficient"]  # best available in v2
+    out["translation_consistent"] = None  # not available in v2
 
-    # ── 5-class outcome ──
     S = out["serialization_success"]
     E = out["execution_success"]
     R = out["reasoning_sufficient"]
@@ -98,17 +101,15 @@ def add_three_axis_fields(df: pd.DataFrame) -> pd.DataFrame:
     outcome = pd.Series("unknown", index=out.index, dtype=object)
     outcome = outcome.mask(~S, "serialization_failure")
     outcome = outcome.mask(S & E & R, "interpretable_success")
-    outcome = outcome.mask(S & E & ~R, "unsupported_success")
+    outcome = outcome.mask(S & E & ~R, "lucky_fix")
     outcome = outcome.mask(S & ~E & R, "LEG")
     outcome = outcome.mask(S & ~E & ~R, "reasoning_failure")
     out["outcome_class"] = outcome
 
-    # ── LEG fields ──
     out["LEG"] = (outcome == "LEG")
-    out["LEG_subtype"] = pd.Series("", index=out.index, dtype=object)
-    out.loc[out["LEG"], "LEG_subtype"] = out.loc[out["LEG"], "alignment_positive"].map(
-        {True: "congruent", False: "incongruent"}
-    )
+    out["LEG_subtype"] = ""
+    out["quadrant_RT"] = ""
+    out["quadrant_RE"] = ""
 
     return out
 
@@ -230,6 +231,7 @@ def add_ast_fields(df: pd.DataFrame) -> pd.DataFrame:
     multi_file = {cid for cid, c in cases_data.items() if len(c.get('code_files', [])) > 1}
 
     statuses = []
+    diagnostics = []
     for idx, row in out.iterrows():
         cid = row.get("case_id", "")
         code = row.get("_extracted_code", "")
@@ -238,9 +240,11 @@ def add_ast_fields(df: pd.DataFrame) -> pd.DataFrame:
         rules, is_mod = _get_rules(cid)
         if rules is None:
             statuses.append("not_measurable")
+            diagnostics.append("no checker rules for this case")
             continue
         if "SUCCESS" not in recon.upper() or not code or not str(code).strip():
             statuses.append("not_available")
+            diagnostics.append(f"reconstruction={recon}, code={'empty' if not code or not str(code).strip() else 'present'}")
             continue
 
         func_name = rules[0]
@@ -248,12 +252,14 @@ def add_ast_fields(df: pd.DataFrame) -> pd.DataFrame:
 
         if f'def {func_name}' not in code_str and cid in multi_file:
             statuses.append("not_available")
+            diagnostics.append(f"target function '{func_name}' not found in multi-file case")
             continue
 
         try:
             tree = ast_mod.parse(code_str)
         except SyntaxError:
             statuses.append("not_available")
+            diagnostics.append("syntax error in extracted code")
             continue
 
         if is_mod:
@@ -264,6 +270,7 @@ def add_ast_fields(df: pd.DataFrame) -> pd.DataFrame:
             fn = find_function(tree, func_name)
             if fn is None:
                 statuses.append("not_available")
+                diagnostics.append(f"function '{func_name}' not found in AST")
                 continue
             _, sf, rf, af, pf = rules
             ro = rf(fn) if rf else False
@@ -274,18 +281,72 @@ def add_ast_fields(df: pd.DataFrame) -> pd.DataFrame:
         ast_relaxed = ro and not anti
         target_modified = f'def {func_name}' in code_str
 
+        diag_parts = [f"target='{func_name}'", f"relaxed={'pass' if ro else 'fail'}", f"anti={'FIRED' if anti else 'clear'}"]
         if ast_relaxed:
             statuses.append("correct")
+            diag_parts.append("verdict: relaxed passed, no anti-pattern")
         elif anti:
             statuses.append("incorrect")
+            diag_parts.append("verdict: anti-pattern detected (known-bad structure)")
         elif not ro and not anti and target_modified:
             statuses.append("unknown")
+            diag_parts.append("verdict: function exists but neither relaxed nor anti matched")
         else:
             statuses.append("incorrect")
+            diag_parts.append("verdict: relaxed check failed, structure missing or wrong")
+        diagnostics.append("; ".join(diag_parts))
 
     out["ast_status"] = statuses
+    out["ast_diagnostic"] = diagnostics
     out["ast_score"] = out["ast_status"].map({"correct": 1.0, "incorrect": 0.0}).fillna(None)
 
+    return out
+
+
+# =====================================================================
+# INLINE ORACLE FIELDS
+# =====================================================================
+
+def add_oracle_fields(df: pd.DataFrame) -> pd.DataFrame:
+    """Add oracle-derived fields from inline oracle (v3.1) or sidebar.
+
+    If inline oracle fields exist (payload.oracle.*), use them directly.
+    Falls back to sidebar-loaded oracle_verdict for legacy runs.
+    """
+    out = df.copy()
+
+    # Inline oracle path: oracle_reasoning_truth from schema extraction
+    if "oracle_reasoning_truth" in out.columns and out["oracle_reasoning_truth"].notna().any():
+        # oracle_correct already extracted by schema
+        if "oracle_correct" not in out.columns:
+            out["oracle_correct"] = out["oracle_reasoning_truth"].isin(
+                ["CORRECT", "PARTIAL"])
+        # Derive oracle coverage status
+        if "oracle_status" in out.columns:
+            out["oracle_coverage_status"] = out["oracle_status"].map({
+                "SUCCESS": "evaluated",
+                "SKIPPED": "skipped_no_reasoning",
+                "FAILURE": "oracle_failed",
+                "PARSE_ERROR": "oracle_parse_error",
+                "DISABLED": "oracle_disabled",
+                "SAMPLING_SKIP": "sampling_skip",
+            }).fillna("not_present_legacy")
+        else:
+            out["oracle_coverage_status"] = "evaluated"
+        return out
+
+    # Sidebar-loaded oracle path (legacy)
+    if "oracle_verdict" in out.columns and out["oracle_verdict"].notna().any():
+        out["oracle_reasoning_truth"] = out["oracle_verdict"]
+        out["oracle_correct"] = out["oracle_verdict"].isin(["CORRECT", "PARTIAL"])
+        out["oracle_coverage_status"] = out["oracle_verdict"].apply(
+            lambda v: "evaluated" if pd.notna(v) else "not_present_legacy")
+        return out
+
+    # No oracle data available
+    out["oracle_reasoning_truth"] = None
+    out["oracle_correct"] = None
+    out["oracle_coverage_status"] = "not_present_legacy"
     return out
 
 
@@ -295,6 +356,7 @@ def add_ast_fields(df: pd.DataFrame) -> pd.DataFrame:
 
 def apply_evaluation_fields(df: pd.DataFrame) -> pd.DataFrame:
     """Apply all evaluation-derived fields."""
-    df = add_three_axis_fields(df)
+    df = add_evaluation_fields(df)
     df = add_ast_fields(df)
+    df = add_oracle_fields(df)
     return df

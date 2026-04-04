@@ -337,7 +337,7 @@ FIELD_REGISTRY = {
         "required": False,
     },
 
-    # ── V3 EVALUATION (3-axis model) ──
+    # ── V4 EVALUATION (4-axis model) ──
     "outcome_class": {
         "source": "payload.evaluation.outcome_class",
         "type": "str",
@@ -348,13 +348,43 @@ FIELD_REGISTRY = {
         "type": "bool",
         "required": False,
     },
+    "reconstruction_success": {
+        "source": "payload.evaluation.reconstruction_success",
+        "type": "bool",
+        "required": False,
+    },
+    "routing_valid": {
+        "source": "payload.evaluation.routing_valid",
+        "type": "bool",
+        "required": False,
+    },
+    "execution_pass": {
+        "source": "payload.evaluation.execution_pass",
+        "type": "bool",
+        "required": False,
+    },
+    "serialization_outcome": {
+        "source": "payload.evaluation.serialization_outcome",
+        "type": "str",
+        "required": False,
+    },
+    "lucky_success_serialization_failure": {
+        "source": "payload.evaluation.lucky_success_serialization_failure",
+        "type": "bool",
+        "required": False,
+    },
     "execution_success": {
         "source": "payload.evaluation.execution_success",
         "type": "bool",
         "required": False,
     },
-    "reasoning_sufficient": {
-        "source": "payload.evaluation.reasoning_sufficient",
+    "reasoning_correct": {
+        "source": "payload.evaluation.reasoning_correct",
+        "type": "bool",
+        "required": False,
+    },
+    "translation_consistent": {
+        "source": "payload.evaluation.translation_consistent",
         "type": "bool",
         "required": False,
     },
@@ -366,6 +396,22 @@ FIELD_REGISTRY = {
     "LEG_subtype": {
         "source": "payload.evaluation.LEG_subtype",
         "type": "str",
+        "required": False,
+    },
+    "quadrant_RT": {
+        "source": "payload.evaluation.quadrant_RT",
+        "type": "str",
+        "required": False,
+    },
+    "quadrant_RE": {
+        "source": "payload.evaluation.quadrant_RE",
+        "type": "str",
+        "required": False,
+    },
+    # Legacy compat (v2/v3 evaluation — may be absent in v4 events)
+    "reasoning_sufficient": {
+        "source": "payload.evaluation.reasoning_sufficient",
+        "type": "bool",
         "required": False,
     },
 
@@ -405,6 +451,97 @@ FIELD_REGISTRY = {
     "classifier_ran": {
         "source": "payload.classification.classifier_ran",
         "type": "bool",
+        "required": False,
+    },
+    # V3 classifier dimensions
+    "reasoning_internal_consistency": {
+        "source": "payload.classification.reasoning_internal_consistency",
+        "type": "str",
+        "required": False,
+    },
+    "commitments_internal_consistency": {
+        "source": "payload.classification.commitments_internal_consistency",
+        "type": "str",
+        "required": False,
+    },
+    "commitments_code_consistency": {
+        "source": "payload.classification.commitments_code_consistency",
+        "type": "str",
+        "required": False,
+    },
+    "reasoning_code_alignment": {
+        "source": "payload.classification.reasoning_code_alignment",
+        "type": "str",
+        "required": False,
+    },
+    # V3 justifications
+    "reasoning_internal_consistency_justification": {
+        "source": "payload.classification.reasoning_internal_consistency_justification",
+        "type": "str",
+        "required": False,
+    },
+    "commitments_internal_consistency_justification": {
+        "source": "payload.classification.commitments_internal_consistency_justification",
+        "type": "str",
+        "required": False,
+    },
+    "commitments_code_consistency_justification": {
+        "source": "payload.classification.commitments_code_consistency_justification",
+        "type": "str",
+        "required": False,
+    },
+    "reasoning_code_alignment_justification": {
+        "source": "payload.classification.reasoning_code_alignment_justification",
+        "type": "str",
+        "required": False,
+    },
+
+    # ── V3.1 INLINE ORACLE ──
+    "oracle_status": {
+        "source": "payload.oracle.status",
+        "type": "str",
+        "required": False,
+    },
+    "oracle_reasoning_truth": {
+        "source": "payload.oracle.reasoning_truth",
+        "type": "str",
+        "required": False,
+    },
+    "oracle_correct": {
+        "source": "payload.oracle.oracle_correct",
+        "type": "bool",
+        "required": False,
+    },
+    "oracle_partial_mode": {
+        "source": "payload.oracle.partial_mode",
+        "type": "str",
+        "required": False,
+    },
+    "oracle_justification": {
+        "source": "payload.oracle.justification",
+        "type": "str",
+        "required": False,
+    },
+    "oracle_version": {
+        "source": "payload.oracle.version",
+        "type": "str",
+        "required": False,
+    },
+    "oracle_latency_ms": {
+        "source": "payload.oracle.latency_ms",
+        "type": "int",
+        "required": False,
+    },
+
+    # ── V3.1 DISAGREEMENT ──
+    "reasoning_disagreement": {
+        "source": "payload.reasoning_disagreement.disagreement",
+        "type": "bool",
+        "required": False,
+    },
+    "reasoning_disagreement_type": {
+        "source": "payload.reasoning_disagreement.type",
+        "type": "str",
         "required": False,
     },
 }

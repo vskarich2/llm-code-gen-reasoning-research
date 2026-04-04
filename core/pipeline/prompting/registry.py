@@ -160,13 +160,10 @@ class PromptRegistry:
             for section in comp.exports:
                 section_owners.setdefault(section, []).append(comp.name)
 
-        for section, owners in section_owners.items():
-            if section in SINGLETON_SECTIONS and len(owners) > 1:
-                _log.warning(
-                    "Singleton section %s exported by multiple components: "
-                    "%s. These cannot coexist in one program.",
-                    section.value, owners,
-                )
+        # Singleton conflicts are validated per-program at compile time,
+        # not globally at load time. Multiple components may export the
+        # same singleton section as long as they are never combined in
+        # the same prompt program.
 
     def _load_programs(self, manifest_path: Path) -> None:
         """Load PromptPrograms from prompt_manifest.yaml."""

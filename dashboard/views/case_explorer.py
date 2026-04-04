@@ -8,9 +8,11 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from dashboard.components.charts import static_line_chart
 from dashboard.components.selectors import build_case_selection
 from dashboard.components.styling import style_dataframe
 from dashboard.leg_scanner import read_artifact, split_prompt_response
+from dashboard.tab_docs import render_tab_docs
 
 
 def _safe_bool(value: Any) -> bool:
@@ -61,6 +63,7 @@ def extract_primary_json_from_row(row: pd.Series) -> dict[str, Any] | None:
 
 def render_case_explorer(df: pd.DataFrame) -> None:
     st.subheader("Case Explorer")
+    render_tab_docs("case_explorer")
     chain = build_case_selection(df, "caseexplorer")
     if chain.empty:
         st.info("No data for this selection.")
@@ -92,7 +95,7 @@ def render_case_explorer(df: pd.DataFrame) -> None:
     if len(timeline) > 1:
         st.markdown("##### Attempt Progression")
         progression = timeline.set_index("attempt_label")[["exec_pass", "is_leg"]].astype(int)
-        st.line_chart(progression, use_container_width=True)
+        static_line_chart(progression)
 
         selected_attempt = st.select_slider(
             "Focus Attempt",

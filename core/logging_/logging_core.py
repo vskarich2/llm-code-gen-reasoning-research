@@ -69,6 +69,7 @@ VALID_PHASES = frozenset({
     "generation",
     "classification",
     "evaluation",
+    "oracle_eval",
     "case",
     "pipeline",
 })
@@ -83,7 +84,7 @@ VALID_LEGACY_EVENT_TYPES = frozenset({
     "orchestrator.complete", "orchestrator.preflight_pass", "orchestrator.preflight_fail",
     "run.start", "run.end", "run.failed",
     "case.start", "case.end", "case.failed",
-    "call.generate", "call.classify", "call.other",
+    "call.generate", "call.classify", "call.oracle", "call.other",
     "parse.result", "execution.result",
     "metric.record",
     "validation.pass", "validation.fail",
@@ -97,7 +98,7 @@ VALID_LEGACY_EVENT_TYPES = frozenset({
     "worker.error.config", "worker.error.cases", "worker.error.imports",
 })
 
-CALL_EVENT_TYPES = frozenset({"call.generate", "call.classify", "call.other"})
+CALL_EVENT_TYPES = frozenset({"call.generate", "call.classify", "call.oracle", "call.other"})
 
 _FSYNC_LEGACY_TYPES = frozenset({
     "run.start", "run.end", "run.failed",
@@ -130,6 +131,8 @@ def resolve_legacy_event_type(
             return "call.classify"
         if phase == "generation":
             return "call.generate"
+        if phase == "oracle_eval":
+            return "call.oracle"
         return "call.other"
     if event_type_canonical == "execution_eval":
         return "case.end"
@@ -252,7 +255,11 @@ class BaseLogger:
     def __init__(self, events_path: Path, instance_id: str | None = None):
         self._events_path = Path(events_path)
         self._events_path.parent.mkdir(parents=True, exist_ok=True)
-        self._events_file = open(self._events_path, "a", encoding="utf-8")
+        # Truncating write ("w"), not append ("a").
+        # Each BaseLogger instance exclusively owns its events file for
+        # the lifetime of one worker-run. Append mode caused duplicate
+        # events when a worker directory was reused after a failed attempt.
+        self._events_file = open(self._events_path, "w", encoding="utf-8")
         self._event_counter = 0
         self._sequence = 0
         self._instance_id = instance_id

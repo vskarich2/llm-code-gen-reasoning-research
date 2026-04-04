@@ -40,7 +40,8 @@ from dashboard.views.oracle import render_field_introspection, render_oracle, re
 from dashboard.views.overview import render_overview
 from dashboard.views.pipeline_trace import render_pipeline_trace
 from dashboard.views.tables import render_grouped_metric_table
-from dashboard.views.three_axis import render_three_axis_evaluation
+from dashboard.views.failure_taxonomy import render_failure_taxonomy
+from dashboard.views.live_run import render_live_run
 
 st.set_page_config(
     page_title="LEG Benchmark Dashboard",
@@ -49,8 +50,9 @@ st.set_page_config(
 )
 
 TAB_ORDER = [
+    "Live Run",
     "Overview",
-    "Three-Axis Evaluation",
+    "Failure Taxonomy",
     "Failure Decomposition",
     "Case Explorer",
     "Pipeline Trace",
@@ -122,24 +124,27 @@ def main() -> None:
     tabs = st.tabs(TAB_ORDER)
 
     with tabs[0]:
-        render_overview(filtered)
+        render_live_run(selected_experiments)
 
     with tabs[1]:
-        render_three_axis_evaluation(filtered)
+        render_overview(filtered, selected_experiments)
 
     with tabs[2]:
-        render_failure_decomposition(filtered)
+        render_failure_taxonomy(filtered)
 
     with tabs[3]:
-        render_case_explorer(filtered)
+        render_failure_decomposition(filtered)
 
     with tabs[4]:
-        render_pipeline_trace(filtered)
+        render_case_explorer(filtered)
 
     with tabs[5]:
-        render_ast_analysis(filtered)
+        render_pipeline_trace(filtered)
 
     with tabs[6]:
+        render_ast_analysis(filtered)
+
+    with tabs[7]:
         render_grouped_metric_table(
             filtered,
             "Family Breakdown",
@@ -148,7 +153,7 @@ def main() -> None:
             sort_by=["model", "condition", "family"],
         )
 
-    with tabs[7]:
+    with tabs[8]:
         render_grouped_metric_table(
             filtered,
             "Model × Condition",
@@ -157,7 +162,7 @@ def main() -> None:
             sort_by=["model", "condition"],
         )
 
-    with tabs[8]:
+    with tabs[9]:
         render_grouped_metric_table(
             filtered,
             "Retry Analysis",
@@ -166,7 +171,7 @@ def main() -> None:
             sort_by=["model", "condition"],
         )
 
-    with tabs[9]:
+    with tabs[10]:
         render_grouped_metric_table(
             filtered,
             "By Difficulty",
@@ -175,10 +180,10 @@ def main() -> None:
             sort_by=["model", "difficulty"],
         )
 
-    with tabs[10]:
+    with tabs[11]:
         render_oracle(filtered)
 
-    with tabs[11]:
+    with tabs[12]:
         render_field_introspection(filtered)
 
     if live_mode:

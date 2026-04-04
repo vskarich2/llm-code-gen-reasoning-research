@@ -18,17 +18,34 @@ from core.contracts.contracts_v2 import (
 
 _log = logging.getLogger("t3.evaluator_v2")
 
+
 # Debug section delimiter — everything at and after this is ignored
 _DEBUG_DELIMITER = "---DEBUG---"
 
 
 @dataclass
 class ClassifierResultV2:
-    """Parsed v2 classifier output."""
+    """Parsed classifier output (v2 and v3 schemas)."""
+    # V2 dimensions (populated by v2 parser, None when v3 parser used)
     mechanism_identified: str | None = None
     commitments_extracted: str | None = None
     commitments_satisfied: str | None = None
+
+    # Shared dimension (same name in v2 and v3)
     reasoning_code_alignment: str | None = None
+
+    # V3 dimensions (populated by v3 parser, None when v2 parser used)
+    reasoning_internal_consistency: str | None = None
+    commitments_internal_consistency: str | None = None
+    commitments_code_consistency: str | None = None
+
+    # V3 justifications (debug only — MUST NOT affect metrics)
+    reasoning_internal_consistency_justification: str = ""
+    commitments_internal_consistency_justification: str = ""
+    commitments_code_consistency_justification: str = ""
+    reasoning_code_alignment_justification: str = ""
+
+    # Metadata
     failure_type: str = "UNKNOWN"
     failure_type_raw: str = ""
     confidence: str = ""
@@ -40,21 +57,65 @@ class ClassifierResultV2:
     classifier_schema_variant: str = "v2_5line"
     classifier_prompt_variant: str = "classify_reasoning_v2"
     commitment_source_for_classifier: str = ""
+    failure_type_parse_warning: str | None = None
+
+
+def _extract_canonical_dims(result: ClassifierResultV2) -> dict:
+    """THE ONLY SOURCE OF TRUTH FOR DIMENSION MAPPING.
+
+    Maps v3 or v2 classifier fields to canonical signal names.
+    No other code may read dimension fields directly from the result.
+
+    Returns dict with keys: mechanism_identified, commitments_extracted,
+    commitments_satisfied, reasoning_code_alignment.
+    """
+    v3_fields = (
+        result.reasoning_internal_consistency,
+        result.commitments_internal_consistency,
+        result.commitments_code_consistency,
+    )
+    v2_fields = (
+        result.mechanism_identified,
+        result.commitments_extracted,
+        result.commitments_satisfied,
+    )
+
+    v3_populated = any(f is not None for f in v3_fields)
+    v2_populated = any(f is not None for f in v2_fields)
+
+    if v3_populated and v2_populated:
+        raise RuntimeError(
+            "Mixed classifier state: both v2 and v3 dimension fields "
+            "are populated. This indicates a parser bug."
+        )
+
+    if v3_populated:
+        if not all(f is not None for f in v3_fields):
+            raise RuntimeError(
+                "Partial v3 classifier state: some v3 fields are None. "
+                f"ric={result.reasoning_internal_consistency}, "
+                f"cic={result.commitments_internal_consistency}, "
+                f"ccc={result.commitments_code_consistency}"
+            )
+        return {
+            "mechanism_identified": result.reasoning_internal_consistency,
+            "commitments_extracted": result.commitments_internal_consistency,
+            "commitments_satisfied": result.commitments_code_consistency,
+            "reasoning_code_alignment": result.reasoning_code_alignment,
+        }
+
+    return {
+        "mechanism_identified": result.mechanism_identified,
+        "commitments_extracted": result.commitments_extracted,
+        "commitments_satisfied": result.commitments_satisfied,
+        "reasoning_code_alignment": result.reasoning_code_alignment,
+    }
 
 
 # ============================================================
 # CLASSIFIER V2 PROMPT BUILDER
 # ============================================================
 
-# Valid failure types (imported at call time to avoid circular imports)
-_VALID_FAILURE_TYPES = None
-
-def _get_valid_failure_types():
-    global _VALID_FAILURE_TYPES
-    if _VALID_FAILURE_TYPES is None:
-        from core.reasoning_schema import VALID_FAILURE_TYPES
-        _VALID_FAILURE_TYPES = VALID_FAILURE_TYPES
-    return _VALID_FAILURE_TYPES
 
 
 def build_classifier_v2_vars(artifact, case: dict, code: str, config) -> dict:
@@ -101,7 +162,6 @@ def build_classifier_v2_vars(artifact, case: dict, code: str, config) -> dict:
         "code_commitments": commitments_str,
         "task": case.get("task", ""),
         "code": (code or ""),
-        "failure_types": ", ".join(sorted(_get_valid_failure_types())),
         "classifier_mode": config.evaluation.classifier_mode,
     }
 
@@ -188,7 +248,7 @@ def parse_classifier_v2_output(raw: str) -> ClassifierResultV2:
     """Parse v2 classifier output. Dedicated parser — does NOT use v1 parser.
 
     Expected structure (Evidence/Judgment may span multiple lines):
-      Line 1: <mechanism>;<commitments_extracted>;<commitments_satisfied>;<alignment>;<failure_type>
+      Line 1: <mechanism>;<commitments_extracted>;<commitments_satisfied>;<alignment>
       Line 2: <confidence>
       Counterfactual: <sentence>
       Evidence: <bullets — may span multiple lines>
@@ -207,10 +267,10 @@ def parse_classifier_v2_output(raw: str) -> ClassifierResultV2:
         result.parse_error = f"expected at least 5 lines, got {len(lines)}"
         return result
 
-    # Line 1: 5 semicolon-separated fields (4 dimensions + failure_type)
+    # Line 1: 4 or 5 semicolon-separated fields (4 dimensions, optional legacy failure_type)
     parts = [p.strip().upper() for p in lines[0].split(";")]
-    if len(parts) != 5:
-        result.parse_error = f"line 1: expected 5 fields, got {len(parts)}"
+    if len(parts) < 4:
+        result.parse_error = f"line 1: expected at least 4 fields, got {len(parts)}"
         return result
 
     dims = {}
@@ -225,14 +285,9 @@ def parse_classifier_v2_output(raw: str) -> ClassifierResultV2:
     result.commitments_satisfied = dims["commitments_satisfied"]
     result.reasoning_code_alignment = dims["reasoning_code_alignment"]
 
-    # Failure type
-    ft_raw = parts[4]
-    result.failure_type_raw = ft_raw
-    valid_fts = _get_valid_failure_types()
-    # FIX-NOW-3: preserve model's failure type, flag if unknown
-    result.failure_type = ft_raw
-    if ft_raw not in valid_fts:
-        result.parse_error = f"unknown_failure_type:{ft_raw}"
+    # Legacy failure_type (5th field, optional — tolerated but not required)
+    if len(parts) >= 5:
+        result.failure_type_raw = parts[4]
 
     # Line 2: confidence
     confidence = lines[1].strip().upper()
@@ -296,27 +351,32 @@ def parse_classifier_v2_output(raw: str) -> ClassifierResultV2:
 
 
 # ============================================================
-# V3 CLASSIFIER PARSER (binary JSON output)
+# V3 CLASSIFIER PARSER (8-field JSON: 4 dimensions + 4 justifications)
 # ============================================================
 
-_V3_EXPECTED_KEYS = {
-    "mechanism_identified",
-    "commitments_extracted",
-    "commitments_satisfied",
+_V3_DIMENSION_KEYS = frozenset({
+    "reasoning_internal_consistency",
+    "commitments_internal_consistency",
+    "commitments_code_consistency",
     "reasoning_code_alignment",
-    "failure_type",
-}
+})
+_V3_JUSTIFICATION_KEYS = frozenset({
+    "reasoning_internal_consistency_justification",
+    "commitments_internal_consistency_justification",
+    "commitments_code_consistency_justification",
+    "reasoning_code_alignment_justification",
+})
+_V3_EXPECTED_KEYS = _V3_DIMENSION_KEYS | _V3_JUSTIFICATION_KEYS
 _V3_VALID_DIMS = frozenset({"CORRECT", "INCORRECT"})
 
 
 def parse_classifier_v3_output(raw: str) -> ClassifierResultV2:
-    """Parse v3 binary JSON classifier output.
+    """Parse v3 classifier JSON output.
 
-    Strict closed-schema parser:
-    - JSON must be entire response (no prefix/trailing text)
-    - Exactly 5 keys required
-    - 4 dimensions ∈ {CORRECT, INCORRECT}
-    - failure_type ∈ VALID_FAILURE_TYPES
+    Strict 8-field schema:
+    - 4 dimension fields ∈ {CORRECT, INCORRECT}
+    - 4 justification fields (non-empty strings, ≥10 chars)
+    - No extra keys allowed
     """
     result = ClassifierResultV2(
         classify_raw=raw,
@@ -330,23 +390,17 @@ def parse_classifier_v3_output(raw: str) -> ClassifierResultV2:
 
     stripped = _strip_debug(raw).strip()
 
-    # Strict: JSON must start at position 0
     if not stripped.startswith("{"):
-        result.parse_error = (
-            f"non_json_prefix: response does not start with '{{'"
-        )
+        result.parse_error = "non_json_prefix: response does not start with '{'"
         return result
 
-    # Strict: no trailing text after JSON
     last_brace = stripped.rfind("}")
     if last_brace == -1:
         result.parse_error = "no_closing_brace"
         return result
     trailing = stripped[last_brace + 1:].strip()
     if trailing:
-        result.parse_error = (
-            f"trailing_text_after_json: {trailing[:50]!r}"
-        )
+        result.parse_error = f"trailing_text_after_json: {trailing[:50]!r}"
         return result
 
     try:
@@ -355,43 +409,46 @@ def parse_classifier_v3_output(raw: str) -> ClassifierResultV2:
         result.parse_error = f"json_decode_error: {e}"
         return result
 
-    # Closed schema: exact key set
+    # Strict schema: exact key set, no extras
     if set(d.keys()) != _V3_EXPECTED_KEYS:
         extra = set(d.keys()) - _V3_EXPECTED_KEYS
         missing = _V3_EXPECTED_KEYS - set(d.keys())
-        result.parse_error = (
-            f"schema_mismatch: extra={extra}, missing={missing}"
-        )
+        result.parse_error = f"schema_mismatch: extra={extra}, missing={missing}"
         return result
 
     # Validate dimension values
-    for dim_key in ("mechanism_identified", "commitments_extracted",
-                    "commitments_satisfied", "reasoning_code_alignment"):
-        val = d[dim_key]
+    for key in _V3_DIMENSION_KEYS:
+        val = d[key]
         if not isinstance(val, str) or val not in _V3_VALID_DIMS:
-            result.parse_error = f"invalid_dimension: {dim_key}={val!r}"
+            result.parse_error = f"invalid_dimension: {key}={val!r}"
             return result
 
-    # Validate failure_type
-    ft = d["failure_type"]
-    if not isinstance(ft, str):
-        result.parse_error = (
-            f"invalid_type: failure_type must be string, "
-            f"got {type(ft).__name__}"
-        )
-        return result
-    valid_fts = _get_valid_failure_types()
-    if ft not in valid_fts:
-        result.parse_error = f"invalid_failure_type: {ft}"
+    # Validate justifications
+    for key in _V3_JUSTIFICATION_KEYS:
+        val = d[key]
+        if not isinstance(val, str) or len(val.strip()) < 10:
+            result.parse_error = (
+                f"justification_too_short: {key} ({len(str(val).strip())} chars)"
+            )
+            return result
+
+    justifications = [d[k].strip() for k in sorted(_V3_JUSTIFICATION_KEYS)]
+    if len(set(justifications)) == 1:
+        result.parse_error = "all_justifications_identical"
         return result
 
-    # All valid
-    result.mechanism_identified = d["mechanism_identified"]
-    result.commitments_extracted = d["commitments_extracted"]
-    result.commitments_satisfied = d["commitments_satisfied"]
+    # Populate V3 dimensions
+    result.reasoning_internal_consistency = d["reasoning_internal_consistency"]
+    result.commitments_internal_consistency = d["commitments_internal_consistency"]
+    result.commitments_code_consistency = d["commitments_code_consistency"]
     result.reasoning_code_alignment = d["reasoning_code_alignment"]
-    result.failure_type = ft
-    result.failure_type_raw = ft
+
+    # Populate justifications
+    result.reasoning_internal_consistency_justification = d["reasoning_internal_consistency_justification"]
+    result.commitments_internal_consistency_justification = d["commitments_internal_consistency_justification"]
+    result.commitments_code_consistency_justification = d["commitments_code_consistency_justification"]
+    result.reasoning_code_alignment_justification = d["reasoning_code_alignment_justification"]
+
     result.parse_error = None
     return result
 
@@ -449,15 +506,16 @@ def assemble_v2_result(
     ev["commitments_satisfied_positive"] = signals.commitments_satisfied_positive
 
     # V2 classifier dimensions (raw)
-    ev["mechanism_identified_dim"] = classifier.mechanism_identified
-    ev["commitments_extracted_dim"] = classifier.commitments_extracted
-    ev["commitments_satisfied_dim"] = classifier.commitments_satisfied
-    ev["reasoning_code_alignment_dim"] = classifier.reasoning_code_alignment
+    canonical = _extract_canonical_dims(classifier)
+    ev["mechanism_identified_dim"] = canonical["mechanism_identified"]
+    ev["commitments_extracted_dim"] = canonical["commitments_extracted"]
+    ev["commitments_satisfied_dim"] = canonical["commitments_satisfied"]
+    ev["reasoning_code_alignment_dim"] = canonical["reasoning_code_alignment"]
 
     # V2 classifier metadata
     ev["classify_v2_raw"] = classifier.classify_raw
     ev["classify_v2_parse_error"] = classifier.parse_error
-    ev["failure_type"] = classifier.failure_type
+    ev["failure_type"] = classifier.failure_type_raw or "UNKNOWN"
     ev["confidence"] = classifier.confidence
     ev["counterfactual"] = classifier.counterfactual
     ev["evidence"] = classifier.evidence

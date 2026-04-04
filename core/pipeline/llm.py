@@ -120,7 +120,7 @@ def _log_call_if_logger(
         elapsed_seconds=elapsed,
         case_id=case_id or "unknown",
         phase=phase,
-        parent_event_id=parent_event_id or 0,
+        parent_event_id=parent_event_id if parent_event_id is not None else 0,
         condition=condition,
         error=error,
         prompt_assembly=prompt_assembly,

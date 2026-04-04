@@ -20,6 +20,7 @@ from core.pipeline.prompting.sections import Section
 from core.pipeline.prompting.validator import CompilerMode
 from core.evaluation.evaluator_v2 import (
     classify_case, assemble_v2_result, ClassifierResultV2,
+    _extract_canonical_dims,
 )
 from core.config.experiment_config import get_config
 from core.pipeline.llm import call_model
@@ -312,6 +313,57 @@ def _build_critique_retry_prompt(
 # ============================================================
 
 
+def _build_retry_prompt_for_attempt(
+    k, use_bare_retry, critique_variant, critique_info,
+    use_test_feedback, use_classifier_hint, test_feedback,
+    classifier_hint, prev_raw, task, code_block,
+    file_keys_example, schema_line, prev_code,
+):
+    """Build the prompt for attempt k."""
+    if k == 0:
+        return _compile_prompt(("task_and_code", "output_instruction_v3"), {
+            "task": task, "code_files_block": code_block,
+            "file_keys_example": file_keys_example, "schema_line": schema_line,
+        })
+    if use_bare_retry:
+        base = _compile_prompt(("task_and_code", "output_instruction_v3"), {
+            "task": task, "code_files_block": code_block,
+            "file_keys_example": file_keys_example, "schema_line": schema_line,
+        })
+        return f"Your previous response:\n{prev_raw}\n\n" + base
+    if critique_variant and critique_info.get("critique"):
+        return _build_critique_retry_prompt(prev_raw, critique_info["critique"], schema_line)
+    if critique_variant:
+        return _build_critique_retry_prompt(prev_raw, "", schema_line)
+    if use_test_feedback:
+        return _compile_prompt(("test_feedback_retry",), {
+            "task": task, "code_files_block": code_block,
+            "prev_code": prev_code, "test_feedback": test_feedback,
+            "schema_line": schema_line,
+            "classifier_hint": classifier_hint if use_classifier_hint else "",
+        })
+    return _build_critique_retry_prompt(prev_raw, "", schema_line)
+
+
+def _make_incomplete_entry(k, error_msg):
+    """Build an INCOMPLETE trajectory entry for a crashed attempt."""
+    return {
+        "attempt": k, "status": "INCOMPLETE_ATTEMPT",
+        "execution": {"pass": False, "score": 0.0, "execution_category": "ATTEMPT_INCOMPLETE"},
+        "oracle": {"status": "FAILURE", "reasoning_truth": "UNASSESSED", "oracle_correct": None,
+                    "error": "attempt_incomplete", "latency_ms": 0, "version": "inline_v1",
+                    "partial_mode": "lenient", "sampling_strategy": "ALWAYS",
+                    "sampling_reason": None, "prompt_template_hash": None, "prompt_instance_hash": None},
+        "classifier": {"mechanism_identified": None, "commitments_satisfied": None,
+                       "reasoning_code_alignment": None, "classifier_ran": False, "error": "attempt_incomplete"},
+        "ast": {"status": "not_measurable", "ast_correct": None, "ast_score": None,
+                "reason": "attempt_incomplete"},
+        "reasoning_disagreement": {"disagreement": None, "type": "attempt_incomplete",
+                                   "classifier_consistent": None, "oracle_correct": None},
+        "parse_valid": False, "code_length": 0, "error": str(error_msg)[:500],
+    }
+
+
 def run_retry_v2(
     case: dict,
     model: str,
@@ -319,7 +371,18 @@ def run_retry_v2(
     logger,
     case_start_eid: int = 0,
 ) -> tuple[str, str, dict]:
-    """Run v2 retry harness. Returns (case_id, condition, ev)."""
+    """Run v2 retry harness with per-attempt 4-axis measurement.
+
+    Pipeline order per attempt (v3.1):
+      parse → oracle(raw) → normalize → reconstruct → classifier → AST → execute
+    """
+    from core.evaluation.oracle_inline import (
+        run_oracle_evaluation, compute_disagreement, make_sampling_skip,
+        select_best_attempt, parse_sampling_strategy, should_run_oracle,
+    )
+    from core.evaluation.event_validation import apply_validation
+    from core.pipeline.execution.exec_canonical import exec_canonical
+    from core.evaluation.ast_eval import check_ast_patterns
 
     config = get_config()
     cond_retry = config.conditions[condition].retry
@@ -333,26 +396,25 @@ def run_retry_v2(
     file_keys_example = ", ".join(
         f'"{p}": "<complete file contents or UNCHANGED>"' for p in file_paths
     )
-
     schema_line = (
         '{"root_cause": "<...>", "fix_strategy": "<...>", "files": {'
         + file_keys_example + '}}'
     )
 
-    # Determine retry mode
     use_test_feedback = "no_contract" in condition or "adaptive" in condition
     use_classifier_hint = "adaptive" in condition
     use_bare_retry = "bare_retry" in condition
     critique_variant = _resolve_critique_variant(condition)
+    sampling_mode, sampling_params = parse_sampling_strategy(config.oracle.sampling_strategy)
 
     t0 = time.monotonic()
     trajectory = []
     prev_code = ""
     prev_raw = ""
     last_parent_eid = case_start_eid
-    best_ev = None
-    best_parsed_gen = None
-    best_code = ""
+    test_feedback = ""
+    classifier_hint = ""
+    critique_info = {"critique": "", "variant": critique_variant}
 
     for k in range(max_iterations):
         elapsed = time.monotonic() - t0
@@ -360,177 +422,171 @@ def run_retry_v2(
             _log.warning("TIMEOUT %s after %.1fs at attempt %d", cid, elapsed, k)
             break
 
-        # ── Build prompt ──
-        if k == 0:
-            gen_vars = {
-                "task": task,
-                "code_files_block": code_block,
-                "file_keys_example": file_keys_example,
-                "schema_line": schema_line,
+        try:
+            prompt = _build_retry_prompt_for_attempt(
+                k, use_bare_retry, critique_variant, critique_info,
+                use_test_feedback, use_classifier_hint, test_feedback,
+                classifier_hint, prev_raw, task, code_block, file_keys_example,
+                schema_line, prev_code)
+
+            gen_result = call_model(
+                prompt, model=model, raw=True,
+                logger=logger, case_id=cid, phase="generation",
+                condition=condition, parent_event_id=last_parent_eid)
+            raw_response = gen_result.response
+            assert gen_result.event_id is not None
+            last_parent_eid = gen_result.event_id
+
+            parse_exec = parse_v2_execution(raw_response, "baseline_v2")
+            parse_rec = parse_v2_recovery(raw_response, "baseline_v2")
+            parsed_gen = parse_exec
+            parse_rec.execution_equivalent = (
+                parse_exec.parse_valid and parse_rec.parse_valid
+                and parse_exec.full_json == parse_rec.full_json)
+
+            # Oracle: uses RAW fields, before normalize. None preserved.
+            fj = parsed_gen.full_json or {}
+            raw_rc = fj.get("root_cause")
+            raw_fs = fj.get("fix_strategy")
+
+            if should_run_oracle(sampling_mode, sampling_params, k):
+                oracle_result = run_oracle_evaluation(
+                    raw_rc, raw_fs, case, config,
+                    logger=logger, case_id=cid, condition=condition,
+                    parent_event_id=last_parent_eid)
+            else:
+                oracle_result = make_sampling_skip(
+                    config, f"attempt {k} not sampled by {config.oracle.sampling_strategy}")
+
+            # Normalize
+            artifact = normalize_generation_v2(parsed_gen, case, "baseline_v2")
+
+            # Reconstruct using logical file keys (bare filenames)
+            if "logical_file_keys" not in case:
+                raise RuntimeError(
+                    "case missing 'logical_file_keys'. "
+                    "load_cases() must be called before reconstruction."
+                )
+            logical_files = case["logical_file_keys"]
+            logical_paths = list(logical_files.keys())
+            from core.pipeline.reconstructor import ReconstructionResult
+            recon = ReconstructionResult(status="RECON_MISSING_FILES", files={})
+            if parsed_gen.files_dict:
+                recon = reconstruct_strict(logical_paths, logical_files, parsed_gen.files_dict)
+
+            # Build full materialized code for classifier (ALL files, not just changed)
+            full_code_parts = []
+            if recon.status == "SUCCESS" and recon.files:
+                for path in logical_paths:
+                    if path in recon.files:
+                        is_modified = path in recon.changed_files
+                        marker = "MODIFIED" if is_modified else "UNCHANGED"
+                        full_code_parts.append(
+                            f"# [{marker}] {path}\n{recon.files[path]}")
+            code = "\n\n".join(full_code_parts)
+
+            # Classifier: per-attempt, BEFORE execution
+            if parsed_gen.parse_status == "success":
+                cls_result, cls_eid = classify_case(
+                    artifact, case, code, config, logger, last_parent_eid, condition, cid)
+                last_parent_eid = cls_eid
+            else:
+                cls_result = ClassifierResultV2()
+                cls_result.parse_error = f"skipped: parse_status={parsed_gen.parse_status}"
+
+            # AST: per-attempt, BEFORE execution
+            import hashlib as _hl, json as _j
+            if recon.status == "SUCCESS" and recon.files:
+                _art_content = _j.dumps(dict(recon.files), sort_keys=True, separators=(",", ":"))
+                artifact_id = _hl.sha256(_art_content.encode()).hexdigest()[:16]
+            else:
+                artifact_id = "no_artifact"
+            ast_result = check_ast_patterns(
+                dict(recon.files) if recon.files else None, cid, artifact_id)
+
+            # Execute: AFTER classifier + AST
+            exec_result = exec_canonical(case, parsed_gen, recon, config, logger, attempt=k)
+            passed = exec_result.get("pass", False)
+
+            # Disagreement
+            disagreement = compute_disagreement(cls_result, oracle_result, config)
+
+            # Assemble COMPLETED trajectory entry
+            _cls_canon = _extract_canonical_dims(cls_result)
+            cls_dict = {
+                "mechanism_identified": _cls_canon["mechanism_identified"],
+                "commitments_extracted": _cls_canon["commitments_extracted"],
+                "commitments_satisfied": _cls_canon["commitments_satisfied"],
+                "reasoning_code_alignment": _cls_canon["reasoning_code_alignment"],
+                # V3 raw fields (None if v2)
+                "reasoning_internal_consistency": cls_result.reasoning_internal_consistency,
+                "commitments_internal_consistency": cls_result.commitments_internal_consistency,
+                "commitments_code_consistency": cls_result.commitments_code_consistency,
+                "classifier_ran": cls_result.parse_error is None,
+                "error": cls_result.parse_error,
             }
-            prompt = _compile_prompt(
-                ("task_and_code", "output_instruction_v3"), gen_vars
-            )
-
-        elif use_bare_retry:
-            # Pure control: previous response + same prompt, nothing else
-            gen_vars = {
-                "task": task,
-                "code_files_block": code_block,
-                "file_keys_example": file_keys_example,
-                "schema_line": schema_line,
-            }
-            base_prompt = _compile_prompt(
-                ("task_and_code", "output_instruction_v3"), gen_vars
-            )
-            prompt = (
-                f"Your previous response:\n{prev_raw}\n\n"
-                + base_prompt
-            )
-
-        elif critique_variant and critique_info.get("critique"):
-            # Critique modes: previous attempt + critique
-            prompt = _build_critique_retry_prompt(
-                prev_raw, critique_info["critique"], schema_line,
-            )
-
-        elif critique_variant and not critique_info.get("critique"):
-            # Critique mode but NO_MISMATCH or missing fields: plain retry
-            prompt = _build_critique_retry_prompt(prev_raw, "", schema_line)
-
-        elif use_test_feedback:
-            # Test feedback modes — compiled via test_feedback_retry.j2
-            prompt = _compile_prompt(("test_feedback_retry",), {
-                "task": task,
-                "code_files_block": code_block,
-                "prev_code": prev_code,
-                "test_feedback": test_feedback,
-                "schema_line": schema_line,
-                "classifier_hint": classifier_hint if use_classifier_hint else "",
+            trajectory.append({
+                "attempt": k, "status": "COMPLETED",
+                "execution": {
+                    "pass": passed,
+                    "score": exec_result.get("score", 0),
+                    "execution_category": exec_result.get("execution_category"),
+                },
+                "oracle": oracle_result,
+                "classifier": cls_dict,
+                "ast": ast_result.to_dict(),
+                "reasoning_disagreement": disagreement,
+                "parse_valid": parsed_gen.parse_valid,
+                "code_length": len(code),
+                "retry_mode": condition,
+                "had_test_feedback": bool(test_feedback) and use_test_feedback,
+                "had_classifier_hint": bool(classifier_hint),
+                "mismatch_critique": critique_info.get("critique") or None,
+                "mismatch_variant": critique_info.get("variant"),
             })
 
-        else:
-            # Fallback
-            prompt = _build_critique_retry_prompt(prev_raw, "", schema_line)
+        except Exception as exc:
+            _log.error("Attempt %d crashed for %s: %s", k, cid, exc)
+            trajectory.append(_make_incomplete_entry(k, exc))
+            passed = False
+            code = ""
+            raw_response = prev_raw
+            parsed_gen = parse_v2_execution("", "baseline_v2")
+            exec_result = {"pass": False, "score": 0.0}
 
-        # ── Call model ──
-        gen_result = call_model(
-            prompt, model=model, raw=True,
-            logger=logger, case_id=cid, phase="generation",
-            condition=condition,
-            parent_event_id=last_parent_eid,
-        )
-        raw_response = gen_result.response
-        assert gen_result.event_id is not None, "call_model must return event_id in execution path"
-        last_parent_eid = gen_result.event_id
-
-        # ── Parse ──
-        parse_exec = parse_v2_execution(raw_response, "baseline_v2")
-        parse_fmt = parse_v2_format(raw_response, "baseline_v2")
-        parse_rec = parse_v2_recovery(raw_response, "baseline_v2")
-        parsed_gen = parse_exec
-
-        parse_rec.execution_equivalent = (
-            parse_exec.parse_valid and parse_rec.parse_valid
-            and parse_exec.full_json == parse_rec.full_json
-        )
-
-        # ── Extract code ──
-        code = ""
-        from core.pipeline.reconstructor import ReconstructionResult
-        manifest_files = case.get("code_files_contents", {})
-        manifest_paths = list(manifest_files.keys())
-        recon = ReconstructionResult(status="RECON_MISSING_FILES", files={})
-        if parsed_gen.files_dict:
-            recon = reconstruct_strict(
-                manifest_paths, manifest_files, parsed_gen.files_dict
-            )
-            if recon.status == "SUCCESS" and recon.changed_files:
-                changed = [recon.files[p] for p in manifest_paths
-                           if p in recon.changed_files]
-                code = "\n\n".join(changed)
-
-        # ── Execute ──
-        from core.pipeline.execution.exec_canonical import exec_canonical
-        exec_result = exec_canonical(
-            case, parsed_gen, recon, config, logger, attempt=k)
-        passed = exec_result.get("pass", False)
-
-        # ── Build hints for next iteration ──
+        # Build hints for next iteration
         test_feedback = ""
         classifier_hint = ""
-        critique_info = {
-            "critique": "", "variant": critique_variant,
-            "no_mismatch": False, "truncated": False,
-            "prescriptive": False, "skipped_missing_fields": False,
-        }
+        critique_info = {"critique": "", "variant": critique_variant}
 
         if not passed and k < max_iterations - 1:
             reasons = exec_result.get("reasons", [])
             test_feedback = "\n".join(reasons) if reasons else "Tests failed."
+            fj_hint = parsed_gen.full_json or {}
 
-            fj = parsed_gen.full_json or {}
-            root_cause = fj.get("root_cause", "")
-            fix_strategy = fj.get("fix_strategy", "")
-
-            # Classifier hint (adaptive mode)
             if use_classifier_hint and parsed_gen.parse_status == "success":
                 try:
-                    cv = {
-                        "root_cause": root_cause,
-                        "fix_strategy": fix_strategy,
-                        "code": (code or ""),
-                        "task": task,
-                    }
+                    cv = {"root_cause": fj_hint.get("root_cause", ""),
+                          "fix_strategy": fj_hint.get("fix_strategy", ""),
+                          "code": code or "", "task": task}
                     cp = _compile_prompt(("critique_mismatch_v2",), cv)
                     hint_result = call_model(
                         cp, model=config.models.evaluator.name, raw=True,
                         logger=logger, case_id=cid, phase="classification",
-                        condition=condition, parent_event_id=last_parent_eid,
-                    )
-                    cr = hint_result.response
-                    assert hint_result.event_id is not None, "call_model must return event_id in execution path"
+                        condition=condition, parent_event_id=last_parent_eid)
+                    assert hint_result.event_id is not None
                     last_parent_eid = hint_result.event_id
-                    ct = cr.strip()
+                    ct = hint_result.response.strip()
                     if ct and "NO MISMATCH" not in ct:
                         classifier_hint = f"\n=== Reasoning-Code Mismatch ===\n{ct}"
                 except Exception as e:
                     _log.debug("Classifier hint failed: %s", e)
 
-            # Mismatch critique (leg_critique modes)
             if critique_variant:
                 critique_info, last_parent_eid = _generate_critique(
-                    critique_variant, root_cause, fix_strategy, code,
-                    config, logger, cid, condition, last_parent_eid,
-                )
-
-        # ── Track trajectory ──
-        trajectory.append({
-            "attempt": k,
-            "pass": passed,
-            "score": exec_result.get("score", 0),
-            "parse_valid": parsed_gen.parse_valid,
-            "code_length": len(code),
-            "retry_mode": condition,
-            "had_test_feedback": bool(test_feedback) and use_test_feedback,
-            "had_classifier_hint": bool(classifier_hint),
-            "mismatch_critique": critique_info.get("critique") or None,
-            "mismatch_variant": critique_info.get("variant"),
-            "mismatch_no_mismatch": critique_info.get("no_mismatch", False),
-            "mismatch_truncated": critique_info.get("truncated", False),
-            "mismatch_prescriptive": critique_info.get("prescriptive", False),
-            "critique_skipped_missing_fields": critique_info.get("skipped_missing_fields", False),
-        })
-
-        # Track best
-        if passed or best_ev is None:
-            best_ev = exec_result
-            best_parsed_gen = parsed_gen
-            best_code = code
-            best_parse_exec = parse_exec
-            best_parse_fmt = parse_fmt
-            best_parse_rec = parse_rec
-            best_raw = raw_response
+                    critique_variant, fj_hint.get("root_cause", ""),
+                    fj_hint.get("fix_strategy", ""), code,
+                    config, logger, cid, condition, last_parent_eid)
 
         prev_code = code
         prev_raw = raw_response
@@ -539,87 +595,74 @@ def run_retry_v2(
             _log.info("retry_v2 %s: PASS at attempt %d", cid, k)
             break
 
-    # ── Final classification on best result ──
-    parsed_gen = best_parsed_gen
-    exec_result = best_ev
-    code = best_code
-    raw_response = best_raw
-    parse_exec = best_parse_exec
-    parse_fmt = best_parse_fmt
-    parse_rec = best_parse_rec
+    # Assemble final event from trajectory
+    import copy
+    best_idx = select_best_attempt(trajectory)
+    best = trajectory[best_idx]
 
-    artifact = normalize_generation_v2(parsed_gen, case, "baseline_v2")
-
-    if parsed_gen.parse_status == "success":
-        classifier_result, classify_eid = classify_case(
-            artifact, case, code, config, logger, last_parent_eid, condition, cid)
+    # Reconstruct top-level from best attempt (canonical source = trajectory)
+    best_cls = best.get("classifier", {})
+    classifier_result = ClassifierResultV2()
+    # Populate v3 fields if present, else v2 fields
+    if best_cls.get("reasoning_internal_consistency") is not None:
+        classifier_result.reasoning_internal_consistency = best_cls.get("reasoning_internal_consistency")
+        classifier_result.commitments_internal_consistency = best_cls.get("commitments_internal_consistency")
+        classifier_result.commitments_code_consistency = best_cls.get("commitments_code_consistency")
     else:
-        classifier_result = ClassifierResultV2()
-        classifier_result.parse_error = f"skipped: parse_status={parsed_gen.parse_status}"
-        classify_eid = last_parent_eid
+        classifier_result.mechanism_identified = best_cls.get("mechanism_identified")
+        classifier_result.commitments_extracted = best_cls.get("commitments_extracted")
+        classifier_result.commitments_satisfied = best_cls.get("commitments_satisfied")
+    classifier_result.reasoning_code_alignment = best_cls.get("reasoning_code_alignment")
+    if not best_cls.get("classifier_ran", False):
+        classifier_result.parse_error = best_cls.get("error", "unknown")
 
-    code_correct = exec_result.get("pass", False)
+    best_exec = best.get("execution", {})
+    exec_result = {"pass": best_exec.get("pass", False), "score": best_exec.get("score", 0)}
+
     signals = derive_v2_signals(
-        classifier_dims={
-            "mechanism_identified": classifier_result.mechanism_identified,
-            "commitments_extracted": classifier_result.commitments_extracted,
-            "commitments_satisfied": classifier_result.commitments_satisfied,
-            "reasoning_code_alignment": classifier_result.reasoning_code_alignment,
-        },
-        code_correct=code_correct,
-        commitments_source=artifact.commitments_source,
+        classifier_dims=_extract_canonical_dims(classifier_result),
+        code_correct=best_exec.get("pass", False),
+        commitments_source="none",
     )
 
-    if parsed_gen.parse_status != "success":
-        signals.v2_category = "parser_failure_v2"
-        signals.legacy_compat_category = "parse_failed"
-
     ev = assemble_v2_result(
-        exec_result=exec_result, artifact=artifact,
+        exec_result=exec_result, artifact=normalize_generation_v2(
+            parse_v2_execution("", "baseline_v2"), case, "baseline_v2"),
         classifier=classifier_result, signals=signals,
         case=case, condition=condition, model=model,
     )
 
+    # Canonical source: top-level derived from trajectory[best_idx]
+    ev["oracle"] = copy.deepcopy(best.get("oracle", {}))
+    ev["classification"] = copy.deepcopy(best.get("classifier", {}))
+    ev["ast_eval"] = copy.deepcopy(best.get("ast", {}))
+    ev["reasoning_disagreement"] = copy.deepcopy(best.get("reasoning_disagreement", {}))
+    ev["_schema_version"] = "v3.1"
+
     ev["num_attempts"] = len(trajectory)
+    ev["best_attempt_idx"] = best_idx
     ev["trajectory"] = trajectory
     ev["retry_passed_at"] = next(
-        (t["attempt"] for t in trajectory if t["pass"]), None
-    )
+        (t["attempt"] for t in trajectory
+         if t.get("execution", {}).get("pass", t.get("pass", False))), None)
     ev["retry_mode"] = condition
 
-    ev["v2_parse_tiers"] = {
-        "exec_parse_valid": parse_exec.parse_valid,
-        "exec_schema_valid": parse_exec.schema_valid,
-        "exec_parse_error": parse_exec.parse_error,
-        "format_valid": parse_fmt.format_valid,
-        "format_error": parse_fmt.format_error,
-        "recovery_parse_valid": parse_rec.parse_valid,
-        "recovery_schema_valid": parse_rec.schema_valid,
-        "recovery_type": parse_rec.recovery_type,
-        "recovery_steps": parse_rec.recovery_steps,
-        "execution_equivalent": parse_rec.execution_equivalent,
-        "recoverable": not parse_exec.parse_valid and parse_rec.parse_valid,
-    }
+    apply_validation(ev, trajectory, best_idx, cid)
 
     elapsed = time.monotonic() - t0
-
     parsed_compat = {
-        "code": code,
-        "reasoning": f"Root cause: {artifact.normalized_root_cause}\n"
-                     f"Fix strategy: {artifact.normalized_fix_strategy}",
-        "parse_error": parsed_gen.parse_error,
-        "_raw_fallback": False,
+        "code": "", "reasoning": "",
+        "parse_error": None, "_raw_fallback": False,
         "data_lineage": ["raw_output_received", "parser_v2", "retry_v2"],
     }
 
-    last_eid = classify_eid
     end_eid = logger.end_case(
         cid, condition=condition, raw_ev=ev,
         runtime_ms=round(elapsed * 1000),
-        parent_event_id=last_eid,
+        parent_event_id=last_parent_eid,
     )
     logger.log_run(
-        cid, condition, prompt, raw_response, parsed_compat,
+        cid, condition, "", raw_response, parsed_compat,
         canonical_event_id=end_eid,
     )
 

@@ -5,7 +5,9 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from dashboard.components.charts import static_bar_chart
 from dashboard.components.styling import style_dataframe
+from dashboard.tab_docs import render_tab_docs
 
 
 def _terminal_stage_counts(df: pd.DataFrame) -> pd.DataFrame:
@@ -23,6 +25,7 @@ def _terminal_stage_counts(df: pd.DataFrame) -> pd.DataFrame:
 
 def render_failure_decomposition(df: pd.DataFrame) -> None:
     st.subheader("Failure Decomposition")
+    render_tab_docs("failure")
 
     cols = st.columns(4)
     parse_fail = float(df["parse_failure"].mean()) if len(df) else 0.0
@@ -39,7 +42,7 @@ def render_failure_decomposition(df: pd.DataFrame) -> None:
     st.markdown("##### Terminal Stage")
 
     terminal = _terminal_stage_counts(df)
-    st.bar_chart(terminal.set_index("stage")["count"], use_container_width=True)
+    static_bar_chart(terminal.set_index("stage")["count"])
     st.dataframe(
         style_dataframe(terminal, metric_columns=["count", "pct"]),
         use_container_width=True,
@@ -85,5 +88,5 @@ def render_failure_decomposition(df: pd.DataFrame) -> None:
             ],
         }
     )
-    st.bar_chart(funnel.set_index("stage")["count"], use_container_width=True)
+    static_bar_chart(funnel.set_index("stage")["count"])
     st.dataframe(style_dataframe(funnel, metric_columns=["count"]), use_container_width=True, hide_index=True)

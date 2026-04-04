@@ -95,11 +95,18 @@ def _materialize_package(case, recon, project_root, attempt):
     pkg.mkdir()
     (pkg / "__init__.py").write_text("")
 
-    # Write code files
+    # Write code files — recon uses logical keys (bare filenames),
+    # code_files_contents uses storage paths. Try both.
+    logical_files = case.get("logical_file_keys", {})
     for rel_path in case["code_files"]:
         filename = rel_path.rsplit("/", 1)[-1]
-        if rel_path in recon.changed_files:
+        # Check recon by logical key (bare filename) first, then storage path
+        if filename in recon.changed_files:
+            content = recon.files[filename]
+        elif rel_path in recon.changed_files:
             content = recon.files[rel_path]
+        elif filename in logical_files:
+            content = logical_files[filename]
         else:
             content = case["code_files_contents"][rel_path]
         (pkg / filename).write_text(content)
@@ -318,11 +325,13 @@ def exec_canonical(case, parsed_gen, recon, config, logger, attempt=0):
         result = _make_result(
             case, subprocess_result, category, score, ran=True)
 
-        # Set extracted code from recon
+        # Set extracted code from recon.
+        # recon.files uses logical keys (bare filenames or logical_file_keys).
+        # Match against both case["code_files"] and recon keys directly.
         extracted = []
-        for rel_path in case["code_files"]:
-            if rel_path in recon.changed_files:
-                extracted.append(recon.files.get(rel_path, ""))
+        for key in recon.changed_files:
+            if key in recon.files:
+                extracted.append(recon.files[key])
         result["_extracted_code"] = "\n\n".join(extracted)
         result["reconstruction_status"] = recon.status
         result["semantic_diagnostics"] = recon.semantic_diagnostics

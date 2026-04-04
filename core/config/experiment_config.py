@@ -73,7 +73,7 @@ class ModelsConfig:
     generation: list[ModelSpec]
     evaluator: EvaluatorModelSpec
     failure_classifier_name: str | None = None  # None = use evaluator
-    no_temperature_prefixes: tuple[str, ...] = ("o1", "o3", "o4", "gpt-5")
+    no_temperature_prefixes: list[str] = field(default_factory=lambda: ["o1", "o3", "o4", "gpt-5"])
 
     @property
     def classifier_name(self) -> str:
@@ -146,6 +146,19 @@ class TokenBudgetConfig:
 
 
 @dataclass
+class OracleConfig:
+    inline_enabled: bool = True
+    model: str = "gpt-5-mini"
+    prompt_template: str = "reasoning_truth_prompt.j2"
+    partial_mode: str = "lenient"         # "strict" | "lenient"
+    sampling_strategy: str = "ALWAYS"     # "ALWAYS" | "FIRST_K(n)" | "RANDOM_SAMPLE(p)"
+    # NOTE: per-call timeout is NOT supported. Timeout is controlled by the
+    # API client (execution.anthropic_client_timeout). A per-call timeout
+    # would require changes to call_model() and both provider wrappers.
+    # Do not add a timeout field here — it would be a fake knob.
+
+
+@dataclass
 class ExecutionConfig:
     num_workers: int = 1
     worker_stagger_seconds: int = 3
@@ -205,6 +218,7 @@ class ExperimentConfig:
     evaluation: EvaluationConfig
     execution: ExecutionConfig
     logging: LoggingConfig
+    oracle: OracleConfig = field(default_factory=OracleConfig)
     trials: int = 1
 
     # Runtime metadata (set by loader, not by YAML)
@@ -362,7 +376,7 @@ def _parse_config(raw: dict) -> ExperimentConfig:
         generation=generation,
         evaluator=evaluator,
         failure_classifier_name=fc_name,
-        no_temperature_prefixes=tuple(models_raw.get("no_temperature_prefixes", ("o1", "o3", "o4", "gpt-5"))),
+        no_temperature_prefixes=list(models_raw.get("no_temperature_prefixes", ["o1", "o3", "o4", "gpt-5"])),
     )
 
     # Retry defaults
@@ -490,6 +504,29 @@ def _parse_config(raw: dict) -> ExperimentConfig:
             f"Valid fields: {sorted(_log_allowed)}"
         )
 
+    # Oracle
+    oracle_raw = raw.get("oracle", {})
+    oracle = OracleConfig(
+        inline_enabled=oracle_raw.get("inline_enabled", True),
+        model=oracle_raw.get("model", "gpt-5-mini"),
+        prompt_template=oracle_raw.get("prompt_template", "oracle_reasoning_truth"),
+        partial_mode=oracle_raw.get("partial_mode", "lenient"),
+        sampling_strategy=oracle_raw.get("sampling_strategy", "ALWAYS"),
+    )
+    if oracle.sampling_strategy.strip().upper() == "FINAL_ONLY":
+        raise ValueError(
+            "CONFIG ERROR: oracle.sampling_strategy='FINAL_ONLY' is not supported. "
+            "FINAL_ONLY requires storing raw reasoning text in trajectory entries, "
+            "which is not implemented. Use 'ALWAYS', 'FIRST_K(n)', or 'RANDOM_SAMPLE(p)'."
+        )
+    if "timeout" in oracle_raw:
+        raise ValueError(
+            "CONFIG ERROR: oracle.timeout is not supported. "
+            "Per-call timeout cannot be plumbed through the current API wrapper chain. "
+            "Timeout is controlled by execution.anthropic_client_timeout. "
+            "Remove oracle.timeout from your config."
+        )
+
     # Run
     run_raw = raw.get("run", {})
     if not run_raw:
@@ -518,6 +555,7 @@ def _parse_config(raw: dict) -> ExperimentConfig:
         evaluation=evaluation,
         execution=execution,
         logging=logging_config,
+        oracle=oracle,
         trials=raw.get("trials", 1),
     )
 
@@ -624,6 +662,8 @@ def config_to_dict(config: ExperimentConfig) -> dict:
             return {
                 k: _to_dict(v) for k, v in dataclasses.asdict(obj).items() if not k.startswith("_")
             }
+        elif isinstance(obj, (tuple, frozenset)):
+            return [_to_dict(i) for i in obj]
         elif isinstance(obj, list):
             return [_to_dict(i) for i in obj]
         elif isinstance(obj, dict):
@@ -644,6 +684,29 @@ def config_to_dict(config: ExperimentConfig) -> dict:
     output_format = ex.pop("output_format", None)
     if output_format is not None:
         d.setdefault("prompts", {})["output_format"] = output_format
+
+    # Re-nest flat evaluation fields to match YAML schema
+    ev = d.get("evaluation", {})
+    for flat_key, nested_key in [
+        ("leg_enabled", "leg"),
+        ("failure_classification_enabled", "failure_classification"),
+        ("alignment_enabled", "alignment"),
+    ]:
+        if flat_key in ev:
+            ev[nested_key] = {"enabled": ev.pop(flat_key)}
+
+    # Re-nest flat logging fields to match YAML schema
+    lg = d.get("logging", {})
+    redis_section = {}
+    for flat_key, nested_key in [
+        ("redis_enabled", "enabled"),
+        ("redis_url", "url"),
+        ("redis_stream_maxlen", "stream_maxlen"),
+    ]:
+        if flat_key in lg:
+            redis_section[nested_key] = lg.pop(flat_key)
+    if redis_section:
+        lg["redis"] = redis_section
 
     d["_config_path"] = config._config_path
     d["_config_sha256"] = config._config_sha256

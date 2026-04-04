@@ -161,20 +161,21 @@ def check_ast_patterns(reconstructed_files: dict[str, str] | None,
         strict_ok = strict_fn(target)
     except Exception as e:
         strict_ok = False
-        _log.debug("strict checker failed for %s: %s", case_id, e)
+        _log.warning("strict checker EXCEPTION for case=%s func=%s: %s", case_id, func_name, e)
 
     try:
         relaxed_ok = relaxed_fn(target)
     except Exception as e:
         relaxed_ok = False
-        _log.debug("relaxed checker failed for %s: %s", case_id, e)
+        _log.warning("relaxed checker EXCEPTION for case=%s func=%s: %s", case_id, func_name, e)
 
     anti_found = False
     if anti_fn is not None:
         try:
             anti_found = anti_fn(target)
-        except Exception:
+        except Exception as e:
             anti_found = False
+            _log.warning("anti checker EXCEPTION for case=%s func=%s: %s", case_id, func_name, e)
 
     # Determine correctness: relaxed pass AND no anti-pattern
     correct = relaxed_ok and not anti_found
