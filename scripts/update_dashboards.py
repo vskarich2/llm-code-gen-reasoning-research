@@ -26,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from live_metrics import (
+from core.logging_.live_metrics import (
     aggregate_model_events,
     compute_metrics,
     compute_trial_progress,

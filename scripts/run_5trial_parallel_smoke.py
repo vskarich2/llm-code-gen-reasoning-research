@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-BASE_CONFIG = "configs/v2_parallel_5trial_smoke.yaml"
+BASE_CONFIG = "config_storage/v2_parallel_5trial_smoke.yaml"
 N_TRIALS = 5
 
 

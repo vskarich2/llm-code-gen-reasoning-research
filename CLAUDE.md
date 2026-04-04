@@ -5,31 +5,72 @@ All rules are non-negotiable.
 
 ## RULE SYSTEM
 
-All behavioral rules live in `rules/`. Before any task, read and follow:
+All behavioral rules live in `CLAUDE_RULES/`. Before any task, read and follow:
 
-1. `rules/ENTRYPOINT.md` — the mandatory execution protocol (plan → approve → implement → audit)
-2. `rules/core/invariants.md` — hard constraints (10 invariants, every one checkable)
-3. `rules/core/code_quality.md` — function/file limits, naming, structure
-4. `rules/core/architecture.md` — module boundaries, data flow, resource lifecycle
+1. `CLAUDE_RULES/ENTRYPOINT.md` — the mandatory execution protocol (plan → approve → implement → audit)
+2. `CLAUDE_RULES/core/invariants.md` — hard constraints (10 invariants, every one checkable)
+3. `CLAUDE_RULES/core/code_quality.md` — function/file limits, naming, structure
+4. `CLAUDE_RULES/core/architecture.md` — module boundaries, data flow, resource lifecycle
+5. `CLAUDE_RULES/core/engineering_constraints.md` — engineering constraints
+6. `CLAUDE_RULES/core/functional_programming_constraints.md` — functional programming constraints
+7. `CLAUDE_RULES/SYSTEM.md` — system-level rules
+8. `CLAUDE_RULES/RULES.md` — additional rules
+9. `CLAUDE_RULES/anti_patterns.md` — patterns to avoid
+10. `CLAUDE_RULES/tests_required.md` — mandatory test requirements
 
 Task-specific rules:
-- `rules/tasks/refactor.md`
-- `rules/tasks/debugging.md`
-- `rules/tasks/feature_addition.md`
+- `CLAUDE_RULES/tasks/refactor.md`
+- `CLAUDE_RULES/tasks/debugging.md`
+- `CLAUDE_RULES/tasks/feature_addition.md`
 
 Audit checklists:
-- `rules/audits/pre_action.md` — run BEFORE writing code
-- `rules/audits/post_action.md` — run AFTER writing code
-- `rules/audits/code_path_audit.md` — for tracing execution flow
+- `CLAUDE_RULES/audits/pre_action.md` — run BEFORE writing code
+- `CLAUDE_RULES/audits/post_action.md` — run AFTER writing code
+- `CLAUDE_RULES/audits/code_path_audit.md` — for tracing execution flow
 
 ## PROCESS (always follow)
 
-1. Plan first. No code before a written plan and user approval.
+1. Plan first. No code before a written plan and user approval. 
 2. Pre-action audit before implementation.
 3. Post-action audit with PASS/FAIL compliance report after implementation.
 4. No scope creep. Do exactly what was approved, nothing more.
 5. Tests required for every behavioral change.
 6. No commits. Provide a commit summary paragraph at the end.
+
+## PLANNING REQUIREMENTS (MANDATORY)
+
+All plans must be persisted to disk and versioned.
+
+- Plans MUST be written to the `artifacts/plans/` directory.
+- File naming convention:
+  - `artifacts/plans/<task_name>_plan_v1.md`
+  - `artifacts/plans/<task_name>_plan_v2.md`
+  - `artifacts/plans/<task_name>_plan_v3.md`
+- Every revision MUST create a new versioned file. Never overwrite previous versions.
+- Version increments must be strictly monotonic (+1 each revision).
+- The task_name must be short, descriptive, and stable across revisions.
+
+Plan lifecycle rules:
+
+1. Initial plan:
+   - Create `artifacts/plans/<task_name>_plan_v1.md`
+   - Must fully specify scope, files touched, invariants, and risks
+
+2. On revision:
+   - Create a NEW file: `artifacts/plans/<task_name>_plan_v{N+1}.md`
+   - Include:
+     - What changed from previous version
+     - Why the change was necessary
+     - Updated full plan (not a diff-only document)
+
+3. No plan reuse:
+   - Never edit an existing plan file
+   - Never collapse versions
+   - History must remain fully reconstructable
+
+4. Blocking rule:
+   - If a plan is not written to `artifacts/plans/` with correct versioning, STOP
+   - Do not proceed to implementation
 
 ## HARD CONSTRAINTS (memorize these)
 

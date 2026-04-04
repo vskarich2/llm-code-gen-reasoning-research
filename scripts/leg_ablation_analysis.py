@@ -5,7 +5,7 @@ Reads:
   outputs/ablation_v2_alignment/summary.csv
   outputs/ablation_v2_alignment/regime_summary.csv
   outputs/ablation_v2_alignment/transition_matrix.csv
-  logs/gpt-4o-mini-alignment-trial*_.jsonl (for attempt-level data)
+  logs/gpt-4o-mini-alignment-trial*_.jsonl (for attempt-level case_data)
 
 Writes:
   outputs/analysis/*.csv
@@ -54,7 +54,7 @@ def load_transitions():
 
 
 def load_attempt_level_data():
-    """Load attempt-level data from raw JSONL logs for all trials."""
+    """Load attempt-level case_data from raw JSONL logs for all trials."""
     rows = []
     for trial in [1, 2, 3]:
         pattern = str(LOGS_DIR / f"gpt-4o-mini-alignment-trial{trial}_*.jsonl")
@@ -110,7 +110,7 @@ def load_attempt_level_data():
 
 
 def compute_global_metrics(df):
-    """Compute global and per-condition metrics from attempt-level data."""
+    """Compute global and per-condition metrics from attempt-level case_data."""
     # Filter to evaluated attempts (leg_true is not None)
     evaluated = df[df["leg_true"].notna()].copy()
 
@@ -214,7 +214,7 @@ def compute_regime_analysis(df):
     evaluated = df[df["leg_true"].notna()].copy()
 
     if evaluated.empty:
-        print("\nSTEP 3: No evaluated data for regime analysis.")
+        print("\nSTEP 3: No evaluated case_data for regime analysis.")
         return
 
     regime_stats = (
@@ -290,7 +290,7 @@ def compute_condition_comparison(df):
     evaluated = df[df["leg_true"].notna()].copy()
 
     if evaluated.empty:
-        print("\nSTEP 4: No evaluated data for condition comparison.")
+        print("\nSTEP 4: No evaluated case_data for condition comparison.")
         return
 
     cond_stats = (
@@ -360,7 +360,7 @@ def plot_condition_comparison(cond_stats):
 def compute_transitions(trans_df):
     """Analyze state transitions."""
     if trans_df is None or trans_df.empty:
-        print("\nSTEP 5: No transition data.")
+        print("\nSTEP 5: No transition case_data.")
         return
 
     # Already in long format: from_state, to_state, count, probability
@@ -517,7 +517,7 @@ def print_key_results(df, regime_stats, cond_stats, trans_agg):
         overall_leg = evaluated["leg_true"].mean()
         print(f"Overall LEG_true rate: {overall_leg:.3f} ({overall_leg:.1%})")
     else:
-        print("Overall LEG_true rate: N/A (no evaluated data)")
+        print("Overall LEG_true rate: N/A (no evaluated case_data)")
 
     # Subtype split
     failures = evaluated[evaluated["success"] == False]
@@ -569,14 +569,14 @@ def print_key_results(df, regime_stats, cond_stats, trans_agg):
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    print("Loading data...")
+    print("Loading case_data...")
 
     # Load pre-computed summaries
     summary = load_summary()
     regime_summary = load_regime_summary()
     transitions = load_transitions()
 
-    # Load attempt-level data from raw logs
+    # Load attempt-level case_data from raw logs
     df = load_attempt_level_data()
     print(f"Loaded {len(df)} attempt-level records from {df['run_id'].nunique()} runs")
     print(f"Conditions: {sorted(df['condition'].unique())}")

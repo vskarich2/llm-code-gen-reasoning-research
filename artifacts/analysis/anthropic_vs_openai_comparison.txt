@@ -1,0 +1,100 @@
+======================================================================================================================================================
+ANTHROPIC vs OPENAI: 6-MODEL COMPARISON (3 cases, 50 trials, canonical execution)
+======================================================================================================================================================
+
+--- config_shadowing ---
+MODEL           base_s   leg_s  lean_s |  base_r   leg_r  lean_r |  b_leg  l_leg  ln_leg |  recon%
+------------------------------------------------------------------------------------------------------------------------
+  haiku          100%     0%    45% |   100%   nan%    50% |    0%    0%    45% |   100%
+  sonnet-4         0%     0%     0% |     0%     0%     0% |  100%  100%   100% |   100%
+  nano             0%     2%     0% |     0%     2%     0% |  100%   94%   100% |   100%
+  4o-mini          0%     0%     0% |     0%     0%     0% |   64%   98%    92% |    78%
+  5-mini           2%     0%     0% |     2%     0%     0% |   98%   98%   100% |   100%
+  5.4-mini        90%    46%    40% |   100%    49%    53% |    0%   52%    54% |    90%
+
+--- early_return_a ---
+MODEL           base_s   leg_s  lean_s |  base_r   leg_r  lean_r |  b_leg  l_leg  ln_leg |  recon%
+------------------------------------------------------------------------------------------------------------------------
+  haiku            0%     0%     0% |   nan%   nan%   nan% |    0%    0%     0% |     0%
+  sonnet-4       100%   100%   100% |   100%   100%   100% |    0%    0%     0% |   100%
+  nano           100%    96%    98% |   100%   100%   100% |    0%    0%     2% |   100%
+  4o-mini         14%   100%    10% |   100%   100%   100% |   16%    0%    82% |    14%
+  5-mini          82%    88%    78% |   100%   100%   100% |   18%   12%    20% |    82%
+  5.4-mini        96%   100%   100% |   100%   100%   100% |    0%    0%     0% |    96%
+
+--- lost_update ---
+MODEL           base_s   leg_s  lean_s |  base_r   leg_r  lean_r |  b_leg  l_leg  ln_leg |  recon%
+------------------------------------------------------------------------------------------------------------------------
+  haiku            0%     0%     0% |   nan%   nan%   nan% |    0%    0%     0% |     0%
+  sonnet-4         0%     0%     0% |     0%     0%     0% |   92%   62%    84% |   100%
+  nano             0%     2%    14% |     0%     2%    17% |   60%   90%    70% |    62%
+  4o-mini         34%    50%    28% |    37%    56%    28% |   66%   50%    68% |    92%
+  5-mini          74%    46%    56% |   100%   100%   100% |   24%   54%    44% |    74%
+  5.4-mini        20%    76%    64% |    20%    76%    64% |   80%   24%    34% |   100%
+
+
+====================================================================================================
+KEY FINDINGS
+====================================================================================================
+
+1. HAIKU RECONSTRUCTION CATASTROPHE
+   Haiku (claude-3-haiku) has 78% reconstruction failure rate overall.
+   Root cause: Haiku embeds triple-quoted Python strings ("""...""") inside
+   JSON string values. The v2 parser cannot extract files from this format.
+   Config_shadowing baseline is the exception (100% parse success) because
+   the fix changes a single-line dict literal that doesn't need triple-quotes.
+   For lost_update and early_return_a, Haiku's code is CORRECT but unparseable:
+   - lost_update: correct atomic step fix, correct reasoning, 0% pass (100% parse fail)
+   - early_return_a: correct ledger fix, correct reasoning, 0% pass (100% parse fail)
+
+2. SONNET-4 PROFILE
+   Sonnet-4 (claude-sonnet-4) has 0% reconstruction failures — perfect JSON.
+   - config_shadowing: 0% pass, 100% LEG rate. Sonnet identifies the bug correctly
+     but applies the TRAP fix (rerouting to get_config instead of fixing DEFAULTS).
+     This is identical to nano's behavior.
+   - early_return_a: 100% pass across all conditions. Trivially solved.
+   - lost_update: 0% pass, 92% LEG rate at baseline. Sonnet understands non-atomic
+     read-modify-write but cannot produce the step-function fix. LEG reduces LEG
+     rate to 62% (LEG condition) but doesn't convert to passes — the model can't
+     serialize the fix regardless of scaffolding.
+
+3. CROSS-PROVIDER COMPARISON
+
+   config_shadowing baseline pass rates:
+     haiku         : pass=100%, LEG=0%
+     sonnet-4      : pass=0%, LEG=100%
+     nano          : pass=0%, LEG=100%
+     4o-mini       : pass=0%, LEG=64%
+     5-mini        : pass=2%, LEG=98%
+     5.4-mini      : pass=90%, LEG=0%
+
+   lost_update baseline pass rates:
+     haiku         : pass=0%, LEG=0%
+     sonnet-4      : pass=0%, LEG=92%
+     nano          : pass=0%, LEG=60%
+     4o-mini       : pass=34%, LEG=66%
+     5-mini        : pass=74%, LEG=24%
+     5.4-mini      : pass=20%, LEG=80%
+
+   early_return_a baseline pass rates:
+     haiku         : pass=0%, LEG=0%
+     sonnet-4      : pass=100%, LEG=0%
+     nano          : pass=100%, LEG=0%
+     4o-mini       : pass=14%, LEG=16%
+     5-mini        : pass=82%, LEG=18%
+     5.4-mini      : pass=96%, LEG=0%
+
+4. HAIKU'S HIDDEN CAPABILITY
+   Haiku achieves 100% on config_shadowing baseline — the ONLY sub-5.4-mini model
+   to fix the structural root cause (changing DEFAULTS timeout from 5 to 30).
+   But this capability is invisible on lost_update and early_return_a because
+   100% of outputs fail JSON reconstruction. If the parser were fixed to handle
+   triple-quoted strings, Haiku's actual pass rate could be significantly higher.
+
+5. SONNET-4 vs 5.4-MINI: SIMILAR PROFILES
+   Both are strong models with distinct weakness on lost_update (high LEG rate).
+   - 5.4-mini: 20% pass, 80% LEG (LEG helps: +56pp with LEG condition)
+   - sonnet-4: 0% pass, 92% LEG (LEG doesn't help: 0% pass in all conditions)
+   5.4-mini can convert reasoning to execution with LEG scaffolding; sonnet-4 cannot.
+   This suggests the step-function concurrency simulation pattern is a specific
+   serialization weakness for Claude models.

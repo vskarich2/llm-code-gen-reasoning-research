@@ -11,7 +11,6 @@ Silent fallbacks are structurally impossible.
 """
 
 import ast
-import json
 import sys
 from dataclasses import dataclass
 from difflib import unified_diff
@@ -21,8 +20,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.ast_mutator import (
     SemanticOperator,
-    MutationOutcome,
-    get_operators_for_family,
     get_all_operators,
     mutate_file_in_case,
 )
@@ -71,7 +68,7 @@ def verify_diff(original: str, mutated: str, target_function: str) -> tuple[bool
         original.splitlines(keepends=True), mutated.splitlines(keepends=True),
         fromfile="original", tofile="mutated", n=1,
     ))
-    return bool(diff_lines), "".join(diff_lines[:20])
+    return bool(diff_lines), "".join(diff_lines)
 
 
 def check_semantic_guardrails(mutated_code: str, reference_fix: str,
@@ -91,7 +88,7 @@ def check_semantic_guardrails(mutated_code: str, reference_fix: str,
 
 
 def validate_with_oracle(case: dict, mutated_code: str) -> tuple[bool, str | None, str]:
-    from exec_eval import exec_evaluate
+    from core.pipeline import exec_evaluate
     try:
         result = exec_evaluate(case, mutated_code)
     except Exception as e:

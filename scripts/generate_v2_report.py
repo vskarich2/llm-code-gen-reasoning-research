@@ -718,6 +718,6 @@ w()
 
 report = "\n".join(lines)
 os.makedirs("docs", exist_ok=True)
-with open("docs/v2_ablation_report.md", "w") as f:
+with open("artifacts/docs/v2_ablation_report.md", "w") as f:
     f.write(report)
 print(f"Wrote {len(lines)} lines to docs/v2_ablation_report.md")

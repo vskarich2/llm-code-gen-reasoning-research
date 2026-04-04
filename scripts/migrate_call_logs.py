@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from logging_core import render_call_flat
+from core.logging_.logging_core import render_call_flat
 
 
 def migrate_run_dir(run_dir: Path, dry_run: bool = False) -> dict:

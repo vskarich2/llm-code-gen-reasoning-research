@@ -38,10 +38,10 @@ def main():
                     print(code)
                 except (json.JSONDecodeError, TypeError):
                     print(f"--- L{i}: {cid} (unparseable) ---")
-                    print(raw[:500])
+                    print(raw)
             else:
                 print(f"--- L{i}: {cid} ---")
-                print(raw[:3000])
+                print(raw)
             print()
 
 

@@ -14,7 +14,6 @@ Exit 0 on pass, 1 on failure.
 """
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -40,8 +39,8 @@ def run_canary(n_cases: int = 5, eval_model: str | None = None):
     os.environ["OPENAI_API_KEY"] = ""
 
     try:
-        from evaluator import llm_classify
-        from runner import load_cases
+        from core.pipeline.orchestration import llm_classify
+        from core.pipeline.orchestration.runner import load_cases
 
         cases = load_cases(cases_file="cases_v2.json")[:n_cases]
         if len(cases) < n_cases:
@@ -49,7 +48,7 @@ def run_canary(n_cases: int = 5, eval_model: str | None = None):
 
         results = []
         for case in cases:
-            code_content = list(case["code_files_contents"].values())[0][:500]
+            code_content = list(case["code_files_contents"].values())[0]
             reasoning = f"The bug is in {case['failure_mode'].lower().replace('_', ' ')}"
 
             result = llm_classify(

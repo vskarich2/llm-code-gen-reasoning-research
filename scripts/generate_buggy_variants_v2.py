@@ -14,7 +14,6 @@ Usage:
 """
 
 import argparse
-import ast
 import json
 import sys
 from pathlib import Path
@@ -23,9 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = Path(__file__).resolve().parents[1]
 
-from scripts.mutation_engine import generate_variant, generate_all_variants, MutationResult
+from scripts.mutation_engine import generate_all_variants, MutationResult
 from scripts.ast_mutator import get_operators_for_family, get_all_operators
-from validate_cases_v2 import load_reference_code
 
 
 def _load_all_cases():
@@ -43,7 +41,7 @@ def _get_source_variants(case: dict) -> list[str]:
     Returns: [merged_reference_fix, per-file fixes merged with other originals]
     This handles cases where the reference fix file is different from what metadata says.
     """
-    from validate_cases_v2 import load_reference_code as _load_ref
+    from core.pipeline.orchestration import load_reference_code as _load_ref
     sources = []
 
     # Strategy 1: standard merged reference fix
@@ -168,7 +166,7 @@ def main():
                     "variant_id": r.variant_id,
                     "quality": r.quality,
                     "oracle_error": r.oracle_error,
-                    "diff_summary": r.diff_summary[:200] if r.diff_summary else None,
+                    "diff_summary": r.diff_summary if r.diff_summary else None,
                     "code": r.code,
                 }
                 for r in accepted
@@ -184,7 +182,7 @@ def main():
     print(f"Cases with variants: {len(cases) - len(cases_with_zero)}/{len(cases)}")
     if cases_with_zero:
         print(f"Cases with ZERO variants ({len(cases_with_zero)}):")
-        for cid in cases_with_zero[:15]:
+        for cid in cases_with_zero:
             print(f"  {cid}")
         if len(cases_with_zero) > 15:
             print(f"  ... and {len(cases_with_zero) - 15} more")

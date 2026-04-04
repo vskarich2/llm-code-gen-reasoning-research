@@ -123,7 +123,7 @@ def analyze(log_path):
     if all_types:
         print(f"\n{'Failure Type':<25}", end="")
         for cond in conditions:
-            label = cond.replace("retry_", "")[:10]
+            label = cond.replace("retry_", "")
             print(f"{label:>12}", end="")
         print()
         print("-" * (25 + 12 * len(conditions)))

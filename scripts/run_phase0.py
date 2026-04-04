@@ -6,29 +6,27 @@ Each experiment calls the reasoning classifier with controlled inputs
 and records full 21-field reasoning_evaluator_audit logs.
 
 Usage:
-    .venv/bin/python scripts/run_phase0.py --config configs/default.yaml
-    .venv/bin/python scripts/run_phase0.py --config configs/default.yaml --experiment P0-1
-    .venv/bin/python scripts/run_phase0.py --config configs/default.yaml --dry-run
+    .venv/bin/python scripts/run_phase0.py --config config_storage/default.yaml
+    .venv/bin/python scripts/run_phase0.py --config config_storage/default.yaml --experiment P0-1
+    .venv/bin/python scripts/run_phase0.py --config config_storage/default.yaml --dry-run
 
 Requires: Go/No-Go checklist fully satisfied.
 """
 
 import argparse
 import json
-import os
 import sys
-import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from experiment_config import load_config, get_config
-from evaluator import llm_classify, parse_classify_output
-from failure_classifier import FAILURE_TYPE_SET
-from runner import load_cases
-from validate_cases_v2 import load_reference_code, load_case_code
+from core.config.experiment_config import load_config
+from core.pipeline.orchestration import llm_classify, parse_classify_output
+from core.evaluation import FAILURE_TYPE_SET
+from core.pipeline.orchestration.runner import load_cases
+from core.pipeline.orchestration import load_reference_code
 
 BASE = Path(__file__).resolve().parents[1]
 AUDIT_DIR = BASE / "reasoning_evaluator_audit"
@@ -121,7 +119,7 @@ def _save_results(experiment_id, results):
 def run_p0_1(cases_subset=None, dry_run=False):
     """H1: Does compressing reasoning (same E1-E3) flip YES->NO?"""
     locked = _load_locked_set()
-    case_ids = [c["case_id"] for c in locked][:15]
+    case_ids = [c["case_id"] for c in locked]
     if cases_subset:
         case_ids = cases_subset
 
@@ -149,7 +147,7 @@ def run_p0_1(cases_subset=None, dry_run=False):
 
         # Version 2: First sentence only
         first_sentence = (
-            bl_reasoning.split(".")[0] + "." if "." in bl_reasoning else bl_reasoning[:100]
+            bl_reasoning.split(".")[0] + "." if "." in bl_reasoning else bl_reasoning
         )
 
         if not dry_run:
@@ -159,7 +157,7 @@ def run_p0_1(cases_subset=None, dry_run=False):
             r_short = {"reasoning_correct": None, "experiment_id": "P0-1-dry"}
 
         # Version 3: Just the root cause name
-        terse = first_sentence[:80]
+        terse = first_sentence
         if not dry_run:
             r_terse = _classify(case, ref_code, terse, "P0-1")
             api_calls += 1
@@ -176,11 +174,11 @@ def run_p0_1(cases_subset=None, dry_run=False):
 
         entry = {
             "case_id": cid,
-            "full_reasoning": bl_reasoning[:200],
+            "full_reasoning": bl_reasoning,
             "full_length": len(bl_reasoning),
-            "short_reasoning": first_sentence[:100],
+            "short_reasoning": first_sentence,
             "short_length": len(first_sentence),
-            "terse_reasoning": terse[:80],
+            "terse_reasoning": terse,
             "full_verdict": r_full.get("reasoning_correct"),
             "short_verdict": r_short.get("reasoning_correct"),
             "terse_verdict": r_terse.get("reasoning_correct"),
@@ -222,7 +220,7 @@ def run_p0_2(dry_run=False):
         ),
         (
             "stale_cache_a",
-            "update_product modifies the DB but does not invalidate the cache entry, so get_product returns stale data.",
+            "update_product modifies the DB but does not invalidate the cache entry, so get_product returns stale case_data.",
         ),
         (
             "partial_update_a",
@@ -325,7 +323,7 @@ def run_p0_3(dry_run=False):
         results.append(
             {
                 "case_id": cid,
-                "reasoning": wrong_reasoning[:100],
+                "reasoning": wrong_reasoning,
                 "verdict": verdict,
                 "expected": False,
                 "pass": verdict is False,
@@ -350,7 +348,7 @@ def run_p0_3(dry_run=False):
 
 
 def run_p0_6(dry_run=False):
-    """H3: Count parse failures across conditions in existing run data."""
+    """H3: Count parse failures across conditions in existing run case_data."""
     print(f"\n=== P0-6: Parse Failure Census ===")
 
     run_dir = BASE / "logs" / "ablation_runs" / "run_gpt-5.4-mini_t1_169e3bcd"
@@ -472,7 +470,7 @@ ALL_EXPERIMENTS = {
 
 def main():
     parser = argparse.ArgumentParser(description="Phase 0 Measurement Audit")
-    parser.add_argument("--config", default="configs/default.yaml", help="Config file")
+    parser.add_argument("--config", default="config_storage/default.yaml", help="Config file")
     parser.add_argument(
         "--experiment", default=None, help="Run specific experiment (e.g., P0-1). Default: all."
     )

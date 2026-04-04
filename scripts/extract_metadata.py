@@ -51,7 +51,7 @@ def main():
             if not passed:
                 err = ex.get("error_message") or ex.get("syntax_error")
                 if err:
-                    print(f"     error: {str(err)[:120]}")
+                    print(f"     error: {str(err)}")
 
 
 if __name__ == "__main__":

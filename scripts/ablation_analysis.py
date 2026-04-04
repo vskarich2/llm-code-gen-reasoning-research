@@ -26,7 +26,7 @@ def load_runs(run_dirs: list[Path]) -> list[dict]:
     """Load all events from one or more ablation run directories.
 
     Scans recursively for events.jsonl files. Skips corrupt lines.
-    Never silently drops data — logs every skip.
+    Never silently drops case_data — logs every skip.
     """
     events = []
     skipped = 0
@@ -512,7 +512,7 @@ def compute_trial_variance(events: list[dict]) -> dict:
 
 
 def compute_parse_audit(events: list[dict]) -> dict:
-    """Audit parse quality and data completeness."""
+    """Audit parse quality and case_data completeness."""
     models = sorted(set(e["model"] for e in events if e["model"]))
     conditions = sorted(set(e["condition"] for e in events if e["condition"]))
     n = len(events)
@@ -746,7 +746,7 @@ def _print_console_summary(events, global_m, case_m, family_m, deltas, trial_v, 
     sorted_by_pass = sorted(case_m.items(), key=lambda x: x[1]["pass_rate"]["rate"] or 1)
     print(f"\n  Top 10 HARDEST cases:")
     print(f"  {'Case':<30} {'Pass%':>7} {'LEG%':>7} {'Lucky%':>7} {'Split':>7}")
-    for cid, cm in sorted_by_pass[:10]:
+    for cid, cm in sorted_by_pass:
         print(f"  {cid:<30} {_fmt_rate(cm['pass_rate']['rate']):>7} "
               f"{_fmt_rate(cm['leg_true_rate']['rate']):>7} "
               f"{_fmt_rate(cm['lucky_fix_rate']['rate']):>7} "
@@ -757,7 +757,7 @@ def _print_console_summary(events, global_m, case_m, family_m, deltas, trial_v, 
                            key=lambda x: x[1]["leg_true_rate"]["rate"] or 0, reverse=True)
     print(f"\n  Top 10 HIGHEST LEG cases:")
     print(f"  {'Case':<30} {'LEG%':>7} {'Pass%':>7} {'Family':<20}")
-    for cid, cm in sorted_by_leg[:10]:
+    for cid, cm in sorted_by_leg:
         print(f"  {cid:<30} {_fmt_rate(cm['leg_true_rate']['rate']):>7} "
               f"{_fmt_rate(cm['pass_rate']['rate']):>7} {cm['family']:<20}")
 
@@ -766,7 +766,7 @@ def _print_console_summary(events, global_m, case_m, family_m, deltas, trial_v, 
                              key=lambda x: x[1]["lucky_fix_rate"]["rate"] or 0, reverse=True)
     print(f"\n  Top 10 HIGHEST LUCKY FIX cases:")
     print(f"  {'Case':<30} {'Lucky%':>7} {'Pass%':>7} {'Family':<20}")
-    for cid, cm in sorted_by_lucky[:10]:
+    for cid, cm in sorted_by_lucky:
         lr = cm["lucky_fix_rate"]["rate"]
         if lr and lr > 0:
             print(f"  {cid:<30} {_fmt_rate(lr):>7} "
@@ -777,9 +777,9 @@ def _print_console_summary(events, global_m, case_m, family_m, deltas, trial_v, 
     print(f"\n  Top 10 MODEL-SPLIT cases:")
     print(f"  {'Case':<30} {'Split':>7}", end="")
     for model in models:
-        print(f" {model[:12]:>12}", end="")
+        print(f" {model:>12}", end="")
     print()
-    for cid, cm in sorted_by_split[:10]:
+    for cid, cm in sorted_by_split:
         print(f"  {cid:<30} {cm['model_split']:>6.1%}", end="")
         for model in models:
             r = cm["per_model_pass_rate"].get(model)
@@ -930,7 +930,7 @@ def _print_diagnostic(events, global_m, case_m, deltas, trial_v, parse_a):
         print("  Reasoning metrics should be interpreted with caution due to classifier limitations.")
     elif issues == 1:
         print("  ASSESSMENT: Results are MOSTLY TRUSTWORTHY.")
-        print("  Execution metrics are reliable. One data quality concern flagged above.")
+        print("  Execution metrics are reliable. One case_data quality concern flagged above.")
     else:
         print("  ASSESSMENT: Results have SIGNIFICANT DATA QUALITY ISSUES.")
         print("  Execution metrics may be reliable but reasoning metrics are questionable.")

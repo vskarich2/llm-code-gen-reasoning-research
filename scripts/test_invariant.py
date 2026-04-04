@@ -12,13 +12,12 @@ Examples:
 
 import argparse
 import sys
-import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from exec_eval import _CASE_TESTS, load_module_from_code
-from code_assembly import assemble_code
+from core.pipeline import _CASE_TESTS, load_module_from_code
+from core.pipeline import assemble_code
 
 
 def main():

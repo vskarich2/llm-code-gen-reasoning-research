@@ -16,7 +16,7 @@ CONFIGS_DIR="configs/ablation_full"
 
 mkdir -p "$LOG_DIR"
 
-# Collect all 15 configs
+# Collect all 15 config_storage
 CONFIGS=($(ls "$CONFIGS_DIR"/*.yaml | sort))
 echo "=== FULL ABLATION ==="
 echo "  Configs: ${#CONFIGS[@]}"

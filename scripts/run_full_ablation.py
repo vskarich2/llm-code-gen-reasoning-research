@@ -1,13 +1,14 @@
 #!/usr/bin/env python
-"""Full ablation launcher: 3 models x 5 trials x 58 cases x 2 conditions.
+"""Ablation launcher: runs all config_storage in a directory with process parallelism.
 
-Runs up to 6 concurrent runner.py processes.
 Resume-safe: re-run to pick up where it left off.
 
 Usage:
     .venv/bin/python scripts/run_full_ablation.py
+    .venv/bin/python scripts/run_full_ablation.py --config_storage-dir config_storage/focused_50t --log-dir logs/focused_50t --max-parallel 25 --expected-evals 6
 """
 
+import argparse
 import json
 import os
 import signal
@@ -19,10 +20,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 PYTHON = str(Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python")
-MAX_PARALLEL = 15  # 5 trials x 3 models — all run simultaneously
-CONFIGS_DIR = Path("configs/ablation_full")
-LOG_DIR = Path("logs/ablation_full")
-EXPECTED_EVENTS_PER_TRIAL = 58 * 2  # 58 cases x 2 conditions = 116
 
 _stop = False
 
@@ -60,12 +57,25 @@ def find_resume_dir(cfg_path):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Ablation launcher")
+    parser.add_argument("--config_storage-dir", default="config_storage/ablation_full")
+    parser.add_argument("--log-dir", default="logs/ablation_full")
+    parser.add_argument("--max-parallel", type=int, default=15)
+    parser.add_argument("--expected-evals", type=int, default=116,
+                        help="Expected evals per trial (cases × conditions)")
+    cli = parser.parse_args()
+
+    CONFIGS_DIR = Path(cli.configs_dir)
+    LOG_DIR = Path(cli.log_dir)
+    MAX_PARALLEL = cli.max_parallel
+    EXPECTED_EVENTS_PER_TRIAL = cli.expected_evals
+
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    configs = sorted(CONFIGS_DIR.glob("*.yaml"))
+    configs = sorted(p for p in CONFIGS_DIR.glob("*.yaml") if p.stem != "cases_focused")
     print(f"=== FULL ABLATION ===")
     print(f"  Configs: {len(configs)}")
     print(f"  Parallelism: {MAX_PARALLEL}")

@@ -13,20 +13,19 @@ Usage:
 """
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from live_metrics import read_events_safe
+from core.logging_.live_metrics import read_events_safe
 
 
 def validate_evaluator_sanity(canary_id: str, cases_file: str) -> bool:
     """Run reference fix for canary through exec_evaluate. $0 cost."""
-    from runner import load_cases
-    from exec_eval import exec_evaluate
-    from validate_cases_v2 import load_reference_code
+    from core.pipeline.orchestration.runner import load_cases
+    from core.pipeline import exec_evaluate
+    from core.pipeline.orchestration import load_reference_code
 
     cases = load_cases(cases_file=cases_file)
     canary = next((c for c in cases if c["id"] == canary_id), None)
@@ -73,7 +72,7 @@ def validate_events(run_dir: Path, canary_id: str, verbose: bool) -> bool:
 
     if verbose:
         print("  Per-event breakdown:")
-        for e in events[:10]:
+        for e in events:
             print(
                 f"    {e.get('case_id', '?')}/{e.get('condition', '?')}: "
                 f"pass={e.get('pass')}, score={e.get('score', 0)}"

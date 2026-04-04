@@ -602,7 +602,7 @@ class RemoveAssignmentOperator(SemanticOperator):
 class _SwapCallArgument(ast.NodeTransformer):
     """Swap a function call's argument from one name to another.
 
-    e.g., compute_raw_stats(data) → compute_raw_stats(cleaned)
+    e.g., compute_raw_stats(case_data) → compute_raw_stats(cleaned)
     """
     def __init__(self, target_node, old_name: str, new_name: str):
         self.target_node = target_node
@@ -1385,7 +1385,7 @@ SEMANTIC_OPERATORS: list[SemanticOperator] = [
         "remove_cache_invalidation",
         "Remove cache .pop()/.clear()/invalidate() calls",
         ["stale_cache", "cache_invalidation_order"],
-        "consistency: reads return stale data after write",
+        "consistency: reads return stale case_data after write",
         ["pop", "clear", "invalidate"],
     ),
 
@@ -1512,7 +1512,7 @@ SEMANTIC_OPERATORS: list[SemanticOperator] = [
         "remove_pre_transform_stats",
         "Remove pre-transform statistics computation",
         ["temporal_drift"],
-        "consistency: stats computed on wrong data",
+        "consistency: stats computed on wrong case_data",
         ["compute_raw_stats"],
     ),
 
@@ -1537,14 +1537,14 @@ SEMANTIC_OPERATORS: list[SemanticOperator] = [
 
     # Temporal drift: swap argument to use wrong variable
     SwapArgumentOperator(
-        "swap_stats_arg", "Swap compute_raw_stats argument to use transformed data",
-        ["temporal_drift"], "consistency: stats computed on wrong data",
-        "compute_raw_stats", "data", "cleaned",
+        "swap_stats_arg", "Swap compute_raw_stats argument to use transformed case_data",
+        ["temporal_drift"], "consistency: stats computed on wrong case_data",
+        "compute_raw_stats", "case_data", "cleaned",
     ),
     SwapArgumentOperator(
         "swap_stats_arg_norm", "Swap compute_raw_stats argument (normalized variant)",
-        ["temporal_drift"], "consistency: stats computed on wrong data",
-        "compute_raw_stats", "data", "normalized",
+        ["temporal_drift"], "consistency: stats computed on wrong case_data",
+        "compute_raw_stats", "case_data", "normalized",
     ),
 
     # Missing branch: remove dict entry (comprehensive key list)

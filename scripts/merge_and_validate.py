@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from live_metrics import read_events_safe
+from core.logging_.live_metrics import read_events_safe
 
 
 def main():
@@ -82,7 +82,7 @@ def main():
 
     if errors:
         print(f"\nVALIDATION FAILED: {len(errors)} events with missing fields")
-        for err in errors[:20]:
+        for err in errors:
             print(f"  {err}")
         sys.exit(1)
 
@@ -103,7 +103,7 @@ def main():
     duplicates = {t: c for t, c in tuple_counts.items() if c > 1}
     if duplicates:
         print(f"\nVALIDATION FAILED: {len(duplicates)} duplicate tuples")
-        for t, c in sorted(duplicates.items())[:20]:
+        for t, c in sorted(duplicates.items()):
             print(f"  {t}: {c} occurrences")
         errors.append("Duplicate tuples found")
 
@@ -151,7 +151,7 @@ def main():
             f"\nVALIDATION FAILED: {len(trial_violations)} (model, case, condition) groups "
             f"with wrong trial count"
         )
-        for v in trial_violations[:20]:
+        for v in trial_violations:
             print(f"  {v}: {sorted(mcc_trials[v])}")
 
     # Check for missing tuples
@@ -167,7 +167,7 @@ def main():
     missing = expected_tuples - unique_tuples
     if missing:
         print(f"\nVALIDATION FAILED: {len(missing)} missing tuples")
-        for m in sorted(missing)[:20]:
+        for m in sorted(missing):
             print(f"  {m}")
         errors.append(f"{len(missing)} missing tuples")
 

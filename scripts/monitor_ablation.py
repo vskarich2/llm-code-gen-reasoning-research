@@ -9,18 +9,16 @@ computes per-model dashboards, writes them to logs/dashboard_*.txt,
 and prints a live summary with anomaly detection.
 """
 
-import json
 import os
 import sys
 import time
 import signal
-from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from live_metrics import read_events_safe, compute_metrics, write_dashboard
+from core.logging_.live_metrics import read_events_safe, compute_metrics, write_dashboard
 
 ABLATION_DIR = Path("logs/ablation_full")
 MODELS = ["gpt-5-mini", "gpt-4o-mini", "gpt-4.1-nano"]

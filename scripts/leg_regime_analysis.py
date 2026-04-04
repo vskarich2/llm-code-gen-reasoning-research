@@ -23,14 +23,14 @@ import json
 import math
 import os
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 from statistics import mean, stdev
 
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
 
-from failure_classifier import FAILURE_TYPE_SET
+from core.evaluation import FAILURE_TYPE_SET
 
 # ============================================================
 # CONSTANTS

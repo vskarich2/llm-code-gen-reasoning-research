@@ -25,8 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BASE = Path(__file__).resolve().parents[1]
 
-from exec_eval import exec_evaluate
-from validate_cases_v2 import load_case_code, load_reference_code
+from core.pipeline import exec_evaluate
+from core.pipeline.orchestration import load_case_code, load_reference_code
 
 
 def _load_all_cases():
@@ -70,7 +70,7 @@ def _mutate_alias(buggy_code, ref_code, case, idx):
             "    if overrides:\n        DEFAULTS.update(overrides)\n    return DEFAULTS"
         )
     if idx == 4:
-        # V5: Return a view that shares the underlying data
+        # V5: Return a view that shares the underlying case_data
         return ref_code.replace(
             "config = DEFAULTS.copy()",
             "config = DEFAULTS  # intentional: return reference for performance"
@@ -122,7 +122,7 @@ def _mutate_stale_cache(buggy_code, ref_code, case, idx):
             "_cache.pop(product_id, None)",
             "pass  # invalidation removed"
         ) if "_cache.pop" in c else c,
-        # V4: Invalidate but then re-cache stale data
+        # V4: Invalidate but then re-cache stale case_data
         lambda c: c.replace(
             "_cache.pop(product_id, None)",
             "_cache[product_id] = dict(_db.get(product_id, {}))"  # re-caches BEFORE update
@@ -340,7 +340,7 @@ def main():
 
     if issues:
         print(f"\nISSUES ({len(issues)}):")
-        for issue in issues[:20]:
+        for issue in issues:
             print(f"  {issue}")
 
     # Write output
