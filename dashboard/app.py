@@ -49,6 +49,15 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Left-align all dataframe cells globally
+st.markdown("""
+<style>
+    .stDataFrame td, .stDataFrame th {
+        text-align: left !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 TAB_ORDER = [
     "Live Run",
     "Overview",
@@ -67,6 +76,7 @@ TAB_ORDER = [
 
 
 def render_header(df: pd.DataFrame) -> None:
+    from datetime import datetime
     parts = [
         f"**{len(df):,} attempts**",
         f"**{df['chain_id'].nunique():,} chains**" if "chain_id" in df.columns else None,
@@ -74,13 +84,18 @@ def render_header(df: pd.DataFrame) -> None:
         f"**{df['condition'].nunique():,} conditions**" if "condition" in df.columns else None,
         f"**{df['case_id'].nunique():,} cases**" if "case_id" in df.columns else None,
     ]
-    if "oracle_verdict" in df.columns:
-        labeled = df["oracle_verdict"].notna().sum()
-        parts.append(f"**{labeled:,} oracle labels**")
     if "outcome_class" in df.columns:
         leg_count = (df["outcome_class"] == "LEG").sum()
-        parts.append(f"**{leg_count:,} LEG events**")
+        parts.append(f"**{leg_count:,} LEG**")
+    parts.append(f"*{datetime.now().strftime('%H:%M:%S')}*")
     st.markdown(" | ".join([p for p in parts if p]))
+
+    # Per-experiment breakdown when multiple loaded
+    if "_experiment" in df.columns and df["_experiment"].nunique() > 1:
+        for exp_name, grp in df.groupby("_experiment"):
+            n = len(grp)
+            p = grp["exec_pass"].mean() if "exec_pass" in grp.columns else 0
+            st.caption(f"{exp_name}: {n:,} attempts, {p:.1%} pass")
 
 
 def main() -> None:
@@ -89,6 +104,10 @@ def main() -> None:
     if not selected_experiments and not selected_oracle:
         st.info("Select experiments or oracle labels from the sidebar.")
         return
+
+    # Live mode: force fresh data on every rerun
+    if live_mode:
+        st.cache_data.clear()
 
     dfs: list[pd.DataFrame] = []
     for exp in selected_experiments:
@@ -106,6 +125,13 @@ def main() -> None:
     if not dfs:
         st.warning("No experiment data loaded.")
         return
+
+    if len(dfs) > 1:
+        st.warning(
+            f"⚠️ {len(dfs)} experiments selected — data is combined. "
+            f"Metrics reflect ALL selected runs. Deselect experiments "
+            f"in the sidebar for single-run analysis."
+        )
 
     df = pd.concat(dfs, ignore_index=True)
     df = merge_oracle(df, oracle_df)

@@ -2,7 +2,6 @@
 
 _settings = {"host": "localhost", "port": 8080, "debug": False}
 
-# BUG: _default_host captured eagerly from _settings at import time
 _default_host = _settings["host"]
 
 
@@ -17,7 +16,7 @@ def get_settings():
 
 
 def reset_settings():
-    """Reset settings to new values (e.g., for testing)."""
+    """Reset settings to new values."""
     global _settings
     _settings = {"host": "localhost", "port": 8080, "debug": False}
 

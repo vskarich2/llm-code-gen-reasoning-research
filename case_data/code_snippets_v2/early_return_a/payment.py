@@ -10,7 +10,6 @@ def process_payment(amount, description="payment"):
     ledger for reasoning_evaluator_audit compliance. Zero-amount payments are recorded
     with status 'skipped' but still appear in the ledger.
     """
-    # BUG: early return skips ledger entry for zero-amount payments
     if amount == 0:
         return {"status": "skipped", "amount": 0}
 

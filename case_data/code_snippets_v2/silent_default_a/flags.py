@@ -1,4 +1,4 @@
-"""Feature flag system with snake_case keys."""
+
 
 FLAGS = {
     "dark_mode": True,
@@ -17,8 +17,6 @@ def is_enabled(flag_name):
     Returns:
         True if the flag is enabled, False otherwise.
     """
-    # BUG: callers pass camelCase ("darkMode") but dict uses snake_case
-    # ("dark_mode"). .get() silently returns False for missing keys.
     return FLAGS.get(flag_name, False)
 
 

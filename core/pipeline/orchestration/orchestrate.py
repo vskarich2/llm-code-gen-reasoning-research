@@ -1040,7 +1040,17 @@ def _print_manifest_summary(manifest: Manifest) -> None:
 # SMOKE GATE — mandatory pre-launch validation
 # ============================================================
 
-_SMOKE_ACCEPTABLE = {"EXECUTION_SUCCESS", "INVARIANT_FAILURE", "INVARIANT_CRASH"}
+# Smoke gate accepts any outcome that indicates the pipeline ran end-to-end.
+# Model-quality failures (syntax, name errors) are acceptable — only pipeline
+# infrastructure failures (missing files, config errors) should block.
+# Smoke gate accepts any outcome that indicates the pipeline ran end-to-end.
+# Only true infrastructure failures (missing harness, config crash) should block.
+_SMOKE_ACCEPTABLE = {
+    "EXECUTION_SUCCESS", "INVARIANT_FAILURE", "INVARIANT_CRASH",
+    "SYNTAX_FAILURE", "NAME_ERROR", "IMPORT_FAILURE",
+    "RECONSTRUCTION_FAILURE", "TIMEOUT",
+    "STRUCTURAL_FAILURE", "BUILD_FAILURE",
+}
 
 
 def _select_smoke_cases(cases, config):
@@ -1095,49 +1105,83 @@ def _smoke_execute_case(config, case, condition, run_dir, label,
             f"SMOKE GATE FAILED ({label}): execution_category={cat}, "
             f"reasons={ev.get('reasons', [])!r}"
         )
+    from core.pipeline.checks import check_smoke_classifier_visibility
+    check_smoke_classifier_visibility(ev, label)
 
 
 def _smoke_gate(config, cases, run_dir):
-    """Mandatory pre-launch validation. Aborts on any failure."""
+    """Mandatory pre-launch validation. Runs smoke checks in parallel via subprocesses."""
+    import multiprocessing as mp
+
     print("SMOKE GATE: starting...", flush=True)
     smoke_cases = _select_smoke_cases(cases, config)
     smoke_models = _select_smoke_models(config)
     conditions = list(config.conditions.keys())
     baseline_cond = conditions[0]
 
-    # Gate 5: Per-model E2E
+    # Build all smoke jobs — pass config path, not config object
+    config_path = config._config_path
+    jobs = []
     for model_name in smoke_models:
-        _smoke_execute_case(config, smoke_cases["baseline_single_file"],
-                            baseline_cond, run_dir,
-                            f"baseline_{model_name}", model_name)
-        print(f"  GATE 5: baseline_{model_name} OK", flush=True)
-        if model_name == smoke_models[0]:
-            _smoke_execute_case(config, smoke_cases["multi_file"],
-                                baseline_cond, run_dir,
-                                "multi_file", model_name)
-            print("  GATE 5: multi_file OK", flush=True)
-
-    # Gate 5c: Retry (conditional)
-    retry_conds = [c for c, cfg in config.conditions.items()
-                   if cfg.retry.enabled]
+        jobs.append((f"baseline_{model_name}", smoke_cases["baseline_single_file"],
+                     baseline_cond, run_dir, f"baseline_{model_name}", model_name, False))
+    jobs.append(("multi_file", smoke_cases["multi_file"],
+                 baseline_cond, run_dir, "multi_file", smoke_models[0], False))
+    retry_conds = [c for c, cfg in config.conditions.items() if cfg.retry.enabled]
     if "retry" in smoke_cases and retry_conds:
-        from core.pipeline.orchestration.retry_v2 import run_retry_v2
-        from core.logging_.logging_core import RunLogger
-        smoke_dir = run_dir / "_smoke"
-        logger = RunLogger(
-            smoke_dir, run_id="smoke_retry",
-            model=smoke_models[0], condition=retry_conds[0], trial=0)
-        logger.start_run(model=smoke_models[0], condition=retry_conds[0])
-        try:
-            run_retry_v2(smoke_cases["retry"], smoke_models[0],
-                         retry_conds[0], logger)
-        except Exception as e:
-            raise RuntimeError(
-                f"SMOKE GATE FAILED (retry): {type(e).__name__}: {e}"
-            ) from e
-        print("  GATE 5c: retry OK", flush=True)
+        jobs.append(("retry", smoke_cases["retry"],
+                     retry_conds[0], run_dir, "retry", smoke_models[0], True))
 
+    # Launch all as separate processes
+    procs = []
+    for label, case, cond, rd, lbl, mdl, is_retry in jobs:
+        p = mp.Process(target=_smoke_worker,
+                       args=(config_path, case, cond, rd, lbl, mdl, is_retry))
+        p.start()
+        procs.append((label, p))
+
+    # Collect results — fail fast on any error
+    errors = []
+    for label, p in procs:
+        p.join(timeout=120)
+        if p.exitcode != 0:
+            errors.append(f"{label} (exit={p.exitcode})")
+        else:
+            print(f"  GATE 5: {label} OK", flush=True)
+
+    if errors:
+        raise RuntimeError(f"SMOKE GATE FAILED: {', '.join(errors)}")
     print("SMOKE GATE: all checks passed", flush=True)
+
+
+def _smoke_worker(config_path, case, condition, run_dir, label, model_name, is_retry):
+    """Run one smoke check in a subprocess. Exits non-zero on failure."""
+    import sys
+    from core.config.experiment_config import load_config
+    try:
+        config = load_config(str(config_path))
+        if is_retry:
+            _smoke_execute_retry(config, case, condition, run_dir, model_name)
+        else:
+            _smoke_execute_case(config, case, condition, run_dir, label, model_name)
+    except Exception as e:
+        print(f"SMOKE WORKER FAILED ({label}): {e}", flush=True)
+        sys.exit(1)
+
+
+def _smoke_execute_retry(config, case, condition, run_dir, model_name):
+    """Run retry smoke check."""
+    from core.pipeline.orchestration.retry_v2 import run_retry_v2
+    from core.logging_.logging_core import RunLogger
+
+    smoke_dir = run_dir / "_smoke"
+    smoke_dir.mkdir(parents=True, exist_ok=True)
+    logger = RunLogger(
+        smoke_dir, run_id="smoke_retry",
+        model=model_name, condition=condition, trial=0)
+    case_handle = logger.start_case(case["id"])
+    run_retry_v2(case, model_name, condition, logger,
+                 case_start_eid=case_handle[1])
 
 
 # ============================================================

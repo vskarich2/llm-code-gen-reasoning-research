@@ -34,5 +34,5 @@ def place_order(inventory, wallet, qty, price):
     try:
         wallet.charge(qty * price)
     except ValueError:
-        raise  # BUG: re-raises without releasing inventory reservation
+        raise
     return {"status": "confirmed", "qty": qty, "total": qty * price}

@@ -4,7 +4,6 @@ Invariant: create_config() must return a FRESH dict every call.
            Mutating one config must NOT affect future calls or DEFAULTS.
 """
 
-
 def test_a(mod):
     """Level A: direct aliasing in single file."""
     # Reset module state

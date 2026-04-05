@@ -7,7 +7,6 @@ def process_batch(tasks, seen=set()):
     Invariant: each call to process_batch with a fresh batch must
     process ALL tasks in that batch, regardless of prior calls.
     """
-    # BUG: seen set persists across calls — valid tasks skipped as duplicates
     results = []
     for task in tasks:
         task_id = task["name"]

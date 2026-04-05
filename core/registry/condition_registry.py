@@ -115,6 +115,16 @@ CONDITION_SPECS: dict[str, ConditionSpec] = {
         universal=True,
         description="V3 LEG lean: minimal scaffold, no risk_check",
     ),
+    "critique_reasoning_only_v3": ConditionSpec(
+        name="critique_reasoning_only_v3",
+        universal=True,
+        description="V3 retry with reasoning-only critique (no code access) + code commitments",
+    ),
+    "critique_strict_v3": ConditionSpec(
+        name="critique_strict_v3",
+        universal=True,
+        description="V3 retry with strict reasoning-code mismatch critique + code commitments",
+    ),
     "retry_no_contract_v2": ConditionSpec(
         name="retry_no_contract_v2",
         universal=True,

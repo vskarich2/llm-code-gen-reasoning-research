@@ -1,0 +1,342 @@
+[
+  {
+    "id": "invariant_partial_fail",
+    "family": "invariant_partial_fail",
+    "template": "invariant_violation",
+    "difficulty": "C",
+    "failure_mode": "INVARIANT_VIOLATION",
+    "bug_pattern_class": "partial_state_update",
+    "bug_pattern_secondary": "hidden_dependency",
+    "boundary_type": "cross_boundary",
+    "boundary_group": "cross_boundary",
+    "temporal_depth": "multi_step",
+    "statefulness": "stateful",
+    "causal_depth": "L2",
+    "description": "execute_transfer debits sender then may fail before crediting receiver. No rollback on failure — money is lost.",
+    "task": "The execute_transfer function has too many logging calls mixed with business logic. Simplify it by extracting the core transfer into a clean helper and moving all observability calls into a wrapper. Return the updated code.",
+    "trap": "Extract clean helper and move logging to wrapper without adding rollback — observability is not correctness",
+    "code_files": [
+      "code_snippets_v2/invariant_partial_fail/models.py",
+      "code_snippets_v2/invariant_partial_fail/ledger.py",
+      "code_snippets_v2/invariant_partial_fail/transfer_service.py",
+      "code_snippets_v2/invariant_partial_fail/audit.py"
+    ],
+    "hard_constraints": [
+      "If sender.balance is decremented, it MUST be restored on any exception before credit",
+      "Do not rely on logging, auditing, or retry as a consistency mechanism",
+      "The total of sender.balance + receiver.balance must be conserved at all times"
+    ],
+    "positive_signals": [
+      "rollback",
+      "restore",
+      "sender.balance +=",
+      "atomic",
+      "revert",
+      "compensat",
+      "try.*except"
+    ],
+    "negative_signals": [
+      "only.*log",
+      "only.*audit",
+      "only.*retry",
+      "only.*emit"
+    ],
+    "ground_truth_bug": {
+      "type": "missing_rollback_on_failure",
+      "location": "transfer_service.py::execute_transfer",
+      "invariant": "sender.balance + receiver.balance must be conserved at all times",
+      "fix_pattern": "try/except around credit with sender.balance += amount in except block"
+    },
+    "reference_fix": {
+      "file": "code_snippets_v2/invariant_partial_fail/transfer_service.py",
+      "function": "execute_transfer",
+      "diff_summary": "Add try/except around credit phase with rollback of sender.balance on failure",
+      "lines_changed": 4
+    },
+    "test_contract": {
+      "setup": "Create Account objects",
+      "execution": "execute_transfer with forced failure",
+      "assertions": [
+        "sender.balance + receiver.balance == 100 after failure"
+      ],
+      "state_reset": [],
+      "retry_notes": "Safe — creates fresh Account objects each run",
+      "failure_surface": "cross_boundary",
+      "retry_failure_modes": []
+    },
+    "expected_regime_hypothesis": {
+      "_note": "HYPOTHESIS",
+      "nano": "CSF",
+      "4o-mini": "CSF",
+      "5-mini": "CSF"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "missing_rollback_on_failure",
+      "bug_location": "transfer_service.py::execute_transfer",
+      "mechanism_source": "execute_transfer debits sender before attempting credit and does not restore state if credit fails",
+      "mechanism_property": "multi-step state transitions must preserve invariants across failure paths",
+      "mechanism_steps": [
+        "execute_transfer debits sender.balance",
+        "credit to receiver raises an exception",
+        "no handler restores sender.balance after failure",
+        "system transitions to a partially applied state"
+      ],
+      "mechanism_outcome": "total balance decreases because debit occurs without corresponding credit",
+      "trap_description": "refactoring logging or extracting helpers improves structure but does not address the missing rollback on failure"
+    },
+    "symptom": "failure path: total=50, expected=100 (sender=50, receiver=0)",
+    "buggy_file": "import random\nfrom models import Account\nfrom ledger import record_debit, record_credit, record_transfer_attempt\nfrom audit import emit_transfer_event, emit_failure_alert\n\n\ndef validate_transfer(sender, amount):\n    if amount <= 0:\n        raise ValueError(\"amount must be positive\")\n    if sender.balance < amount:\n        raise ValueError(\"insufficient funds\")\n\n\ndef execute_transfer(sender, receiver, amount):\n    validate_transfer(sender, amount)\n\n    record_transfer_attempt(sender.account_id, receiver.account_id, amount)\n\n    sender.balance -= amount\n    record_debit(sender.account_id, amount)\n\n    if random.random() < 0.3:\n        emit_failure_alert(\n            sender.account_id, receiver.account_id, amount,\n            \"connection reset during credit phase\",\n        )\n        raise RuntimeError(\"transient failure during credit\")\n\n    receiver.balance += amount\n    record_credit(receiver.account_id, amount)\n\n    emit_transfer_event(sender.account_id, receiver.account_id, amount)\n",
+    "fixed_file": "import random\nfrom models import Account\nfrom ledger import record_debit, record_credit, record_transfer_attempt\nfrom audit import emit_transfer_event, emit_failure_alert\n\n\ndef validate_transfer(sender, amount):\n    if amount <= 0:\n        raise ValueError(\"amount must be positive\")\n    if sender.balance < amount:\n        raise ValueError(\"insufficient funds\")\n\n\ndef execute_transfer(sender, receiver, amount):\n    validate_transfer(sender, amount)\n\n    record_transfer_attempt(sender.account_id, receiver.account_id, amount)\n\n    sender.balance -= amount\n    record_debit(sender.account_id, amount)\n\n    try:\n        if random.random() < 0.3:\n            emit_failure_alert(\n                sender.account_id,\n                receiver.account_id,\n                amount,\n                \"connection reset during credit phase\",\n            )\n            raise RuntimeError(\"transient failure during credit\")\n\n        receiver.balance += amount\n        record_credit(receiver.account_id, amount)\n    except Exception:\n        sender.balance += amount\n        raise\n\n    emit_transfer_event(sender.account_id, receiver.account_id, amount)\n",
+    "enriched_task_prompt": "After a failed transfer, money is lost — the sender's balance decreases but the receiver's balance does not increase. The total across both accounts should always be conserved. The system involves transfer_service.py, models.py, ledger.py, and audit.py. Fix the implementation so that balance is always conserved.",
+    "enriched_task_prompt_justification": "OLD TASK: told model to extract logging into wrapper — adversarial misdirection. SYMPTOM: 'failure path: total=50, expected=100 (sender=50, receiver=0)'. INCLUDED: the invariant violation (money lost) and four files. WITHHELD: the debit-before-credit ordering, the missing rollback mechanism. The trap (focus on logging) is completely removed from the new framing. DIFFICULTY: C — four files, the model must trace the failure path."
+  },
+  {
+    "id": "l3_state_pipeline",
+    "family": "l3_state_pipeline",
+    "template": "state_semantic_violation",
+    "difficulty": "C",
+    "failure_mode": "STATE_SEMANTIC_VIOLATION",
+    "bug_pattern_class": "partial_state_update",
+    "bug_pattern_secondary": "hidden_dependency",
+    "boundary_type": "cross_boundary",
+    "boundary_group": "cross_boundary",
+    "temporal_depth": "multi_step",
+    "statefulness": "stateful",
+    "causal_depth": "L3",
+    "description": "Pipeline had commit() and freeze_view() removed as redundant. Both are independently necessary: commit for frozen gate, freeze_view for view consistency.",
+    "task": "process_batch and process_incremental have redundant steps. stage() and commit() both copy data into the state, and freeze_view() rebuilds the view that stage() already built. Simplify the pipeline by removing the unnecessary steps. Return the updated code.",
+    "trap": "Remove commit() or merge stage+commit — loses frozen gate or breaks preview semantics",
+    "code_files": [
+      "code_snippets_v2/l3_state_pipeline/state.py",
+      "code_snippets_v2/l3_state_pipeline/reducers.py",
+      "code_snippets_v2/l3_state_pipeline/selectors.py",
+      "code_snippets_v2/l3_state_pipeline/pipeline.py",
+      "code_snippets_v2/l3_state_pipeline/api.py"
+    ],
+    "hard_constraints": [
+      "Do not remove commit() — it sets meta['frozen']=True which get_committed_total() requires",
+      "Do not merge stage() and commit() — preview() calls stage() without commit() intentionally",
+      "Do not remove freeze_view() — it rebuilds view from committed (stable) state"
+    ],
+    "positive_signals": [
+      "commit",
+      "frozen",
+      "stable",
+      "pending.*stable",
+      "get_committed_total",
+      "stage.*commit.*freeze",
+      "cannot remove",
+      "not redundant"
+    ],
+    "negative_signals": [
+      "remove commit",
+      "remove freeze",
+      "skip commit",
+      "stage already",
+      "unnecessary.*commit",
+      "redundant.*freeze"
+    ],
+    "ground_truth_bug": {
+      "type": "removed_causally_necessary_steps",
+      "location": "pipeline.py::process_batch",
+      "invariant": "commit sets frozen=True for get_committed_total; freeze_view rebuilds view from stable",
+      "fix_pattern": "restore commit(st) and freeze_view(st) in process_batch"
+    },
+    "reference_fix": {
+      "file": "code_snippets_v2/l3_state_pipeline/pipeline.py",
+      "function": "process_batch",
+      "diff_summary": "Restore commit(st) and freeze_view(st) calls",
+      "lines_changed": 2
+    },
+    "test_contract": {
+      "setup": "No state to reset — each call creates fresh state",
+      "execution": "process_batch with test entries",
+      "assertions": [
+        "meta.frozen==True",
+        "stable populated",
+        "total==30"
+      ],
+      "state_reset": [],
+      "retry_notes": "Safe — fresh state per call",
+      "failure_surface": "cross_boundary",
+      "retry_failure_modes": []
+    },
+    "expected_regime_hypothesis": {
+      "_note": "HYPOTHESIS",
+      "nano": "CSF",
+      "4o-mini": "CSF",
+      "5-mini": "CSF"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "removed_causally_necessary_steps",
+      "bug_location": "pipeline.py::process_batch",
+      "mechanism_source": "commit and freeze_view steps are removed from process_batch as redundant",
+      "mechanism_property": "each pipeline stage encodes a distinct state transition required for downstream correctness",
+      "mechanism_steps": [
+        "process_batch previously executed commit(st) to finalize state",
+        "commit sets frozen=True which downstream functions depend on",
+        "freeze_view rebuilds view from stable state for consistent reads",
+        "removing both steps eliminates required state transitions",
+        "downstream logic reads incomplete or inconsistent state"
+      ],
+      "mechanism_outcome": "committed totals are incorrect and views are inconsistent with stable state",
+      "trap_description": "commit and stage appear redundant because both copy data, but commit establishes a frozen state required by downstream logic"
+    },
+    "symptom": "meta.frozen is False -- commit() was removed; stable is empty -- commit() did not copy pending to stable; get_committed_total returned None -- frozen gate not set",
+    "buggy_file": "from state import make_state, copy_state\nfrom reducers import normalize, collapse, stage, commit, freeze_view, materialize, project\n\n\ndef process_batch(entries):\n    st = make_state(entries)\n    raw = st[\"raw\"]\n\n    # dedupe\n    cleaned = normalize(raw)\n\n    # merge values for same id\n    merged = collapse(cleaned)\n\n    # stage puts merged into pending + builds view from merged\n    stage(st, merged)\n\n    # commit and freeze_view removed as redundant\n\n    out = materialize(st)\n    return st, out\n\n\ndef process_incremental(prev_state, new_entries):\n    st = copy_state(prev_state)\n    combined = st[\"stable\"] + new_entries\n\n    cleaned = normalize(combined)\n    merged = collapse(cleaned)\n\n    stage(st, merged)\n\n    out = materialize(st)\n    return st, out\n\n\ndef recompute_view(st):\n    st[\"view\"] = project(st[\"pending\"])\n    return st\n",
+    "fixed_file": "from state import make_state, copy_state\nfrom reducers import normalize, collapse, stage, commit, freeze_view, materialize, project\n\n\ndef process_batch(entries):\n    st = make_state(entries)\n    raw = st[\"raw\"]\n\n    # dedupe\n    cleaned = normalize(raw)\n\n    # merge values for same id\n    merged = collapse(cleaned)\n\n    # stage puts merged into pending + builds view from merged\n    stage(st, merged)\n\n    # commit copies pending -> stable and sets frozen=True\n    commit(st)\n\n    # freeze_view rebuilds view from stable (overwriting the staged view)\n    # NOTE: after commit, stable == pending, so this is a no-op in the\n    # normal path. but commit sets frozen=True which downstream selectors\n    # check before reading stable.\n    freeze_view(st)\n\n    out = materialize(st)\n    return st, out\n\n\ndef process_incremental(prev_state, new_entries):\n    st = copy_state(prev_state)\n    combined = st[\"stable\"] + new_entries\n\n    cleaned = normalize(combined)\n    merged = collapse(cleaned)\n\n    stage(st, merged)\n    commit(st)\n    freeze_view(st)\n\n    out = materialize(st)\n    return st, out\n\n\ndef recompute_view(st):\n    st[\"view\"] = project(st[\"pending\"])\n    return st\n",
+    "enriched_task_prompt": "After simplifying the pipeline by removing steps that appeared redundant, the committed state is empty, the frozen flag is not set, and the view is not rebuilt. The system spans pipeline.py, state.py, reducers.py, selectors.py, and api.py. Restore the pipeline so that all state invariants hold.",
+    "enriched_task_prompt_justification": "OLD TASK: told model to remove 'unnecessary' steps — adversarial. SYMPTOM: 'meta.frozen is False; stable is empty; get_committed_total returns None'. INCLUDED: the three broken invariants and five files. WITHHELD: which functions (commit, freeze_view), why they're independently necessary. DIFFICULTY: C — five files, state machine tracing."
+  },
+  {
+    "id": "lost_update",
+    "family": "lost_update",
+    "template": "concurrency",
+    "difficulty": "C",
+    "failure_mode": "RACE_CONDITION",
+    "bug_pattern_class": "partial_state_update",
+    "bug_pattern_secondary": null,
+    "boundary_type": "local",
+    "boundary_group": "local",
+    "temporal_depth": "multi_step",
+    "statefulness": "stateful",
+    "causal_depth": "L2",
+    "description": "Non-atomic read-modify-write. Two interleaved increments both read 0 and write 1, losing one update.",
+    "task": "Two concurrent increments produce value=1 instead of 2 under interleaving. Fix so counter is correct under any interleaving.",
+    "trap": "Lock only the write step — read still stale",
+    "code_files": [
+      "code_snippets_v2/lost_update/counter.py"
+    ],
+    "hard_constraints": [],
+    "positive_signals": [],
+    "negative_signals": [],
+    "ground_truth_bug": {
+      "type": "non_atomic_read_modify_write",
+      "location": "counter.py::make_increment_steps",
+      "invariant": "after N increments, value == N",
+      "fix_pattern": "combine read+write into single atomic step"
+    },
+    "reference_fix": {
+      "file": "code_snippets_v2/lost_update/counter.py",
+      "function": "make_increment_steps",
+      "diff_summary": "Combine read+write into single atomic step",
+      "lines_changed": 5
+    },
+    "test_contract": {
+      "setup": "reset()",
+      "execution": "sequential_double_increment + interleaved_double_increment",
+      "assertions": [
+        "both return 2"
+      ],
+      "state_reset": [
+        "mod.reset()"
+      ],
+      "retry_notes": "Safe — reset clears state",
+      "failure_surface": "stateful",
+      "retry_failure_modes": [
+        "state_leakage"
+      ]
+    },
+    "expected_regime_hypothesis": {
+      "_note": "HYPOTHESIS",
+      "nano": "CSF",
+      "4o-mini": "REI",
+      "5-mini": "CSF"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "non_atomic_read_modify_write",
+      "bug_location": "counter.py::make_increment_steps",
+      "mechanism_source": "increment operation is split into separate read and write steps without atomicity",
+      "mechanism_property": "state updates that depend on prior value must execute atomically under concurrency",
+      "mechanism_steps": [
+        "increment reads the current value",
+        "increment computes a new value based on the read",
+        "increment writes the new value back",
+        "concurrent executions interleave so multiple operations read the same initial value",
+        "later writes overwrite earlier updates"
+      ],
+      "mechanism_outcome": "final counter value is lower than the number of increments performed",
+      "trap_description": "locking only the write step appears sufficient but still allows multiple reads of the same stale value"
+    },
+    "symptom": "interleaved: expected 2, got 1; generalization: interleaved 3 increments should give 3, got 1",
+    "buggy_file": "\n\n_value = 0\n\n\ndef reset():\n    global _value\n    _value = 0\n\n\ndef get():\n    return _value\n\n\ndef _set(v):\n    global _value\n    _value = v\n\n\ndef run_steps(steps):\n    results = []\n    for fn, args in steps:\n        results.append(fn(*args))\n    return results\n\n\ndef make_increment_steps():\n    captured = {}\n\n    def step_read():\n        captured[\"current\"] = get()\n        return (\"read\", captured[\"current\"])\n\n    def step_write():\n        _set(captured[\"current\"] + 1)\n        return (\"write\", captured[\"current\"] + 1)\n\n    return step_read, step_write\n\n\ndef sequential_double_increment():\n    reset()\n    read_a, write_a = make_increment_steps()\n    read_b, write_b = make_increment_steps()\n    run_steps([(read_a, ()), (write_a, ()), (read_b, ()), (write_b, ())])\n    return get()\n\n\ndef interleaved_double_increment():\n    reset()\n    read_a, write_a = make_increment_steps()\n    read_b, write_b = make_increment_steps()\n    run_steps([(read_a, ()), (read_b, ()), (write_a, ()), (write_b, ())])\n    return get()\n",
+    "fixed_file": "\"\"\"Counter with atomic increment — fixes lost update under interleaving.\"\"\"\n\n_value = 0\n\n\ndef reset():\n    global _value\n    _value = 0\n\n\ndef get():\n    return _value\n\n\ndef _set(v):\n    global _value\n    _value = v\n\n\ndef run_steps(steps):\n    results = []\n    for fn, args in steps:\n        results.append(fn(*args))\n    return results\n\n\ndef make_increment_steps():\n    \"\"\"FIX: read+write combined into a single atomic step.\n\n    Under interleaving, each increment reads the CURRENT value\n    and writes value+1 in one step — no stale read possible.\n    \"\"\"\n\n    def step_atomic_increment():\n        current = get()\n        _set(current + 1)\n        return (\"atomic_increment\", current + 1)\n\n    # Return the atomic step as both \"read\" and \"write\" — only one step needed\n    def step_noop():\n        return (\"noop\",)\n\n    return step_atomic_increment, step_noop\n\n\ndef sequential_double_increment():\n    reset()\n    read_a, write_a = make_increment_steps()\n    read_b, write_b = make_increment_steps()\n    run_steps([(read_a, ()), (write_a, ()), (read_b, ()), (write_b, ())])\n    return get()\n\n\ndef interleaved_double_increment():\n    reset()\n    read_a, write_a = make_increment_steps()\n    read_b, write_b = make_increment_steps()\n    run_steps([(read_a, ()), (read_b, ()), (write_a, ()), (write_b, ())])\n    return get()\n",
+    "enriched_task_prompt": "Two concurrent increments to the same counter produce a value of 1 instead of 2. Fix the counter so that it is correct under any interleaving of operations.",
+    "enriched_task_prompt_justification": "OLD TASK: gave exact scenario — appropriate for concurrency. SYMPTOM: 'interleaved: expected 2, got 1'. INCLUDED: the exact interleaving failure. WITHHELD: the read-modify-write pattern name, the atomicity fix. DIFFICULTY: C — trap is locking only the write (read still stale)."
+  },
+  {
+    "id": "ordering_dependency",
+    "family": "ordering_dependency",
+    "template": "concurrency",
+    "difficulty": "C",
+    "failure_mode": "TEMPORAL_ORDERING",
+    "bug_pattern_class": "hidden_dependency",
+    "bug_pattern_secondary": null,
+    "boundary_type": "local",
+    "boundary_group": "local",
+    "temporal_depth": "multi_step",
+    "statefulness": "stateful",
+    "causal_depth": "L2",
+    "description": "Process runs before init and fails. Current code logs error and skips instead of buffering.",
+    "task": "process() runs before init() and items are lost. Fix so all items are processed regardless of arrival order.",
+    "trap": "Add a lock — locks provide mutual exclusion, not ordering",
+    "code_files": [
+      "code_snippets_v2/ordering_dependency/pipeline.py"
+    ],
+    "hard_constraints": [],
+    "positive_signals": [],
+    "negative_signals": [],
+    "ground_truth_bug": {
+      "type": "ordering_violation_no_buffer",
+      "location": "pipeline.py::process",
+      "invariant": "all items must appear as processed in the log",
+      "fix_pattern": "buffer early items, drain on init"
+    },
+    "reference_fix": {
+      "file": "code_snippets_v2/ordering_dependency/pipeline.py",
+      "function": "process",
+      "diff_summary": "Buffer pre-init items and drain buffer in init()",
+      "lines_changed": 6
+    },
+    "test_contract": {
+      "setup": "reset()",
+      "execution": "correct_order + broken_order",
+      "assertions": [
+        "both produce 2 processed items, no errors"
+      ],
+      "state_reset": [
+        "mod.reset()"
+      ],
+      "retry_notes": "Safe",
+      "failure_surface": "temporal",
+      "retry_failure_modes": [
+        "ordering_violation"
+      ]
+    },
+    "expected_regime_hypothesis": {
+      "_note": "HYPOTHESIS",
+      "nano": "CSF",
+      "4o-mini": "REI",
+      "5-mini": "CSF"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "ordering_violation_no_buffer",
+      "bug_location": "pipeline.py::process",
+      "mechanism_source": "items arriving before initialization are dropped instead of deferred",
+      "mechanism_property": "system must preserve items across ordering differences between producers and initialization",
+      "mechanism_steps": [
+        "process is invoked before initialization has completed",
+        "system detects uninitialized state",
+        "item is discarded instead of stored",
+        "no later mechanism reprocesses the discarded item"
+      ],
+      "mechanism_outcome": "items arriving early are permanently lost",
+      "trap_description": "adding mutual exclusion appears to address concurrency but does not change the ordering of events"
+    },
+    "symptom": "broken order: expected 2 processed items, got 1: ['error:not_init:a', 'init', 'processed:b', 'shutdown']",
+    "buggy_file": "\"\"\"Pipeline with ordering dependency: process must run after init.\"\"\"\n\n_log = []\n_initialized = False\n_buffer = []\n\n\ndef reset():\n    global _initialized\n    _log.clear()\n    _buffer.clear()\n    _initialized = False\n\n\ndef init():\n    global _initialized\n    _initialized = True\n    _log.append(\"init\")\n\n\ndef process(item):\n    if not _initialized:\n        _log.append(f\"error:not_init:{item}\")\n        return False\n    _log.append(f\"processed:{item}\")\n    return True\n\n\ndef shutdown():\n    _log.append(\"shutdown\")\n    return list(_log)\n\n\ndef get_log():\n    return list(_log)\n\n\ndef run_steps(steps):\n    results = []\n    for fn, args in steps:\n        results.append(fn(*args))\n    return results\n\n\ndef correct_order():\n    \"\"\"init -> process(a) -> process(b) -> shutdown. Correct.\"\"\"\n    reset()\n    run_steps([\n        (init, ()),\n        (process, (\"a\",)),\n        (process, (\"b\",)),\n        (shutdown, ()),\n    ])\n    return get_log()\n\n\ndef broken_order():\n    reset()\n    run_steps([\n        (process, (\"a\",)),\n        (init, ()),\n        (process, (\"b\",)),\n        (shutdown, ()),\n    ])\n    return get_log()\n",
+    "fixed_file": "\"\"\"Pipeline with auto-init — fixes ordering dependency.\"\"\"\n\n_log = []\n_initialized = False\n_buffer = []\n\n\ndef reset():\n    global _initialized\n    _log.clear()\n    _buffer.clear()\n    _initialized = False\n\n\ndef init():\n    global _initialized\n    _initialized = True\n    _log.append(\"init\")\n    # FIX: drain buffer of any items that arrived before init\n    for item in _buffer:\n        _log.append(f\"processed:{item}\")\n    _buffer.clear()\n\n\ndef process(item):\n    \"\"\"FIX: if not initialized, buffer the item for later processing.\"\"\"\n    if not _initialized:\n        _buffer.append(item)\n        return True  # buffered, not lost\n    _log.append(f\"processed:{item}\")\n    return True\n\n\ndef shutdown():\n    _log.append(\"shutdown\")\n    return list(_log)\n\n\ndef get_log():\n    return list(_log)\n\n\ndef run_steps(steps):\n    results = []\n    for fn, args in steps:\n        results.append(fn(*args))\n    return results\n\n\ndef correct_order():\n    reset()\n    run_steps(\n        [\n            (init, ()),\n            (process, (\"a\",)),\n            (process, (\"b\",)),\n            (shutdown, ()),\n        ]\n    )\n    return get_log()\n\n\ndef broken_order():\n    reset()\n    run_steps(\n        [\n            (process, (\"a\",)),\n            (init, ()),\n            (process, (\"b\",)),\n            (shutdown, ()),\n        ]\n    )\n    return get_log()\n",
+    "enriched_task_prompt": "When process() is called before init(), the item is silently lost. After the sequence [process(a), init(), process(b)], only item b appears — item a is missing. Fix the implementation so that all items are processed regardless of arrival order.",
+    "enriched_task_prompt_justification": "OLD TASK: 'process() runs before init() and items are lost' — accurate. SYMPTOM: 'broken order: expected 2 processed items, got 1'. INCLUDED: the exact failing sequence and the lost-item symptom. WITHHELD: buffering as the fix, the lock trap (mutual exclusion, not ordering). DIFFICULTY: C."
+  }
+]

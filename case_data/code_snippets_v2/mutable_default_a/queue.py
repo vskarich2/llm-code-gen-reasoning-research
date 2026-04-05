@@ -2,12 +2,7 @@
 
 
 def enqueue(task, queue=[]):
-    """Add a task to the queue and return the queue.
-
-    Invariant: each call with a single task (no explicit queue)
-    must return a list containing only that task.
-    """
-    # BUG: default list is shared across calls — tasks accumulate
+    """Add a task to the queue and return the queue."""
     queue.append(task)
     return queue
 

@@ -114,68 +114,78 @@ def run_v2(case: dict, model: str, condition: str, logger,
     Pipeline order (v3.1):
       parse → oracle(raw) → normalize → reconstruct → classifier → AST → execute
     Classifier and AST run BEFORE execution to enforce blindness.
+
+    Uses AttemptState + stage functions. All intermediate state preserved.
     """
     if logger is None:
         raise RuntimeError("run_v2 requires an explicit logger")
     if condition not in V2_CONDITIONS:
         raise ValueError(f"run_v2 called with non-v2 condition: {condition}")
     from core.config.experiment_config import get_config
-    from core.evaluation.oracle_inline import run_oracle_evaluation, compute_disagreement
     from core.evaluation.event_validation import apply_validation
-    t0 = time.monotonic()
+    from core.pipeline.orchestration.attempt_state import AttemptState
+    from core.pipeline.orchestration.stages import (
+        stage_generate, stage_parse, stage_oracle, stage_normalize,
+        stage_reconstruct, stage_classify, stage_ast, stage_execute,
+        stage_derive_metrics,
+    )
+
     config = get_config()
     cid = case["id"]
+    state = AttemptState(
+        case_id=cid, condition=condition, model=model,
+        attempt_idx=0, start_time=time.monotonic(),
+    )
 
-    prompt, prompt_meta = _render_generation_prompt(case, condition, config)
-    raw_response, gen_eid = _call_generation_model(
-        prompt, model, cid, condition, prompt_meta, logger, case_start_eid)
+    stage_generate(state, case, config, logger, parent_eid=case_start_eid)
+    stage_parse(state, case)
+    _check_parse_invariant(
+        state.strict_parse, state.recovery_parse, cid, condition, logger)
+    stage_oracle(state, case, config, logger)
+    stage_normalize(state, case)
+    stage_reconstruct(state, case, config)
+    stage_classify(state, case, config, logger)
+    stage_ast(state, case)
+    stage_execute(state, case, config, logger)
+    stage_derive_metrics(state, config)
 
-    strict_parse, recovery_parse, fmt_parse = _parse_outputs(raw_response, condition)
-    routing = _select_artifact(strict_parse, recovery_parse, case)
-    _check_parse_invariant(strict_parse, recovery_parse, cid, condition, logger)
-
-    parsed_gen = recovery_parse if routing.selected_source == "recovery" else strict_parse
-
-    # Oracle: uses RAW fields, before normalize. None preserved (not coerced to "").
-    fj = parsed_gen.full_json or {}
-    oracle_result = run_oracle_evaluation(
-        fj.get("root_cause"), fj.get("fix_strategy"), case, config,
-        logger=logger, case_id=cid, condition=condition, parent_event_id=gen_eid)
-
-    artifact = normalize_generation_v2(parsed_gen, case, condition)
-    recon, code = _reconstruct(parsed_gen, case, config)
-    artifact_id = _compute_artifact_id(recon)
-
-    # Log classifier visibility surface
-    n_total = len(recon.files) if recon.files else 0
-    n_modified = len(recon.changed_files) if recon.changed_files else 0
-    _log.debug("CLASSIFIER_SURFACE case=%s files_total=%d files_modified=%d",
-               cid, n_total, n_modified)
-
-    # Classifier + AST: before execution (blindness enforcement)
-    classifier_result, classify_eid = _classify_reasoning(
-        artifact, case, code, config, logger, cid, condition, parsed_gen, gen_eid)
-    ast_result = _run_ast_verification(recon, case, artifact_id)
-
-    # Execute: after classifier + AST
-    exec_result = _execute(case, parsed_gen, recon, config, logger)
-
-    disagreement = compute_disagreement(classifier_result, oracle_result, config)
-    signals = _derive_metrics(classifier_result, artifact, exec_result, parsed_gen)
-    evaluation = _compute_evaluation(routing, recon, exec_result, classifier_result, oracle_result, artifact_id)
-
-    ev = _assemble_result(exec_result, artifact, classifier_result, signals,
-                          case, condition, model, strict_parse, fmt_parse,
-                          recovery_parse, routing, recon, evaluation, artifact_id,
-                          ast_result, oracle_result, disagreement,
-                          prompt_meta=prompt_meta)
-
+    ev = _assemble_result_from_state(state, case, config)
     apply_validation(ev, None, -1, cid)
 
-    elapsed = time.monotonic() - t0
-    _log_result(logger, cid, condition, ev, prompt, raw_response,
-                artifact, parsed_gen, gen_eid, classify_eid, elapsed)
+    state.elapsed = time.monotonic() - state.start_time
+    _log_result(logger, cid, condition, ev, state.prompt, state.raw_response,
+                state.artifact, state.parsed_gen, state.gen_event_id,
+                state.classify_event_id, state.elapsed)
     return cid, condition, ev
+
+
+def _assemble_result_from_state(state, case, config=None):
+    """Build event dict from AttemptState. Reads typed fields, no positional args."""
+    if config is None:
+        from core.config.experiment_config import get_config
+        config = get_config()
+
+    # Delegate to existing _assemble_result for backward compat
+    ev = _assemble_result(
+        state.exec_result, state.artifact, state.classifier_result,
+        state.signals, case, state.condition, state.model,
+        state.strict_parse, state.format_parse, state.recovery_parse,
+        state.routing, state.recon, state.evaluation, state.artifact_id,
+        state.ast_result, state.oracle_result, state.disagreement,
+        prompt_meta=state.prompt_meta,
+    )
+
+    # Add canonical parsing semantics (v4 plan fields)
+    if "reconstruction" in ev:
+        ev["reconstruction"]["parse_mode"] = state.parse_mode
+        ev["reconstruction"]["strict_parse_valid"] = state.strict_parse_valid
+        ev["reconstruction"]["recovery_parse_valid"] = state.recovery_parse_valid
+        ev["reconstruction"]["recovery_used"] = state.recovery_used
+        ev["reconstruction"]["retry_eligible"] = state.retry_eligible
+        ev["reconstruction"]["execution_source"] = state.execution_source
+        ev["reconstruction"]["retry_triggered"] = state.retry_triggered
+
+    return ev
 
 
 # ============================================================
@@ -478,6 +488,10 @@ def _reconstruct(parsed_gen, case, config):
                     f"# [{marker}] {path}\n{recon.files[path]}")
     full_code = "\n\n".join(full_code_parts)
 
+    from core.pipeline.checks import check_reconstruction_produced_code
+    check_reconstruction_produced_code(
+        recon.status, recon.files, full_code, logical_paths)
+
     return recon, full_code
 
 
@@ -514,12 +528,12 @@ def _classify_reasoning(artifact, case, code, config, logger,
     """
     from core.evaluation.evaluator_v2 import classify_case
 
-    if parsed_gen.parse_status == "success":
+    if parsed_gen.parse_valid:
         return classify_case(
             artifact, case, code, config, logger, gen_eid, condition, cid)
     else:
         result = ClassifierResultV2()
-        result.parse_error = f"skipped: generation parse_status={parsed_gen.parse_status}"
+        result.parse_error = f"skipped: parse_valid=False (parse_status={parsed_gen.parse_status})"
         return result, gen_eid
 
 
@@ -652,7 +666,7 @@ def _compute_evaluation(
     # Execution is the ground truth for whether code ran.
     # ==================================================
 
-    if not routing_valid:
+    if not routing_valid or not reconstruction_success:
         outcome = "serialization_failure"
 
     elif oracle_label is None:

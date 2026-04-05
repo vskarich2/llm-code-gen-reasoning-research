@@ -20,14 +20,10 @@ def get_product(product_id):
 
 
 def update_product(product_id, **fields):
-    """Update product fields in the database.
-
-    Invariant: get_product() must return current case_data after update.
-    """
+    """Update product fields in the database."""
     if product_id not in _db:
         return False
     _db[product_id].update(fields)
-    # BUG: cache not invalidated — get_product returns stale case_data
     return True
 
 

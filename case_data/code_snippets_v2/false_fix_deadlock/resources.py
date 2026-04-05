@@ -1,4 +1,4 @@
-"""Resource transfers with lock-ordering deadlock, simulated via steps."""
+
 
 _locks = {}
 _state = {"A": 100, "B": 100}
@@ -11,7 +11,6 @@ def reset():
 
 
 def acquire(resource):
-    """Simulate lock. Raises RuntimeError if already held (deadlock)."""
     if _locks.get(resource):
         raise RuntimeError(f"deadlock: {resource} already locked")
     _locks[resource] = True
@@ -33,7 +32,7 @@ def run_steps(steps):
 
 
 def make_transfer_a_to_b_steps(amount):
-    """Transfer A→B: lock A first, then B."""
+
 
     def step_lock_a():
         acquire("A")
@@ -51,14 +50,14 @@ def make_transfer_a_to_b_steps(amount):
 
 
 def make_transfer_b_to_a_steps(amount):
-    """Transfer B→A: BUG — locks B first, then A (opposite order)."""
+
 
     def step_lock_b():
         acquire("B")
         return "locked_B"
 
     def step_lock_a_and_transfer():
-        acquire("A")  # DEADLOCK: A is held by the other transfer
+        acquire("A")
         _state["B"] -= amount
         _state["A"] += amount
         release("A")
@@ -69,7 +68,6 @@ def make_transfer_b_to_a_steps(amount):
 
 
 def sequential_transfers():
-    """A→B then B→A. Sequential: works fine."""
     reset()
     lock_ab, do_ab = make_transfer_a_to_b_steps(10)
     lock_ba, do_ba = make_transfer_b_to_a_steps(10)
@@ -81,7 +79,6 @@ def sequential_transfers():
 
 
 def interleaved_transfers():
-    """A→B and B→A interleaved: DEADLOCK."""
     reset()
     lock_ab, do_ab = make_transfer_a_to_b_steps(10)
     lock_ba, do_ba = make_transfer_b_to_a_steps(10)

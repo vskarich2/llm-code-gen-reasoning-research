@@ -156,18 +156,24 @@ def check_ast_patterns(reconstructed_files: dict[str, str] | None,
                 detail=f"target function '{func_name}' not found in code",
             )
 
-    # Run checkers
-    try:
-        strict_ok = strict_fn(target)
-    except Exception as e:
+    # Run checkers (None means no checker defined — not an error)
+    if strict_fn is not None:
+        try:
+            strict_ok = strict_fn(target)
+        except Exception as e:
+            strict_ok = False
+            _log.warning("strict checker EXCEPTION for case=%s func=%s: %s", case_id, func_name, e)
+    else:
         strict_ok = False
-        _log.warning("strict checker EXCEPTION for case=%s func=%s: %s", case_id, func_name, e)
 
-    try:
-        relaxed_ok = relaxed_fn(target)
-    except Exception as e:
+    if relaxed_fn is not None:
+        try:
+            relaxed_ok = relaxed_fn(target)
+        except Exception as e:
+            relaxed_ok = False
+            _log.warning("relaxed checker EXCEPTION for case=%s func=%s: %s", case_id, func_name, e)
+    else:
         relaxed_ok = False
-        _log.warning("relaxed checker EXCEPTION for case=%s func=%s: %s", case_id, func_name, e)
 
     anti_found = False
     if anti_fn is not None:

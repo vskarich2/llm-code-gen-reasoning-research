@@ -24,7 +24,6 @@ def process_batch(items):
     global _counter
     for item in items:
         _counter += item
-    # BUG: snapshot only once at end, not per-item
     snapshot()
     return _counter
 

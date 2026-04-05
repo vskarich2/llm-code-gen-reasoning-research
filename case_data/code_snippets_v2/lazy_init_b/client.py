@@ -2,7 +2,6 @@
 
 from config import get_config
 
-# BUG: config captured eagerly at import time — reset_config won't affect this
 _client_config = get_config()
 
 

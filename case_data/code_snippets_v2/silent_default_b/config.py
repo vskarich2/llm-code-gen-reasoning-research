@@ -1,4 +1,4 @@
-"""Nested configuration store."""
+
 
 _CONFIG = {
     "feature": {
@@ -14,7 +14,7 @@ _CONFIG = {
 
 
 def get_raw():
-    """Return the raw config dict (for inspection)."""
+    """Return the raw config dict."""
     return _CONFIG
 
 

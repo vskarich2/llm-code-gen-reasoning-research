@@ -25,7 +25,6 @@ def summarize_for_display(cleaned):
     """Summarize cleaned case_data for reporting.
 
     Returns display_max, display_min, display_mean — NOT raw keys.
-    Trap: consolidating this with compute_raw_stats would break key names.
     """
     if not cleaned:
         return {"display_max": 0, "display_min": 0, "display_mean": 0}

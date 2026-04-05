@@ -1,5 +1,3 @@
-"""Batch processor with two effects per item."""
-
 from metrics import increment, emit_event
 
 

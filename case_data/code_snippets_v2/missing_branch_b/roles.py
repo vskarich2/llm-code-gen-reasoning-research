@@ -1,6 +1,3 @@
-"""Role definitions and their access levels."""
-
-
 def admin_access():
     """Full access for admins."""
     return {"read": True, "write": True, "delete": True}

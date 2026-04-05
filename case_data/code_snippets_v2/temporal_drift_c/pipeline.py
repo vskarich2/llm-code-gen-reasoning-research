@@ -20,7 +20,7 @@ def pipeline(data):
     # Stage 3: clip
     clipped = clip(normalized, 0.05, 0.95)
     # Stage 1: raw stats
-    raw_stats = compute_raw_stats(normalized)  # BUG: should be case_data, not normalized
+    raw_stats = compute_raw_stats(normalized)
     derived = compute_derived(raw_stats)
     # Stage 4: display summary
     display = summarize_for_display(clipped)

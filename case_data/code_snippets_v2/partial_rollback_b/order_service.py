@@ -36,7 +36,7 @@ def place_order(product_id, qty, price):
     try:
         result = _process_payment(qty * price)
     except ValueError:
-        raise  # BUG: re-raises without releasing inventory reservation
+        raise
     _notifications.append({"product": product_id, "qty": qty})
     return {"status": "confirmed", "payment": result}
 

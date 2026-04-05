@@ -2,9 +2,6 @@
 
 from config import get_config
 
-# BUG: captures config dict reference at import time.
-# After reset_config(), _config in config.py becomes a NEW dict,
-# but _client_cfg still points to the OLD one.
 _client_cfg = get_config()
 
 

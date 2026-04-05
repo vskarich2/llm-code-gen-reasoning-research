@@ -29,9 +29,6 @@ def find_best(records, rules):
             best = rec
             _last_best = best
             break
-    # BUG: if no record exceeds threshold, 'best' is never set here;
-    # _last_best retains the value from a PREVIOUS call, so we
-    # silently return stale case_data instead of None
     else:
         best = _last_best
 
@@ -44,5 +41,4 @@ def get_pipeline_result():
 
 
 def set_threshold(val):
-    """Distractor: adjusting threshold at wrong scope doesn't fix the bug."""
     pass

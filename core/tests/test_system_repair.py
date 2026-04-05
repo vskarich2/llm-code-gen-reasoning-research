@@ -86,7 +86,20 @@ def test_retry_oracle_logger_parameter_present():
                 kw_names = [kw.arg for kw in node.keywords]
                 calls.append(kw_names)
 
-    assert len(calls) > 0, "No calls to run_oracle_evaluation found in retry_v2.py"
+    # retry_v2 now delegates to stage_oracle() in stages.py.
+    # Check stages.py if no direct calls found in retry_v2.
+    if not calls:
+        stages_path = Path(__file__).resolve().parent.parent / "pipeline" / "orchestration" / "stages.py"
+        if stages_path.exists():
+            stages_tree = ast_mod.parse(stages_path.read_text())
+            for node in ast_mod.walk(stages_tree):
+                if isinstance(node, ast_mod.Call):
+                    func = node.func
+                    if isinstance(func, ast_mod.Name) and func.id == "run_oracle_evaluation":
+                        calls.append([kw.arg for kw in node.keywords])
+                    elif isinstance(func, ast_mod.Attribute) and func.attr == "run_oracle_evaluation":
+                        calls.append([kw.arg for kw in node.keywords])
+    assert len(calls) > 0, "No calls to run_oracle_evaluation found in retry_v2.py or stages.py"
     for kw_names in calls:
         assert "logger" in kw_names, (
             f"run_oracle_evaluation call missing logger= keyword. "

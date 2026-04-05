@@ -19,13 +19,5 @@ def get_flag(path, default=False):
             return default
     return current
 
-
 def is_analytics_enabled():
-    """Check if analytics is enabled.
-
-    Should traverse: feature -> analytics -> enabled
-    """
-    # BUG: uses "features" (plural) instead of "feature" (singular)
-    # in the path. The intermediate key is wrong, so traversal fails
-    # silently and returns False.
     return get_flag("features.analytics.enabled")

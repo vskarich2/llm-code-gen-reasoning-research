@@ -1,6 +1,5 @@
 """Environment variable access layer."""
 
-# Simulated environment variables (instead of os.environ)
 _ENV = {
     "FEATURE_DARK_MODE": "true",
     "FEATURE_BETA": "false",

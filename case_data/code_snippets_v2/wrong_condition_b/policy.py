@@ -18,5 +18,5 @@ def is_allowed(requests_per_minute, rate_limit, daily_total, daily_quota):
     """
     rate_ok = check_rate(requests_per_minute, rate_limit)
     quota_ok = check_quota(daily_total, daily_quota)
-    # BUG: uses 'or' instead of 'and' — allows if EITHER passes
+
     return rate_ok or quota_ok

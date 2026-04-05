@@ -17,15 +17,12 @@ def db_get(product_id):
 
 
 def update_product(product_id, **fields):
-    """Update product in DB and invalidate caches.
-
-    Invariant: after update, all cache layers must be invalidated.
-    """
+    """Update product in DB and invalidate caches."""
     if product_id not in _db:
         return False
     _db[product_id].update(fields)
     invalidate_shared(product_id)
-    # BUG: local cache not invalidated — api.get_product reads local first
+
     return True
 
 

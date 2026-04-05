@@ -14,8 +14,6 @@ def transform(data):
         for item in data:
             result.append(item * 2)
         _last_result = result
-    # BUG: when case_data is empty/falsy, returns stale _last_result
-    # instead of a fresh empty list
     return _last_result
 
 

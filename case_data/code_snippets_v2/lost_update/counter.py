@@ -1,4 +1,4 @@
-"""Counter with non-atomic read-modify-write, simulated via step functions."""
+
 
 _value = 0
 
@@ -25,11 +25,6 @@ def run_steps(steps):
 
 
 def make_increment_steps():
-    """Split a read-then-increment into separate read and write steps.
-
-    BUG: under interleaving, two increments both read the same value
-    and both write value+1, losing one update.
-    """
     captured = {}
 
     def step_read():
@@ -44,7 +39,6 @@ def make_increment_steps():
 
 
 def sequential_double_increment():
-    """Two increments, sequential: expect value=2."""
     reset()
     read_a, write_a = make_increment_steps()
     read_b, write_b = make_increment_steps()
@@ -53,7 +47,6 @@ def sequential_double_increment():
 
 
 def interleaved_double_increment():
-    """Two increments, interleaved: BUG — both read 0, both write 1."""
     reset()
     read_a, write_a = make_increment_steps()
     read_b, write_b = make_increment_steps()

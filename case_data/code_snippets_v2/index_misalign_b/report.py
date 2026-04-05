@@ -20,7 +20,6 @@ class Report:
         Must remove the header AND the corresponding element
         from every row to keep them aligned.
         """
-        # BUG: removes header but does NOT remove from rows
         del self.headers[index]
 
     def render(self):

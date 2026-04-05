@@ -155,6 +155,9 @@ def build_classifier_v2_vars(artifact, case: dict, code: str, config) -> dict:
     if artifact.normalized_code_commitments:
         commitments_str = "; ".join(artifact.normalized_code_commitments)
 
+    from core.pipeline.checks import check_classifier_code_nonempty
+    check_classifier_code_nonempty(code, case.get("id", "?"))
+
     variables = {
         "root_cause": root_cause or "",
         "fix_strategy": fix_strategy or "",

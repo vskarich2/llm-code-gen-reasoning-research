@@ -15,7 +15,6 @@ def authorize(request):
 
     role = ctx["role"]
 
-    # BUG: handler doesn't handle "service_account" — falls to default
     if role == "admin":
         return {"can_read": True, "can_write": True, "can_admin": True}
     elif role == "moderator":

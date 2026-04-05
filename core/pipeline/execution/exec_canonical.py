@@ -131,6 +131,76 @@ def _materialize_package(case, recon, project_root, attempt):
     return pkg_dir
 
 
+# ── Sentinel recovery (diagnostic only) ─────────────────────────
+
+def _attempt_sentinel_recovery(case, parsed_gen, config, logger, attempt, project_root):
+    """Diagnostic recovery for RECON_SENTINEL_MIXED.
+
+    Strips the sentinel first line from each affected file, reconstructs,
+    and executes. Result is stored as metadata only — NEVER replaces
+    the primary (strict) result.
+
+    Returns dict with recovery_status, recovery_pass, recovery_score.
+    """
+    import logging
+    _log = logging.getLogger("t3.exec_canonical")
+
+    if not parsed_gen or not parsed_gen.files_dict:
+        return {"recovery_status": "no_files", "recovery_pass": None, "recovery_score": None}
+
+    from core.pipeline.reconstructor import reconstruct_strict, ReconstructionResult, _is_no_change_phrase
+
+    # Strip sentinel first lines from model output
+    stripped_files = {}
+    sentinel_stripped = []
+    for path, value in parsed_gen.files_dict.items():
+        if not isinstance(value, str) or not value.strip():
+            stripped_files[path] = value
+            continue
+        first_line = value.strip().split('\n')[0].strip()
+        if _is_no_change_phrase(first_line):
+            rest = '\n'.join(value.strip().split('\n')[1:]).strip()
+            stripped_files[path] = rest
+            sentinel_stripped.append(path)
+        else:
+            stripped_files[path] = value
+
+    if not sentinel_stripped:
+        return {"recovery_status": "no_sentinels_found", "recovery_pass": None, "recovery_score": None}
+
+    # Reconstruct with stripped files
+    logical_files = case.get("logical_file_keys") or case.get("code_files_contents", {})
+    logical_paths = list(logical_files.keys())
+
+    try:
+        recon = reconstruct_strict(logical_paths, logical_files, stripped_files)
+    except Exception as e:
+        return {"recovery_status": f"recon_failed:{e}", "recovery_pass": None, "recovery_score": None}
+
+    if recon.status != "SUCCESS":
+        return {"recovery_status": f"recon_{recon.status}", "recovery_pass": None, "recovery_score": None}
+
+    # Execute on recovered code
+    pkg_dir = None
+    try:
+        pkg_dir = _materialize_package(case, recon, project_root, attempt)
+        timeout = config.execution.subprocess_timeout
+        subprocess_result = _run_subprocess(pkg_dir, project_root, timeout)
+        score = subprocess_result.get("score", 0.0)
+        passed = subprocess_result.get("passed", score >= 1.0)
+        return {
+            "recovery_status": "executed",
+            "recovery_pass": passed,
+            "recovery_score": score,
+            "sentinel_stripped_files": sentinel_stripped,
+        }
+    except Exception as e:
+        return {"recovery_status": f"exec_failed:{e}", "recovery_pass": None, "recovery_score": None}
+    finally:
+        if pkg_dir and not config.execution.keep_eval_dirs:
+            shutil.rmtree(pkg_dir, ignore_errors=True)
+
+
 # ── Subprocess execution ─────────────────────────────────────────
 
 def _run_subprocess(pkg_dir, project_root, timeout=30):
@@ -288,6 +358,14 @@ def exec_canonical(case, parsed_gen, recon, config, logger, attempt=0):
             {"error_message": reasons[0], "failure_reasons": reasons},
             "RECONSTRUCTION_FAILURE", 0.0, ran=False)
         result["reconstruction_status"] = recon.status
+
+        # Diagnostic recovery for SENTINEL_MIXED: strip sentinel line,
+        # attempt reconstruction + execution on remaining content.
+        # Result stored as diagnostic metadata only — NEVER replaces primary result.
+        if recon.status == "RECON_SENTINEL_MIXED":
+            result["sentinel_mixed_recovery"] = _attempt_sentinel_recovery(
+                case, parsed_gen, config, logger, attempt, project_root)
+
         return result
 
     # ── Materialize ──────────────────────────────────────────

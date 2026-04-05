@@ -34,14 +34,28 @@ def render_sidebar() -> tuple[list[str], list[tuple[str, Path]], bool, int]:
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Experiments**")
 
+    # Persist selections across browser refreshes via query params
+    qp = st.query_params
+    persisted = set(qp.get_all("exp")) if hasattr(qp, "get_all") else []
+    if not persisted and "exp" in qp:
+        persisted = {qp["exp"]} if isinstance(qp["exp"], str) else set(qp["exp"])
+    persisted = set(persisted)
+
     selected_experiments: list[str] = []
     for exp in find_experiments():
         label = Path(exp).name
         parent = Path(exp).parent.name
         if parent != "logs":
             label = f"{parent}/{label}"
-        if st.sidebar.checkbox(label, value=False, key=f"exp_{exp}"):
+        default = exp in persisted
+        if st.sidebar.checkbox(label, value=default, key=f"exp_{exp}"):
             selected_experiments.append(exp)
+
+    # Update query params to persist selections
+    if selected_experiments:
+        st.query_params["exp"] = selected_experiments
+    elif "exp" in st.query_params:
+        del st.query_params["exp"]
 
     st.sidebar.markdown("---")
     live_mode = st.sidebar.toggle("Live Mode", value=False)

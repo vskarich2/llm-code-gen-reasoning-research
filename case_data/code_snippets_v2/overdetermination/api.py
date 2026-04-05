@@ -4,7 +4,7 @@ from writer_b import write_cached
 
 
 def update_product(product_id, compute_fn):
-    """Update product case_data. Uses both writers (redundant)."""
+    """Update product case_data."""
     write_fresh(product_id, compute_fn)
     write_cached(product_id, compute_fn)
     return read(product_id)

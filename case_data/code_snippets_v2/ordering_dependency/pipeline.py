@@ -19,7 +19,6 @@ def init():
 
 
 def process(item):
-    """Must run AFTER init. BUG: logs error and skips if not initialized."""
     if not _initialized:
         _log.append(f"error:not_init:{item}")
         return False
@@ -56,7 +55,6 @@ def correct_order():
 
 
 def broken_order():
-    """process(a) runs BEFORE init. BUG: item a is lost."""
     reset()
     run_steps([
         (process, ("a",)),

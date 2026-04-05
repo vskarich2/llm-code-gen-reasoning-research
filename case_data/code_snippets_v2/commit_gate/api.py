@@ -1,5 +1,5 @@
-from case_data.code_snippets_v2.commit_gate.pipeline import process_batch
-from case_data.code_snippets_v2.commit_gate.selectors import get_committed_total, get_view_digest, get_committed_digest
+from pipeline import process_batch
+from selectors import get_committed_total, get_view_digest, get_committed_digest
 from reducers import stage
 from state import make_state
 
@@ -20,7 +20,6 @@ def preview(entries):
 
 
 def ingest_and_verify(entries):
-    """Full pipeline: ingest then verify view is consistent with committed case_data."""
     st, items = process_batch(entries)
     committed_total = get_committed_total(st)
     view_digest = get_view_digest(st)

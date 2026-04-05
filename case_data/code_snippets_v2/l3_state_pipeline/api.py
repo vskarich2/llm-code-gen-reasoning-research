@@ -1,5 +1,5 @@
-from case_data.code_snippets_v2.l3_state_pipeline.pipeline import process_batch, process_incremental
-from case_data.code_snippets_v2.l3_state_pipeline.selectors import get_committed_total, get_display_items, summary_for_display, compute_drift
+from pipeline import process_batch, process_incremental
+from selectors import get_committed_total, get_display_items, summary_for_display, compute_drift
 
 
 def ingest(entries):
@@ -23,5 +23,5 @@ def preview(entries):
     cleaned = normalize(st["raw"])
     merged = collapse(cleaned)
     stage(st, merged)
-    # no commit — preview only
+
     return get_display_items(st)

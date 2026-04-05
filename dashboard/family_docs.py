@@ -285,4 +285,69 @@ Dependency chain: `save_user → sync_user_to_cache → cache_put`. The "if_abse
 
 **Trap:** removing `write_fresh` (the more complex writer) instead of `write_cached` (the stale one).
 """,
+
+    "write_through_shadow_cache": """\
+**Freshness authority mismatch in snapshot preservation** — `refresh_snapshot()` compares snapshot version against cache version to decide if the existing snapshot is fresh enough to keep. After a write, cache data is invalidated but the version index retains the old version. Snapshot version == stale cache version, so preservation passes and stale snapshot persists.
+
+*Oracle ground truth: failure_mode=STALE_CACHE*
+
+**C:** 5 files (user_service, user_repo, cache_layer, snapshot_store, version_index). Read priority: snapshot > cache > repo. The bug is in `snapshot_store.py:refresh_snapshot` where preservation uses cache version (non-authoritative after invalidation) instead of repository version (authoritative). **Trap:** cache invalidation timing looks like the bug, bypassing snapshot or global invalidation appears to fix it, but both break design.
+""",
+
+    "deferred_commit_selector_split": """\
+**Cross-stage identity/lineage resolution failure** — a pipeline selects a candidate, transforms candidates through snapshot + normalization (which reorders them), then commits a result. The commit stage resolves the wrong candidate because it uses positional index or heuristic matching instead of following lineage through representation changes.
+
+*Oracle ground truth: failure_mode=TEMPORAL_DRIFT*
+
+**B+:** 5 files. Commit uses `selected_index` from raw ordering, but normalization reorders by transformed score. **Trap:** re-selecting after normalization or preserving ordering appears to fix it but violates pipeline semantics.
+**C/L3:** 5 files with additional planner + tie-breaking ambiguity. Commit uses positional + first-letter heuristic. Lineage exists in `meta.src` across snapshot->normalizer->commit but is never used. **Trap:** fixing selector tie-breaking or patching metadata looks plausible but doesn't fix the resolution.
+""",
+
+    "versioned_policy_fallback_regression": """\
+**Cross-request compatibility state leakage** — `attach_compatibility_context()` stores compatibility decisions in module-level `COMPAT_STATE`. A prior legacy request sets `force_fallback=True`, and subsequent non-legacy requests inherit this stale state, causing execution to follow fallback behavior despite correct resolution.
+
+*Oracle ground truth: failure_mode=MISSING_BRANCH*
+
+**C:** 4 files (policy_loader, resolver, compat, executor). Resolver is correct. Executor is correct for its inputs. The bug is in `compat.py` where shared mutable state leaks across request boundaries. **Trap:** fixing executor branching or forcing version alignment breaks legitimate fallback scenarios — the root cause is upstream state corruption.
+""",
+
+    "duplicate_write_retry_hidden": """\
+**Hidden retry double-execution** — `_handle()` writes to storage then raises `TransientError`. The `_retry_wrapper` catches the error and re-calls `_handle()`, which writes the same result again. No explicit duplicate exists in a single code path.
+
+*Oracle ground truth: failure_mode=DUPLICATION*
+
+**B:** 2 files (service, storage). Write happens before the failure check inside `_handle()`. **Trap:** storage's append-only list looks like the bug, but it's correct by design — the real issue is the handler writing before raising.
+""",
+
+    "misleading_local_fix": """\
+**Missing derived field recomputation** — `update_name()` changes base fields but doesn't recompute `display_name`, which was derived from `first` during `__init__`.
+
+*Oracle ground truth: failure_mode=PARTIAL_UPDATE*
+
+**A:** single file. `display_name = self._format(first)` runs only in `__init__`. **Trap:** the `_format()` helper looks suspicious because the stale field is formatted text, but `_format()` is correct — it's just never called after mutation.
+""",
+
+    "partial_system_correctness": """\
+**Unit mismatch across pipeline stages** — `to_internal()` truncates dollars to int (dropping cents), but `aggregate()` divides by 100 expecting integer cents. Each stage is locally correct for its stated contract.
+
+*Oracle ground truth: failure_mode=DATA_CORRUPTION*
+
+**C:** 4 files (validator, transform, aggregate, pipeline). The bug is invisible within any single stage. **Trap:** aggregation's `/100` looks like the scaling error, but it's correct for cents — the fix must be in `to_internal()` to produce cents (`int(round(x * 100))`).
+""",
+
+    "duplicate_write_competing": """\
+**Partial commit across retry boundary** — `_execute()` writes to storage BEFORE a transient failure check, creating a partial commit. When the retry re-runs `_execute()`, it writes the same result again because there's no idempotency guard.
+
+*Oracle ground truth: failure_mode=DUPLICATION*
+
+**C:** 3 files (handler, retry_manager, storage). The write-then-fail pattern in `_execute()` means the first attempt partially commits state. The retry path doesn't detect prior progress and issues a second write. **Trap:** storage's append-only behavior looks like the bug — models add deduplication at the storage layer instead of fixing the handler's idempotency boundary.
+""",
+
+    "duplicate_write_deep_dependency_chain": """\
+**Retry re-enqueue without idempotency** — `schedule_retry()` re-enqueues a request_id into the queue without checking if it was already processed. The queue runs both the original and retried job, and `service.process()` has no idempotency guard, so the same request gets handled and written twice.
+
+*Oracle ground truth: failure_mode=DUPLICATION*
+
+**C:** 4 files (service, retry, queue, storage). The retry path goes service→retry→queue→service (circular re-entry). **Trap:** storage's append-only behavior and queue's delivery look faulty, but both are working correctly — the root cause is the retry layer re-enqueuing without deduplication.
+""",
 }

@@ -12,8 +12,6 @@ def with_history(func, history=_shared_log):
     Invariant: each decorated function must have its OWN
     independent history list.
     """
-    # BUG: history default is the module-level _shared_log list,
-    # so ALL decorated functions append to the SAME list.
 
     def wrapper(*args, **kwargs):
         result = func(*args, **kwargs)

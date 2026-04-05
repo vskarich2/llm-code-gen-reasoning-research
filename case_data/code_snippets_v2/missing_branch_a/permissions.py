@@ -3,7 +3,6 @@
 ROLE_PERMISSIONS = {
     "admin": {"read", "write", "delete", "manage_users"},
     "user": {"read", "write"},
-    # BUG: "moderator" role is missing — falls through to empty set
 }
 
 

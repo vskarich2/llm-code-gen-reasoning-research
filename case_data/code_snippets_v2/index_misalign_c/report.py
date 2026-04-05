@@ -26,8 +26,6 @@ class Report:
         self.headers.insert(position, header)
         for row in self.rows:
             row.insert(position, default_value)
-        # BUG: column_widths not updated — stays at old length
-        # Should be: self.column_widths.insert(position, len(header))
 
     def render(self):
         """Render the table using the formatter."""

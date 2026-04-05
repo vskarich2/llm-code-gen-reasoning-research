@@ -19,7 +19,6 @@ def ingest(msg, max_pipeline_retries=2, fail_first=False):
     for attempt in range(max_pipeline_retries):
         try:
             send_with_retry(msg, max_retries=2, fail_first=fail_first)
-            # BUG: no break — pipeline always retries, doubling sends
         except Exception:
             continue
     _ingest_log.append(msg)
@@ -31,7 +30,7 @@ def get_ingest_log():
 
 
 def batch_ingest(messages):
-    """Ingest multiple messages. Legitimate batch — no retry needed."""
+    """Ingest multiple messages."""
     for msg in messages:
         send_with_retry(msg, max_retries=1)
     return len(messages)

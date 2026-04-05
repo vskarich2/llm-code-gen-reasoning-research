@@ -59,7 +59,7 @@ def find_experiments() -> list[str]:
     return experiments
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=10)
 def load_experiment(log_dir: str) -> pd.DataFrame:
     path = Path(log_dir)
     events = load_wal(path)

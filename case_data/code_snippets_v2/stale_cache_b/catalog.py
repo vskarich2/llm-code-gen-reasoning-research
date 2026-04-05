@@ -22,14 +22,10 @@ def get_product(product_id):
 
 
 def update_product(product_id, **fields):
-    """Update product in DB.
-
-    Invariant: subsequent get_product() must reflect the update.
-    """
+    """Update product in DB."""
     if product_id not in _db:
         return False
     _db[product_id].update(fields)
-    # BUG: should call invalidate(product_id) but doesn't
     return True
 
 

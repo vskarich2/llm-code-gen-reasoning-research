@@ -19,7 +19,7 @@ def retry_send(msg, max_retries=2):
     for attempt in range(max_retries):
         result = send(msg)
         if not result:
-            continue  # BUG: should break on success, not continue on failure
+            continue
     return True
 
 

@@ -9,7 +9,7 @@ def pipeline(data):
     raw_stats MUST reflect the original case_data, not the normalized version.
     """
     cleaned = normalize(data)
-    raw_stats = compute_raw_stats(cleaned)  # BUG: should be case_data, not cleaned
+    raw_stats = compute_raw_stats(cleaned)
     display = summarize_for_display(cleaned)
     return {
         "raw_stats": raw_stats,

@@ -174,6 +174,10 @@ def _run_one_inner(case: dict, model: str, condition: str, logger,
     if condition.startswith("retry_"):
         from core.pipeline.orchestration.retry_v2 import run_retry_v2
         return run_retry_v2(case, model, condition, logger, case_start_eid)
+    if condition.startswith("critique_"):
+        # V3 critique conditions route through retry with critique variant
+        from core.pipeline.orchestration.retry_v2 import run_retry_v2
+        return run_retry_v2(case, model, condition, logger, case_start_eid)
 
     raise RuntimeError(
         f"FATAL: V2 condition '{condition}' has no dispatch handler"

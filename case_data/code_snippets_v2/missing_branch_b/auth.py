@@ -8,7 +8,6 @@ _ROLE_DISPATCH = {
     "admin": admin_access,
     "user": user_access,
     "moderator": moderator_access,
-    # BUG: "guest" missing — falls through to _default_access (no access)
 }
 
 

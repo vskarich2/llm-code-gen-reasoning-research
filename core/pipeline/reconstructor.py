@@ -291,6 +291,31 @@ def reconstruct_strict(
             final_files[rel_path] = manifest_files[rel_path]
             continue
 
+        # ── Gate 1b: Sentinel-mixed detection ───────────────────
+        # Model wrote a no-change phrase as first line PLUS actual code.
+        # This is a contract violation: the file is neither UNCHANGED nor
+        # clean code. We flag it as RECON_SENTINEL_MIXED and store the
+        # stripped candidate for diagnostic recovery (NOT for scoring).
+        first_line = value.strip().split('\n')[0].strip()
+        rest_after_first = '\n'.join(value.strip().split('\n')[1:]).strip()
+        if _is_no_change_phrase(first_line) and rest_after_first:
+            _log.warning(
+                "SENTINEL_MIXED for %s: first line is '%s' but %d chars of "
+                "code follow. Strict: contract violation. Recovery candidate stored.",
+                rel_path, first_line, len(rest_after_first))
+            return ReconstructionResult(
+                status="RECON_SENTINEL_MIXED",
+                files={},
+                missing_files={rel_path},
+                format_violation=True,
+                recovery_applied=False,
+                recovery_types=["sentinel_mixed_detected"],
+                normalization_log=[
+                    f"sentinel_mixed:{rel_path}:first_line={first_line}",
+                    f"sentinel_mixed_candidate_len:{len(rest_after_first)}",
+                ],
+            )
+
         # ── Gate 2: Empty/whitespace ─────────────────────────
         if not isinstance(value, str) or not value.strip():
             _log.warning(

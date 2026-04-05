@@ -13,10 +13,6 @@ def reset():
 
 
 def send(msg, fail_first=False):
-    """Send a message: store it and notify.
-
-    If fail_first is True, raises on first call to simulate transient error.
-    """
     global _attempt_count
     _attempt_count += 1
     if fail_first and _attempt_count == 1:
@@ -32,7 +28,6 @@ def send_with_retry(msg, max_retries=2, fail_first=False):
     for attempt in range(max_retries):
         try:
             send(msg, fail_first=fail_first)
-            # BUG: no break after success — continues loop, duplicating
         except ConnectionError as e:
             last_error = e
             continue

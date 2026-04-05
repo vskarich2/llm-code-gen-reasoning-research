@@ -23,6 +23,9 @@ V2_CONDITIONS = frozenset({
     # V3 prompt family
     "baseline_v3",
     "leg_reduction_lean_v3",
+    # V3 critique retry conditions
+    "critique_reasoning_only_v3",
+    "critique_strict_v3",
 })
 
 ALL_CONDITIONS = list(sorted(V2_CONDITIONS))
@@ -48,6 +51,9 @@ COND_LABELS = {
     # V3 prompt family
     "baseline_v3": "B3",
     "leg_reduction_lean_v3": "L3",
+    # V3 critique retry
+    "critique_reasoning_only_v3": "CR",
+    "critique_strict_v3": "CS",
 }
 
 # INVARIANT: condition labels must be unique

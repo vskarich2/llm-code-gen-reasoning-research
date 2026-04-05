@@ -29,6 +29,5 @@ def process_batch(items):
     for item in items:
         increment(item["value"])
         emit_event(item["id"], item["value"])
-    # BUG: audit_log at batch level instead of per-item
     audit_log(item["id"], "processed", f"value={item['value']}")
     return len(items)

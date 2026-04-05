@@ -127,21 +127,32 @@ Each dimension also has a justification — one sentence explaining the judgment
 
 #### Reconstruction Failure
 
-**What happens in the pipeline:** after parsing extracts `files_dict` from the JSON, `core/pipeline/reconstructor.py:reconstruct_strict()` validates every file through a 5-gate pipeline:
+**What happens in the pipeline:** after parsing extracts `files_dict` from the JSON, `core/pipeline/reconstructor.py:reconstruct_strict()` validates every file through a 6-gate pipeline:
 
 1. **Gate 1 — UNCHANGED check:** if value is literally `"UNCHANGED"`, accept the original file content
-2. **Gate 2 — Empty check:** if value is empty/whitespace → `RECON_EMPTY_FILE` (hard fail)
-3. **Gate 3 — Sentinel detection:** `_is_no_change_phrase()` checks if value is a paraphrase like "no changes needed", "same as original" → `RECON_SENTINEL_MISMATCH` (hard fail)
-4. **Gate 4 — AST validation:** `ast.parse(normalized_content)` — is it valid Python? If syntax error, attempt recovery (fence stripping, prefix stripping, leading-whitespace dedent). If still fails → `RECON_INVALID_CODE`
-5. **Gate 5 — Semantic check:** `_check_semantic_structure()` compares top-level defs against original (diagnostic only, never blocks)
+2. **Gate 1b — Sentinel-mixed detection:** first line is a no-change phrase (e.g., "no changes needed") but additional code follows → `RECON_SENTINEL_MIXED`. Distinct from full sentinel: the model wrote real code but prepended a status comment. Logged with sentinel line text and candidate code length.
+3. **Gate 2 — Empty check:** if value is empty/whitespace → `RECON_EMPTY_FILE` (hard fail)
+4. **Gate 3 — Sentinel detection:** `_is_no_change_phrase()` checks if entire value is a paraphrase like "no changes needed", "same as original" → `RECON_SENTINEL_MISMATCH` (hard fail)
+5. **Gate 4 — AST validation:** `ast.parse(normalized_content)` — is it valid Python? If syntax error, attempt recovery (fence stripping, prefix stripping, leading-whitespace dedent). If still fails → `RECON_INVALID_CODE`
+6. **Gate 5 — Semantic check:** `_check_semantic_structure()` compares top-level defs against original (diagnostic only, never blocks)
 
 Before the gates, if the model omitted files entirely, auto-fill kicks in — missing keys get filled with `"UNCHANGED"` and tracked as `missing_files_auto_filled` recovery.
 
-**Possible statuses:** `SUCCESS`, `RECON_MISSING_FILES`, `RECON_EMPTY_FILE`, `RECON_SENTINEL_MISMATCH`, `RECON_INVALID_CODE`. Also `GENERATION_CONTRACT_VIOLATION` if the parsed JSON lacks required fields (set in `execution_v2.py`).
+**Possible statuses:** `SUCCESS`, `RECON_MISSING_FILES`, `RECON_EMPTY_FILE`, `RECON_SENTINEL_MISMATCH`, `RECON_SENTINEL_MIXED`, `RECON_INVALID_CODE`. Also `GENERATION_CONTRACT_VIOLATION` if the parsed JSON lacks required fields (set in `execution_v2.py`).
 
-**Why it fails:** model wrapped code in markdown fences (recovered by fence stripping). Model added "FULLY UPDATED" prefix (recovered by prefix stripping). Model added leading space to file values (recovered by dedent). Model produced actual syntax errors in the Python. Model omitted files. Model wrote "no changes" instead of actual code.
+**`RECON_SENTINEL_MIXED` (new):** the model wrote a no-change phrase as the first line but included real code after it. Example: `"No changes needed to this file.\ndef create_config():\n    ..."`. This is NOT the same as `RECON_SENTINEL_MISMATCH` (entire value is a no-change phrase). The primary result is always `RECONSTRUCTION_FAILURE` — the sentinel-mixed content is never executed as the primary path.
 
-**If this is high:** check `recon_status` values to see which gate is failing. Check `recovery_types` to see what's being recovered vs what's genuinely broken.
+**Sentinel-mixed recovery (diagnostic only):** when `RECON_SENTINEL_MIXED` is detected, `exec_canonical.py:_attempt_sentinel_recovery()` strips the sentinel first line and reconstructs/executes the remaining code as a diagnostic probe. The recovery result is stored as `sentinel_mixed_recovery` metadata on the primary result:
+- `recovery_status`: reconstruction status of the stripped content
+- `recovery_pass`: did the stripped code pass tests?
+- `recovery_score`: execution score
+- `sentinel_stripped_files`: which files had sentinels removed
+
+**Important:** sentinel recovery NEVER replaces the primary result. The attempt is always scored as a reconstruction failure. The recovery metadata tells you whether the model's actual code (under the sentinel) would have worked — useful for diagnosing whether the model understood the fix but botched the output format.
+
+**Why it fails:** model wrapped code in markdown fences (recovered by fence stripping). Model added "FULLY UPDATED" prefix (recovered by prefix stripping). Model added leading space to file values (recovered by dedent). Model produced actual syntax errors in the Python. Model omitted files. Model wrote "no changes" instead of actual code. Model prepended a status comment before the code (sentinel-mixed).
+
+**If this is high:** check `recon_status` values to see which gate is failing. Check `recovery_types` to see what's being recovered vs what's genuinely broken. If `RECON_SENTINEL_MIXED` is high, check `sentinel_mixed_recovery.recovery_pass` — if many would have passed, the model knows the fix but is prepending unnecessary commentary.
 
 ---
 

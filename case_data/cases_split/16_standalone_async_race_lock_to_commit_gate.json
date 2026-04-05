@@ -1,0 +1,339 @@
+[
+  {
+    "id": "async_race_lock",
+    "family": "async_race_lock",
+    "template": "race_condition",
+    "difficulty": "C",
+    "failure_mode": "RACE_CONDITION",
+    "bug_pattern_class": "execution_model_mismatch",
+    "bug_pattern_secondary": null,
+    "boundary_type": "cross_boundary",
+    "boundary_group": "cross_boundary",
+    "temporal_depth": "multi_step",
+    "statefulness": "stateful",
+    "causal_depth": "L2",
+    "description": "process_item uses locking for atomic counting. Task asks to replace with quick_increment (unlocked). run_verified depends on the lock.",
+    "task": "The verified pipeline (run_verified) is returning results with missing fields. handle_verified_request is not working correctly. Debug and fix the issue. Return the updated code.",
+    "trap": "Replace process_item with quick_increment — removes the lock that run_verified depends on for atomic read-increment-read",
+    "code_files": [
+      "code_snippets_v2/async_race_lock/state.py",
+      "code_snippets_v2/async_race_lock/worker.py",
+      "code_snippets_v2/async_race_lock/scheduler.py",
+      "code_snippets_v2/async_race_lock/api.py"
+    ],
+    "hard_constraints": [
+      "process_item's lock acquisition must be preserved for concurrent safety",
+      "run_verified depends on atomic read-increment-read via the lock",
+      "Do not remove try_lock/unlock from the processing path used by run_pipeline"
+    ],
+    "positive_signals": [
+      "try_lock",
+      "unlock",
+      "lock",
+      "concurren",
+      "atomic",
+      "race",
+      "guard"
+    ],
+    "negative_signals": [
+      "remove.*lock",
+      "unnecessary.*lock",
+      "skip.*lock",
+      "quick_increment.*instead"
+    ],
+    "ground_truth_bug": {
+      "type": "lock_removal_breaks_atomicity",
+      "location": "worker.py::process_item",
+      "invariant": "run_verified requires atomic read-increment-read via locking",
+      "fix_pattern": "keep process_item with try_lock/unlock, do not replace with quick_increment"
+    },
+    "reference_fix": {
+      "file": "code_snippets_v2/async_race_lock/worker.py",
+      "function": "process_item",
+      "diff_summary": "Keep locking in process_item with before/after tracking",
+      "lines_changed": 3
+    },
+    "test_contract": {
+      "setup": "Reset counter state",
+      "execution": "run_verified with 5 items",
+      "assertions": [
+        "total==5",
+        "results have before/after fields"
+      ],
+      "state_reset": [
+        "mod.reset()"
+      ],
+      "retry_notes": "Safe — reset clears state",
+      "failure_surface": "cross_boundary",
+      "retry_failure_modes": []
+    },
+    "expected_regime_hypothesis": {
+      "_note": "HYPOTHESIS",
+      "nano": "CSF",
+      "4o-mini": "CSF",
+      "5-mini": "CSF"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "lock_removal_breaks_atomicity",
+      "bug_location": "worker.py::process_item",
+      "mechanism_source": "process_item is replaced with a non-locking increment that removes atomic coordination",
+      "mechanism_property": "shared state updates must be atomic when accessed concurrently",
+      "mechanism_steps": [
+        "original implementation uses locking to guard read-modify-write",
+        "replacement removes lock and performs unsynchronized increment",
+        "concurrent executions interleave reads and writes",
+        "state updates overwrite each other"
+      ],
+      "mechanism_outcome": "counter values become inconsistent due to race conditions",
+      "trap_description": "the unlocked increment appears equivalent in single-threaded reasoning but fails under concurrent interleavings"
+    },
+    "symptom": "result[0] missing 'before'/'after' -- process_item with locking was not used",
+    "buggy_file": "from state import increment, try_lock, unlock, get_counter\n\n\ndef process_item(item):\n    increment(item[\"weight\"])\n    return {\"status\": \"ok\"}\n\n\ndef process_batch_serial(items):\n    results = []\n    for item in items:\n        results.append(process_item(item))\n    return results\n\n\ndef quick_increment(item):\n    increment(item[\"weight\"])\n    return {\"status\": \"ok\"}\n",
+    "fixed_file": "from state import increment, try_lock, unlock, get_counter\n\n\ndef process_item(item):\n    if not try_lock():\n        return {\"status\": \"skipped\", \"reason\": \"locked\"}\n    before = get_counter()\n    increment(item[\"weight\"])\n    after = get_counter()\n    unlock()\n    return {\"status\": \"ok\", \"before\": before, \"after\": after}\n\n\ndef process_batch_serial(items):\n    results = []\n    for item in items:\n        results.append(process_item(item))\n    return results\n\n\ndef quick_increment(item):\n    increment(item[\"weight\"])\n    return {\"status\": \"ok\"}\n",
+    "enriched_task_prompt": "The verified pipeline produces results with missing fields — expected 'before' and 'after' values are absent. The system spans worker.py, scheduler.py, state.py, and api.py. Fix the implementation so that the verified pipeline produces complete results.",
+    "enriched_task_prompt_justification": "OLD TASK: 'handle_verified_request is not working correctly' — misdirects to wrong function. SYMPTOM: 'result[0] missing before/after — process_item with locking was not used'. INCLUDED: the missing-field symptom and all four files. WITHHELD: that the issue is about lock removal, which function to preserve, the quick_increment vs process_item distinction. DIFFICULTY: C — four files, missing-field symptom only."
+  },
+  {
+    "id": "cache_invalidation_order",
+    "family": "cache_invalidation_order",
+    "template": "cache_ordering",
+    "difficulty": "C",
+    "failure_mode": "CACHE_ORDERING",
+    "bug_pattern_class": "hidden_dependency",
+    "bug_pattern_secondary": null,
+    "boundary_type": "cross_boundary",
+    "boundary_group": "cross_boundary",
+    "temporal_depth": "multi_step",
+    "statefulness": "stateful",
+    "causal_depth": "L2",
+    "description": "invalidate-then-set ordering is intentional for version tracking. Removing the 'redundant' invalidation breaks conditional cache set.",
+    "task": "The update_record function does an invalidate then a set, which seems redundant. Remove the unnecessary cache invalidation step. Return the updated code.",
+    "trap": "Remove invalidation — breaks version tracking that cache_conditional_set depends on",
+    "code_files": [
+      "code_snippets_v2/cache_invalidation_order/cache.py",
+      "code_snippets_v2/cache_invalidation_order/db.py",
+      "code_snippets_v2/cache_invalidation_order/service.py",
+      "code_snippets_v2/cache_invalidation_order/api.py"
+    ],
+    "hard_constraints": [
+      "cache_invalidate resets the version counter — removing it breaks cache_conditional_set",
+      "safe_update depends on version numbers being sequential",
+      "The invalidate-then-set pattern in update_record is intentional, not redundant"
+    ],
+    "positive_signals": [
+      "version",
+      "conditional_set",
+      "invalidat.*before.*set",
+      "ordering",
+      "sequence",
+      "not redundant"
+    ],
+    "negative_signals": [
+      "remove.*invalidat",
+      "skip.*invalidat",
+      "unnecessary.*invalidat",
+      "just.*cache_set"
+    ],
+    "ground_truth_bug": {
+      "type": "ordering_dependency_removed",
+      "location": "service.py::update_record",
+      "invariant": "read_record must return the latest value after update_record",
+      "fix_pattern": "keep invalidate call before set in update_record"
+    },
+    "reference_fix": {
+      "file": "code_snippets_v2/cache_invalidation_order/service.py",
+      "function": "update_record",
+      "diff_summary": "Keep cache_invalidate + cache_set sequence in update_record",
+      "lines_changed": 2
+    },
+    "test_contract": {
+      "setup": "No state to reset",
+      "execution": "update_record twice, then read_record",
+      "assertions": [
+        "read returns 'v2' after two updates"
+      ],
+      "state_reset": [],
+      "retry_notes": "Safe",
+      "failure_surface": "cross_boundary",
+      "retry_failure_modes": []
+    },
+    "expected_regime_hypothesis": {
+      "_note": "HYPOTHESIS",
+      "nano": "CSF",
+      "4o-mini": "CSF",
+      "5-mini": "CSF"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "ordering_dependency_removed",
+      "bug_location": "service.py::update_record",
+      "mechanism_source": "cache invalidation is removed before setting a new value in update_record",
+      "mechanism_property": "ordering between invalidation and set operations is required for correct cache versioning",
+      "mechanism_steps": [
+        "update_record invalidates cache which updates versioning state",
+        "update_record sets a new cache value based on version",
+        "removal of invalidation prevents version update",
+        "conditional cache set does not take effect",
+        "subsequent reads return stale cached data"
+      ],
+      "mechanism_outcome": "cache does not reflect updated records and returns stale data",
+      "trap_description": "invalidating before setting appears redundant, masking that it drives version tracking required by the cache write"
+    },
+    "symptom": "stale cache: after update to 'v2', read returned 'v1'; version protocol: stale conditional_set succeeded (ver=0), read='stale_write'. cache_invalidate in update_record is missing or broken — version was not reset between capture and conditional_set.; anti-hardcoding: k5 after update='12345'",
+    "buggy_file": "from db import db_write, db_read\nfrom cache import cache_set, cache_get, cache_invalidate, cache_get_version, cache_conditional_set\n\n\ndef update_record(key, value):\n    db_write(\"records\", key, value)\n\n\ndef read_record(key):\n    cached = cache_get(key)\n    if cached is not None:\n        return cached\n    val = db_read(\"records\", key)\n    if val is not None:\n        cache_set(key, val)\n    return val\n\n\ndef safe_update(key, value):\n    ver = cache_get_version(key)\n    db_write(\"records\", key, value)\n    cache_conditional_set(key, value, ver)\n\n\ndef delete_record(key):\n    db_write(\"records\", key, None)\n    cache_invalidate(key)\n",
+    "fixed_file": "from db import db_write, db_read\nfrom cache import cache_set, cache_get, cache_invalidate, cache_get_version, cache_conditional_set\n\n\ndef update_record(key, value):\n    ver = cache_get_version(key)\n    db_write(\"records\", key, value)\n    cache_invalidate(key)\n    cache_set(key, value, version=ver + 1)\n\n\ndef read_record(key):\n    cached = cache_get(key)\n    if cached is not None:\n        return cached\n    val = db_read(\"records\", key)\n    if val is not None:\n        cache_set(key, val)\n    return val\n\n\ndef safe_update(key, value):\n    ver = cache_get_version(key)\n    db_write(\"records\", key, value)\n    cache_conditional_set(key, value, ver)\n\n\ndef delete_record(key):\n    db_write(\"records\", key, None)\n    cache_invalidate(key)\n",
+    "enriched_task_prompt": "After removing what appeared to be a redundant cache invalidation step from update_record, reads return stale data and the version-tracking protocol is broken. Restore the correct cache update sequence. The system spans service.py, cache.py, db.py, and api.py.",
+    "enriched_task_prompt_justification": "OLD TASK: 'Remove the unnecessary cache invalidation step' — adversarial, told model to introduce the bug. SYMPTOM: 'stale cache after update; version protocol: stale conditional_set succeeded'. INCLUDED: that the invalidation was removed and it broke things, the version protocol symptom. This case is unusual — the task must be honest that a removal caused the bug. WITHHELD: exactly why invalidate-before-set matters (versioning mechanism). DIFFICULTY: C — the model must understand the version-tracking protocol."
+  },
+  {
+    "id": "check_then_act",
+    "family": "check_then_act",
+    "template": "concurrency",
+    "difficulty": "C",
+    "failure_mode": "RACE_CONDITION",
+    "bug_pattern_class": "edge_case_omission",
+    "bug_pattern_secondary": null,
+    "boundary_type": "local",
+    "boundary_group": "local",
+    "temporal_depth": "multi_step",
+    "statefulness": "stateful",
+    "causal_depth": "L2",
+    "description": "Non-atomic check-then-act. Two interleaved withdrawals both pass the balance check before either debits.",
+    "task": "Under interleaving, two withdrawals of 80 from balance=100 both succeed, leaving -60. Fix so balance never goes negative.",
+    "trap": "Lock only the check — both checks still pass",
+    "code_files": [
+      "code_snippets_v2/check_then_act/bank.py"
+    ],
+    "hard_constraints": [],
+    "positive_signals": [],
+    "negative_signals": [],
+    "ground_truth_bug": {
+      "type": "non_atomic_check_then_act",
+      "location": "bank.py::make_withdraw_steps",
+      "invariant": "balance >= 0 at all times",
+      "fix_pattern": "combine check+act into single atomic step"
+    },
+    "reference_fix": {
+      "file": "code_snippets_v2/check_then_act/bank.py",
+      "function": "make_withdraw_steps",
+      "diff_summary": "Combine check+act into single atomic step",
+      "lines_changed": 5
+    },
+    "test_contract": {
+      "setup": "reset()",
+      "execution": "sequential_withdrawals + interleaved_withdrawals",
+      "assertions": [
+        "balance=20 in both cases"
+      ],
+      "state_reset": [
+        "mod.reset()"
+      ],
+      "retry_notes": "Safe",
+      "failure_surface": "stateful",
+      "retry_failure_modes": [
+        "state_leakage"
+      ]
+    },
+    "expected_regime_hypothesis": {
+      "_note": "HYPOTHESIS",
+      "nano": "CSF",
+      "4o-mini": "REI",
+      "5-mini": "CSF"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "non_atomic_check_then_act",
+      "bug_location": "bank.py::make_withdraw_steps",
+      "mechanism_source": "balance validation and debit are performed as separate non-atomic steps",
+      "mechanism_property": "validation and state update must execute atomically when enforcing constraints",
+      "mechanism_steps": [
+        "withdraw checks that balance is sufficient",
+        "withdraw performs debit in a later step",
+        "concurrent withdrawals both pass the check before either updates balance",
+        "both debits execute on stale validated state"
+      ],
+      "mechanism_outcome": "account balance becomes negative despite validation",
+      "trap_description": "locking only the validation step appears to enforce safety but does not prevent stale validation under concurrency"
+    },
+    "symptom": "interleaved: balance went negative (-60)",
+    "buggy_file": "\n\n_accounts = {}\n\n\ndef reset():\n    _accounts.clear()\n\n\ndef create_account(name, balance):\n    _accounts[name] = balance\n\n\ndef get_balance(name):\n    return _accounts.get(name, 0)\n\n\ndef check_balance(name, amount):\n    return _accounts.get(name, 0) >= amount\n\n\ndef do_withdraw(name, amount):\n    _accounts[name] = _accounts.get(name, 0) - amount\n\n\ndef run_steps(steps):\n    results = []\n    for fn, args in steps:\n        results.append(fn(*args))\n    return results\n\n\ndef make_withdraw_steps(name, amount):\n    result = {\"approved\": False}\n\n    def step_check():\n        result[\"approved\"] = check_balance(name, amount)\n        return (\"check\", result[\"approved\"])\n\n    def step_act():\n        if result[\"approved\"]:\n            do_withdraw(name, amount)\n        return (\"act\", result[\"approved\"])\n\n    return step_check, step_act\n\n\ndef sequential_withdrawals():\n    reset()\n    create_account(\"alice\", 100)\n    check_a, act_a = make_withdraw_steps(\"alice\", 80)\n    check_b, act_b = make_withdraw_steps(\"alice\", 80)\n    run_steps([(check_a, ()), (act_a, ()), (check_b, ()), (act_b, ())])\n    return get_balance(\"alice\")\n\n\ndef interleaved_withdrawals():\n    reset()\n    create_account(\"alice\", 100)\n    check_a, act_a = make_withdraw_steps(\"alice\", 80)\n    check_b, act_b = make_withdraw_steps(\"alice\", 80)\n    run_steps([(check_a, ()), (check_b, ()), (act_a, ()), (act_b, ())])\n    return get_balance(\"alice\")\n",
+    "fixed_file": "\"\"\"Bank with atomic check-then-act — fixes overdraft under interleaving.\"\"\"\n\n_accounts = {}\n\n\ndef reset():\n    _accounts.clear()\n\n\ndef create_account(name, balance):\n    _accounts[name] = balance\n\n\ndef get_balance(name):\n    return _accounts.get(name, 0)\n\n\ndef check_balance(name, amount):\n    return _accounts.get(name, 0) >= amount\n\n\ndef do_withdraw(name, amount):\n    _accounts[name] = _accounts.get(name, 0) - amount\n\n\ndef run_steps(steps):\n    results = []\n    for fn, args in steps:\n        results.append(fn(*args))\n    return results\n\n\ndef make_withdraw_steps(name, amount):\n    \"\"\"FIX: check+act combined into a single atomic step.\n\n    The act re-checks balance before debiting, preventing overdraft\n    even under interleaving.\n    \"\"\"\n    result = {\"approved\": False}\n\n    def step_check_and_act():\n        \"\"\"Atomic check-then-act: re-verify balance at debit time.\"\"\"\n        if check_balance(name, amount):\n            do_withdraw(name, amount)\n            result[\"approved\"] = True\n        else:\n            result[\"approved\"] = False\n        return (\"check_and_act\", result[\"approved\"])\n\n    def step_noop():\n        return (\"noop\",)\n\n    return step_check_and_act, step_noop\n\n\ndef sequential_withdrawals():\n    reset()\n    create_account(\"alice\", 100)\n    check_a, act_a = make_withdraw_steps(\"alice\", 80)\n    check_b, act_b = make_withdraw_steps(\"alice\", 80)\n    run_steps([(check_a, ()), (act_a, ()), (check_b, ()), (act_b, ())])\n    return get_balance(\"alice\")\n\n\ndef interleaved_withdrawals():\n    reset()\n    create_account(\"alice\", 100)\n    check_a, act_a = make_withdraw_steps(\"alice\", 80)\n    check_b, act_b = make_withdraw_steps(\"alice\", 80)\n    run_steps([(check_a, ()), (check_b, ()), (act_a, ()), (act_b, ())])\n    return get_balance(\"alice\")\n",
+    "enriched_task_prompt": "Under concurrent interleaving, two withdrawals from the same account both succeed even when the combined amount exceeds the balance, resulting in a negative balance. Fix the withdrawal logic so the balance cannot go negative under any interleaving.",
+    "enriched_task_prompt_justification": "OLD TASK: gave exact scenario — appropriate for concurrency. SYMPTOM: 'interleaved: balance went negative (-60)'. INCLUDED: the interleaving scenario and the invariant (non-negative balance). WITHHELD: the check-then-act pattern name, the specific atomicity fix. DIFFICULTY: C — concurrency case, the trap is partial locking."
+  },
+  {
+    "id": "commit_gate",
+    "family": "commit_gate",
+    "template": "commit_gate",
+    "difficulty": "L3",
+    "failure_mode": "INVARIANT_VIOLATION",
+    "bug_pattern_class": "partial_state_update",
+    "bug_pattern_secondary": "hidden_dependency",
+    "boundary_type": "cross_boundary",
+    "boundary_group": "cross_boundary",
+    "temporal_depth": "multi_step",
+    "statefulness": "stateful",
+    "causal_depth": "L3",
+    "description": "Pipeline had commit() and freeze_view() removed as redundant. Both are independently necessary: commit for frozen gate, freeze_view for view-committed consistency.",
+    "task": "After simplifying the pipeline by removing commit() and freeze_view(), the system is broken. Restore the necessary steps. Return the updated code.",
+    "trap": "Restore only commit — passes total check but fails consistency check",
+    "code_files": [
+      "code_snippets_v2/commit_gate/state.py",
+      "code_snippets_v2/commit_gate/reducers.py",
+      "code_snippets_v2/commit_gate/selectors.py",
+      "code_snippets_v2/commit_gate/pipeline.py",
+      "code_snippets_v2/commit_gate/api.py"
+    ],
+    "hard_constraints": [],
+    "positive_signals": [],
+    "negative_signals": [],
+    "ground_truth_bug": {
+      "type": "absent_causally_necessary_steps",
+      "location": "pipeline.py::process_batch",
+      "invariant": "commit sets frozen gate for selectors; freeze_view rebuilds view from sorted stable for consistency",
+      "fix_pattern": "restore commit(st) and freeze_view(st) in process_batch"
+    },
+    "reference_fix": {
+      "file": "code_snippets_v2/commit_gate/pipeline.py",
+      "function": "process_batch",
+      "diff_summary": "Restore commit(st) and freeze_view(st) calls",
+      "lines_changed": 2
+    },
+    "test_contract": {
+      "setup": "No module state to reset",
+      "execution": "Call ingest, ingest_and_verify, preview",
+      "assertions": [
+        "total not null",
+        "view consistent with committed",
+        "preview not frozen"
+      ],
+      "state_reset": [],
+      "retry_notes": "Safe — each call creates fresh state",
+      "failure_surface": "cross_boundary",
+      "retry_failure_modes": []
+    },
+    "expected_regime_hypothesis": {
+      "_note": "HYPOTHESIS ONLY",
+      "nano": "CSF",
+      "4o-mini": "CSF",
+      "5-mini": "CSF"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "absent_causally_necessary_steps",
+      "bug_location": "pipeline.py::process_batch",
+      "mechanism_source": "commit and freeze_view steps are removed, eliminating required state transitions",
+      "mechanism_property": "distinct pipeline stages encode separate state guarantees required by downstream logic",
+      "mechanism_steps": [
+        "commit establishes a finalized state used by gated selectors",
+        "freeze_view rebuilds a consistent view from stable state",
+        "removing both steps skips required transitions",
+        "downstream components operate on incomplete or inconsistent state"
+      ],
+      "mechanism_outcome": "computed totals and views do not reflect the intended committed state",
+      "trap_description": "restoring only one of the removed steps appears sufficient but fails to reestablish all required state guarantees"
+    },
+    "symptom": "committed total is null",
+    "buggy_file": "from state import make_state\nfrom reducers import normalize, collapse, stage, commit, freeze_view, materialize\n\n\ndef process_batch(entries):\n    st = make_state(entries)\n    cleaned = normalize(st[\"raw\"])\n    merged = collapse(cleaned)\n    stage(st, merged)\n    # commit(st)       — removed as \"redundant\"\n    # freeze_view(st)  — removed as \"redundant\"\n    return st, materialize(st)\n",
+    "fixed_file": "from state import make_state\nfrom reducers import normalize, collapse, stage, commit, freeze_view, materialize\n\n\ndef process_batch(entries):\n    st = make_state(entries)\n    cleaned = normalize(st[\"raw\"])\n    merged = collapse(cleaned)\n    stage(st, merged)\n    commit(st)  # FIX: restored — sets frozen gate + sorts into stable\n    freeze_view(st)  # FIX: restored — rebuilds view from committed stable\n    return st, materialize(st)\n",
+    "enriched_task_prompt": "After simplifying the pipeline by removing steps that appeared redundant, the committed total is null and the view does not reflect the committed data. The system spans pipeline.py, state.py, reducers.py, selectors.py, and api.py. Restore the pipeline steps necessary for correct state transitions.",
+    "enriched_task_prompt_justification": "OLD TASK: 'Restore the necessary steps' — honest framing. V2 ISSUE: did not mention the five files, reducing the cross-file search aspect. SYMPTOM: 'committed total is null'. INCLUDED: that steps were removed, two broken invariants (total + view), five files. WITHHELD: which functions (commit, freeze_view), why they're independently necessary. CAUSAL AMBIGUITY: with five files, the model must determine which file(s) need changes and which steps were removed. DIFFICULTY: L3 — the trap is restoring only one of the two functions."
+  }
+]

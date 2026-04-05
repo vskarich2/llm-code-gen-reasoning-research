@@ -13,7 +13,6 @@ def authenticate(request):
     if not is_valid_role(role):
         return {"role": role, "allowed": False, "reason": "unknown_role"}
 
-    # Middleware correctly recognizes service_account
     if role in ("admin", "service_account", "moderator"):
         return {"role": role, "allowed": True, "elevated": True}
     elif role in ("user", "guest"):

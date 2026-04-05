@@ -1,4 +1,4 @@
-"""Bank with non-atomic check-then-act withdrawal, simulated via steps."""
+
 
 _accounts = {}
 
@@ -16,12 +16,10 @@ def get_balance(name):
 
 
 def check_balance(name, amount):
-    """CHECK: is balance sufficient?"""
     return _accounts.get(name, 0) >= amount
 
 
 def do_withdraw(name, amount):
-    """ACT: decrement balance. Assumes caller verified."""
     _accounts[name] = _accounts.get(name, 0) - amount
 
 
@@ -33,10 +31,6 @@ def run_steps(steps):
 
 
 def make_withdraw_steps(name, amount):
-    """Split withdrawal into separate check and act steps.
-
-    BUG: under interleaving, both checks pass before either debits.
-    """
     result = {"approved": False}
 
     def step_check():
@@ -52,7 +46,6 @@ def make_withdraw_steps(name, amount):
 
 
 def sequential_withdrawals():
-    """Two withdrawals of 80 from balance=100. Sequential: second denied."""
     reset()
     create_account("alice", 100)
     check_a, act_a = make_withdraw_steps("alice", 80)
@@ -62,7 +55,6 @@ def sequential_withdrawals():
 
 
 def interleaved_withdrawals():
-    """Two withdrawals of 80, interleaved: BUG — both approved, overdraft."""
     reset()
     create_account("alice", 100)
     check_a, act_a = make_withdraw_steps("alice", 80)

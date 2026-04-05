@@ -18,7 +18,7 @@ HARDCODED_DEFAULTS = {
 
 # Maps flag names to their env var keys
 _ENV_KEY_MAP = {
-    "dark_mode": "FEATURE_DARKMODE",       # BUG: should be "FEATURE_DARK_MODE"
+    "dark_mode": "FEATURE_DARKMODE",
     "beta": "FEATURE_BETA",
     "analytics": "FEATURE_ANALYTICS",
 }

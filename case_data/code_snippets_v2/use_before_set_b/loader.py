@@ -16,8 +16,6 @@ def load(source):
     if source and len(source) > 0:
         _data = [x for x in source]
         _status = "loaded"
-    # BUG: on empty/None source, _status stays at previous value
-    # instead of being set to "empty"
     return _data
 
 
@@ -30,7 +28,6 @@ def get_data():
 
 
 def validate_format(data):
-    """Distractor: checks case_data format, unrelated to bug."""
     if data is None:
         return False
     return isinstance(data, list)

@@ -1,0 +1,213 @@
+{
+    "id": "deferred_commit_selector_split_a",
+    "family": "deferred_commit_selector_split",
+    "template": "misleading_local_fix",
+    "difficulty": "A",
+    "failure_mode": "TEMPORAL_DRIFT",
+    "bug_pattern_class": "representation_mismatch",
+    "bug_pattern_secondary": "identity_resolution_error",
+    "boundary_type": "local",
+    "boundary_group": "selector_processor_committer",
+    "temporal_depth": "single_step",
+    "statefulness": "stateless",
+    "causal_depth": "L2",
+
+    "description": "A small pipeline selects a candidate, applies a transformation that can change ordering, and commits a result. Under certain inputs, the committed candidate does not correspond to the one originally selected.",
+
+    "task": "A system selects the best candidate based on score, then applies a transformation before committing the result. In some cases, the committed candidate does not correspond to the originally selected candidate.\n\nRefactor the implementation so that the committed result always corresponds to the selected candidate, without introducing a second selection step.",
+
+    "trap": "A tempting fix is to recompute the best candidate after processing using the transformed scores. This appears to work for many inputs because it aligns commit with the new ranking, but it violates the requirement that the pipeline must commit the originally selected candidate and fails when the selected candidate is no longer top-ranked after processing.",
+
+    "code_files": [
+      {
+        "path": "pipeline.py",
+        "content": "def choose_best(candidates):\n    winner = max(candidates, key=lambda c: c['score'])\n    return {\n        'selected_id': winner['id'],\n        'selected_index': candidates.index(winner)\n    }\n\n\ndef process(candidates):\n    # Transformation that can reorder ranking\n    return [\n        {\n            'id': c['id'],\n            'score': c['score'] - c['penalty'],\n            'penalty': c['penalty']\n        }\n        for c in candidates\n    ]\n\n\ndef commit(candidates, selection):\n    # BUG: uses stale index from pre-processed ordering\n    return candidates[selection['selected_index']]\n\n\ndef run(candidates):\n    selection = choose_best(candidates)\n    processed = process(candidates)\n    result = commit(processed, selection)\n    return selection, result\n"
+      }
+    ],
+
+    "hard_constraints": [
+      "Do not add a second selection step.",
+      "Preserve processing behavior.",
+      "The committed result must correspond to the selected candidate by id."
+    ],
+
+    "positive_signals": [
+      "Selection returns the correct candidate before processing.",
+      "Processing can change candidate ordering.",
+      "Mismatch appears only after processing.",
+      "The pipeline is deterministic."
+    ],
+
+    "negative_signals": [
+      "Selection logic is correct.",
+      "Processing logic is correct.",
+      "The issue is not due to mutation of candidate data."
+    ],
+
+    "ground_truth_bug": {
+      "type": "stale_index_identity_resolution",
+      "location": "pipeline.py::commit",
+      "invariant": "Committed candidate id must equal selected_id.",
+      "fix_pattern": "Resolve candidate by id instead of positional index"
+    },
+
+    "reference_fix": {
+      "file": "pipeline.py",
+      "function": "commit",
+      "diff_summary": "Replace index-based lookup with id-based lookup",
+      "lines_changed": 4
+    },
+
+    "test_contract": {
+      "setup": "Use candidates where processing changes ranking order.",
+      "execution": "Run pipeline and compare selected_id vs committed id.",
+      "assertions": [
+        "result['id'] == selection['selected_id']"
+      ],
+      "state_reset": [],
+      "retry_notes": "Incorrect fixes that re-select after processing will pass when ranking remains unchanged but fail when ranking changes.",
+      "failure_surface": "Selected id differs from committed id.",
+      "retry_failure_modes": [
+        "Re-selecting after processing",
+        "Using max() on processed candidates",
+        "Relying on positional index"
+      ]
+    },
+
+    "oracle_ground_truth": {
+      "bug_type": "identity_mismatch_due_to_stale_index",
+      "bug_location": "pipeline.py::commit",
+      "mechanism_source": "selection stores index from pre-processed list",
+      "mechanism_property": "processing reorders candidates",
+      "mechanism_steps": [
+        "selection picks candidate and stores index",
+        "processing changes ordering",
+        "commit uses stale index",
+        "wrong candidate is returned"
+      ],
+      "mechanism_outcome": "committed candidate differs from selected candidate",
+      "trap_description": "re-selection aligns with new ranking but violates original selection semantics"
+    },
+
+    "symptom": "Selected candidate id differs from committed candidate id after processing.",
+
+    "buggy_file": "def commit(candidates, selection):\n    return candidates[selection['selected_index']]\n",
+
+    "fixed_file": "def commit(candidates, selection):\n    for c in candidates:\n        if c['id'] == selection['selected_id']:\n            return c\n    raise KeyError(selection['selected_id'])\n"
+  },
+
+  {
+    "id": "deferred_commit_selector_split_b",
+    "family": "deferred_commit_selector_split",
+    "template": "competing_hypothesis",
+    "difficulty": "B",
+    "failure_mode": "TEMPORAL_DRIFT",
+    "bug_pattern_class": "cross_stage_dependency",
+    "bug_pattern_secondary": "representation_drift",
+    "boundary_type": "cross_function",
+    "boundary_group": "selector_snapshot_normalizer_committer",
+    "temporal_depth": "multi_step",
+    "statefulness": "stateless",
+    "causal_depth": "L2",
+
+    "description": "A pipeline selects a candidate, snapshots candidates into a new representation, applies normalization that can reorder them, and commits a result. Under certain inputs, the committed result does not correspond to the originally selected candidate due to cross-stage identity drift.",
+
+    "task": "A system selects a candidate, snapshots all candidates, applies normalization, and commits a result. In some cases, the committed result does not correspond to the selected candidate.\n\nNo single stage appears obviously incorrect in isolation. Identify and fix the root cause so that the committed result always reflects the originally selected candidate.",
+
+    "trap": "The mismatch appears after normalization, making it tempting to fix normalization or re-select the best normalized candidate. These fixes often produce correct outputs when the selected candidate remains top-ranked after normalization, but fail when ranking changes and violate the requirement to preserve the original selection.",
+
+    "code_files": [
+      {
+        "path": "selector.py",
+        "content": "def choose_best(candidates):\n    winner = max(candidates, key=lambda c: c['score'])\n    return {\n        'selected_id': winner['id'],\n        'selected_index': candidates.index(winner)\n    }\n"
+      },
+      {
+        "path": "snapshot_store.py",
+        "content": "def snapshot(candidates):\n    # Snapshot encodes identity differently\n    return [\n        {\n            'snapshot_id': i,\n            'origin_ref': f\"user::{c['id']}\",\n            'score': c['score'],\n            'penalty': c['penalty']\n        }\n        for i, c in enumerate(candidates)\n    ]\n"
+      },
+      {
+        "path": "normalizer.py",
+        "content": "def normalize(candidates):\n    finalized = [\n        {\n            'origin_ref': c['origin_ref'],\n            'final_score': c['score'] - c['penalty']\n        }\n        for c in candidates\n    ]\n    return sorted(finalized, key=lambda c: -c['final_score'])\n"
+      },
+      {
+        "path": "committer.py",
+        "content": "def commit(candidates, selection):\n    # BUG: uses stale index and ignores representation change\n    return candidates[selection['selected_index']]\n"
+      },
+      {
+        "path": "pipeline.py",
+        "content": "from selector import choose_best\nfrom snapshot_store import snapshot\nfrom normalizer import normalize\nfrom committer import commit\n\n\ndef extract_id(origin_ref):\n    return origin_ref.split(\"::\")[1]\n\n\ndef run(candidates):\n    selection = choose_best(candidates)\n    snaps = snapshot(candidates)\n    finalized = normalize(snaps)\n    result = commit(finalized, selection)\n    return selection, result\n"
+      }
+    ],
+
+    "hard_constraints": [
+      "Do not add re-selection after normalization.",
+      "Preserve snapshot and normalization stages.",
+      "Committed result must match selected candidate by id."
+    ],
+
+    "positive_signals": [
+      "Selection is correct on raw candidates.",
+      "Snapshot introduces a new identity representation.",
+      "Normalization reorders candidates.",
+      "Mismatch appears only after full pipeline execution."
+    ],
+
+    "negative_signals": [
+      "Selection is not the source of the bug.",
+      "Normalization logic is correct.",
+      "Snapshot correctly preserves identity information, though in a different form."
+    ],
+
+    "ground_truth_bug": {
+      "type": "cross_stage_identity_resolution_failure",
+      "location": "committer.py::commit",
+      "invariant": "Committed origin id must equal selected_id.",
+      "fix_pattern": "Resolve identity across representation boundary instead of using stale positional index"
+    },
+
+    "reference_fix": {
+      "file": "committer.py",
+      "function": "commit",
+      "diff_summary": "Replace index-based lookup with resolution using origin_ref and id extraction",
+      "lines_changed": 6
+    },
+
+    "test_contract": {
+      "setup": "Use candidates where normalization changes ranking order.",
+      "execution": "Run full pipeline and compare selected_id vs extracted committed id.",
+      "assertions": [
+        "result['origin_ref'].split('::')[1] == selection['selected_id']"
+      ],
+      "state_reset": [],
+      "retry_notes": "Incorrect fixes pass when ranking is unchanged but fail when normalization reorders candidates.",
+      "failure_surface": "Committed result corresponds to a different candidate than selected.",
+      "retry_failure_modes": [
+        "Re-selecting after normalization",
+        "Fixing normalization instead of identity resolution",
+        "Using positional index"
+      ]
+    },
+
+    "oracle_ground_truth": {
+      "bug_type": "cross_stage_identity_mismatch",
+      "bug_location": "committer.py::commit",
+      "mechanism_source": "selection stores index in original representation",
+      "mechanism_property": "snapshot changes identity representation and normalization reorders candidates",
+      "mechanism_steps": [
+        "selection stores index",
+        "snapshot encodes identity differently",
+        "normalization reorders candidates",
+        "commit uses stale index without resolving identity",
+        "wrong candidate is committed"
+      ],
+      "mechanism_outcome": "committed candidate differs from selected candidate",
+      "trap_description": "re-selection or normalization fixes align outputs but violate original selection semantics"
+    },
+
+    "symptom": "Committed result does not match the originally selected candidate after normalization.",
+
+    "buggy_file": "def commit(candidates, selection):\n    return candidates[selection['selected_index']]\n",
+
+    "fixed_file": "def commit(candidates, selection):\n    for c in candidates:\n        if c['origin_ref'].split('::')[1] == selection['selected_id']:\n            return c\n    raise KeyError(selection['selected_id'])\n"
+  }
+]

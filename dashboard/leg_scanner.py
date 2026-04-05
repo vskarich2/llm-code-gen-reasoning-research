@@ -109,28 +109,59 @@ def _resolve_attempt_paths(
     """Resolve artifact file paths for one attempt within a retry chain.
 
     Retry workers: all attempts in attempt_001/calls_flat/.
-    Each attempt = generation + classification pair.
-    Generation for trajectory_idx N is at file index (N*2 + 1).
+    File ordering varies (oracle/critique calls interleaved),
+    so we scan by suffix rather than computing indices.
+
+    Layout for a 2-attempt critique retry:
+      000001_generation.txt      ← att 0 gen
+      000002_oracle_eval.txt     ← att 0 oracle
+      000003_classification.txt  ← att 0 classifier
+      000004_classification.txt  ← att 0 critique (between attempts)
+      000005_generation.txt      ← att 1 gen
+      000006_oracle_eval.txt     ← att 1 oracle
+      000007_classification.txt  ← att 1 classifier
     """
     calls_dir = (
         log_dir / "workers" / work_id
         / f"attempt_{event_attempt:03d}" / "calls_flat"
     )
-    gen_idx = trajectory_idx * 2 + 1
-    cls_idx = trajectory_idx * 2 + 2
-    gen_file = calls_dir / f"{gen_idx:06d}_generation.txt"
-    cls_file = calls_dir / f"{cls_idx:06d}_classification.txt"
 
-    if not cls_file.exists() and calls_dir.exists():
-        cls_candidates = sorted(calls_dir.glob("*_classification.txt"))
-        if cls_candidates and trajectory_idx == n_attempts - 1:
-            cls_file = cls_candidates[-1]
+    gen_file = Path("/dev/null")
+    cls_file = Path("/dev/null")
+    critique_file = Path("/dev/null")
+
+    if calls_dir.exists():
+        gen_files = sorted(calls_dir.glob("*_generation.txt"))
+        cls_files = sorted(calls_dir.glob("*_classification.txt"))
+
+        if trajectory_idx < len(gen_files):
+            gen_file = gen_files[trajectory_idx]
+
+        # Find the upper bound: the next generation file (if any)
+        next_gen_num = "999999"
+        if trajectory_idx + 1 < len(gen_files):
+            next_gen_num = gen_files[trajectory_idx + 1].name.split("_")[0]
+
+        # Classification files between this gen and next gen:
+        # first one = classifier, second one = critique
+        if gen_file.exists() and cls_files:
+            gen_num = gen_file.name.split("_")[0]
+            matching_cls = []
+            for cf in cls_files:
+                cf_num = cf.name.split("_")[0]
+                if cf_num > gen_num and cf_num < next_gen_num:
+                    matching_cls.append(cf)
+            if matching_cls:
+                cls_file = matching_cls[0]
+            if len(matching_cls) > 1:
+                critique_file = matching_cls[1]
 
     return {
         "worker_dir": str(log_dir / "workers" / work_id),
         "prompt_path": str(gen_file) if gen_file.exists() else None,
         "response_path": str(gen_file) if gen_file.exists() else None,
         "classify_path": str(cls_file) if cls_file.exists() else None,
+        "critique_path": str(critique_file) if critique_file.exists() else None,
         "artifact_status": "ok" if gen_file.exists() else "missing",
     }
 
@@ -205,23 +236,42 @@ def build_attempt_table(
 
                 row = dict(base_row)
                 # Override with per-attempt values
+                t_exec = t_entry.get("execution", {})
                 row["attempt_idx"] = t_idx
-                row["exec_pass"] = bool(t_entry.get("pass", False))
-                row["score"] = t_entry.get("score")
+                row["exec_pass"] = t_exec.get("pass", False)
+                row["score"] = t_exec.get("score")
+                row["exec_category"] = t_exec.get("execution_category")
                 row["tests_passed"] = None
                 row["tests_total"] = None
                 row["runtime_ms"] = None
-                row["exec_category"] = None
 
-                # Reasoning only on final attempt
+                # Per-attempt oracle
+                t_oracle = t_entry.get("oracle", {})
+                row["oracle_reasoning_truth"] = t_oracle.get("reasoning_truth")
+                row["oracle_correct"] = t_oracle.get("oracle_correct")
+                row["oracle_status"] = t_oracle.get("status")
+
+                # Per-attempt classifier
+                t_cls = t_entry.get("classifier", {})
+                row["classifier_mechanism"] = t_cls.get("mechanism_identified")
+                row["classifier_commitments_satisfied"] = t_cls.get("commitments_satisfied")
+                row["classifier_ric"] = t_cls.get("reasoning_internal_consistency")
+                row["classifier_ccc"] = t_cls.get("commitments_code_consistency")
+
+                # Per-attempt AST
+                t_ast = t_entry.get("ast", {})
+                row["ast_status"] = t_ast.get("status")
+                row["ast_correct"] = t_ast.get("ast_correct")
+
+                # Per-attempt disagreement
+                t_dis = t_entry.get("reasoning_disagreement", {})
+                row["reasoning_disagreement_type"] = t_dis.get("type")
+
+                # Reasoning fields on all attempts (not just final)
                 if not is_final:
-                    row["reasoning_correct"] = None
+                    row["reasoning_correct"] = t_oracle.get("oracle_correct")
                     row["mechanism_label"] = None
                     row["confidence"] = None
-                    row["mechanism_dim"] = None
-                    row["commitments_dim"] = None
-                    row["satisfied_dim"] = None
-                    row["alignment_dim"] = None
 
                 # Retry metadata
                 row["is_final_attempt"] = is_final
@@ -232,6 +282,7 @@ def build_attempt_table(
                     "had_test_feedback", False
                 )
                 row["code_length"] = t_entry.get("code_length")
+                row["attempt_status"] = t_entry.get("status", "UNKNOWN")
 
                 row.update(paths)
                 rows.append(row)

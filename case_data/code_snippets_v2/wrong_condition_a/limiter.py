@@ -11,9 +11,6 @@ def is_rate_limited(count, limit):
     Returns:
         True if the caller should be blocked, False if allowed.
     """
-    # BUG: uses > instead of >=. Allows exactly limit requests
-    # when it should allow limit-1 (0-indexed count starts at 0,
-    # so count==limit means limit+1 requests have been made).
     return count > limit
 
 
