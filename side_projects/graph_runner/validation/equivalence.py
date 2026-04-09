@@ -33,8 +33,9 @@ from side_projects.graph_runner.constants import (
     KEY_SPEC_ORACLE_RESULT,
 )
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-CASE_DATA = PROJECT_ROOT / "case_data"
+from core.utils.paths import get_case_data_dir, get_reference_fixes_dir
+
+CASE_DATA = get_case_data_dir()
 
 
 # ============================================================

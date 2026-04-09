@@ -5,10 +5,6 @@ Run: .venv/bin/python -m pytest core/tests/integration/test_adapter_isolation.py
 
 from __future__ import annotations
 
-import sys
-
-sys.path.insert(0, ".")
-
 import pytest
 
 from side_projects.graph_runner.replay.adapter import (
@@ -16,15 +12,13 @@ from side_projects.graph_runner.replay.adapter import (
     LLMRequest,
     LLMResponse,
     ReplayAdapter,
-    get_active_adapter,
-    install_adapter,
     InteractionRecord,
+    compute_composite_key,
+    get_active_adapter,
 )
 
 
 class StubAdapter:
-    """Minimal adapter for isolation testing."""
-
     def __init__(self) -> None:
         self.call_count = 0
 
@@ -35,82 +29,107 @@ class StubAdapter:
 
 class TestAdapterContextManager:
 
-    def test_context_installs_and_restores(self) -> None:
+    def test_installs_and_restores(self) -> None:
         assert get_active_adapter() is None
         stub = StubAdapter()
         with AdapterContext(stub):
             assert get_active_adapter() is stub
         assert get_active_adapter() is None
 
-    def test_context_restores_on_exception(self) -> None:
+    def test_restores_on_exception(self) -> None:
         assert get_active_adapter() is None
-        stub = StubAdapter()
         with pytest.raises(ValueError):
-            with AdapterContext(stub):
-                assert get_active_adapter() is stub
+            with AdapterContext(StubAdapter()):
                 raise ValueError("boom")
         assert get_active_adapter() is None
 
     def test_nested_contexts(self) -> None:
-        stub1 = StubAdapter()
-        stub2 = StubAdapter()
-        with AdapterContext(stub1):
-            assert get_active_adapter() is stub1
-            with AdapterContext(stub2):
-                assert get_active_adapter() is stub2
-            assert get_active_adapter() is stub1
+        s1, s2 = StubAdapter(), StubAdapter()
+        with AdapterContext(s1):
+            assert get_active_adapter() is s1
+            with AdapterContext(s2):
+                assert get_active_adapter() is s2
+            assert get_active_adapter() is s1
         assert get_active_adapter() is None
 
 
 class TestAdapterIsolationAcrossTests:
 
-    def test_no_adapter_at_start(self) -> None:
-        """Adapter must be None at test start."""
+    def test_none_at_start(self) -> None:
         assert get_active_adapter() is None
 
-    def test_adapter_does_not_leak(self) -> None:
-        """After context exits, adapter is None."""
-        stub = StubAdapter()
-        with AdapterContext(stub):
-            resp = stub.call(LLMRequest(model="m", prompt="p"))
-            assert resp.text == "stub"
+    def test_does_not_leak(self) -> None:
+        with AdapterContext(StubAdapter()):
+            pass
         assert get_active_adapter() is None
 
-    def test_still_none_after_previous_test(self) -> None:
-        """Prove previous test did not leak state."""
+    def test_still_none(self) -> None:
         assert get_active_adapter() is None
 
 
 class TestReplayAdapterFailFast:
 
-    def test_missing_prompt_raises_keyerror(self) -> None:
+    def test_missing_prompt_raises(self) -> None:
         adapter = ReplayAdapter([])
         with pytest.raises(KeyError, match="no recorded response"):
             adapter.call(LLMRequest(model="m", prompt="unknown"))
 
-    def test_exact_match_returns_recorded(self) -> None:
-        import hashlib
-        prompt = "exact prompt text"
+    def test_exact_match(self) -> None:
+        prompt = "exact prompt"
+        req = LLMRequest(model="m", prompt=prompt)
+        key = compute_composite_key(req)
         rec = InteractionRecord(
-            id="rec1",
-            model="m",
-            prompt=prompt,
-            response="recorded response",
-            prompt_hash=hashlib.sha256(prompt.encode()).hexdigest(),
+            id="r1", model="m", prompt=prompt,
+            response="recorded", composite_key=key,
         )
         adapter = ReplayAdapter([rec])
-        resp = adapter.call(LLMRequest(model="m", prompt=prompt))
-        assert resp.text == "recorded response"
+        resp = adapter.call(req)
+        assert resp.text == "recorded"
 
-    def test_wrong_prompt_raises_even_with_records(self) -> None:
-        import hashlib
+    def test_wrong_prompt_raises(self) -> None:
+        req_correct = LLMRequest(model="m", prompt="correct")
         rec = InteractionRecord(
-            id="rec1",
-            model="m",
-            prompt="correct prompt",
-            response="response",
-            prompt_hash=hashlib.sha256(b"correct prompt").hexdigest(),
+            id="r1", model="m", prompt="correct",
+            response="resp",
+            composite_key=compute_composite_key(req_correct),
         )
         adapter = ReplayAdapter([rec])
         with pytest.raises(KeyError):
-            adapter.call(LLMRequest(model="m", prompt="wrong prompt"))
+            adapter.call(LLMRequest(model="m", prompt="wrong"))
+
+    def test_different_model_no_match(self) -> None:
+        """Same prompt but different model must not match."""
+        prompt = "shared prompt"
+        req_a = LLMRequest(model="model_a", prompt=prompt)
+        rec = InteractionRecord(
+            id="r1", model="model_a", prompt=prompt,
+            response="resp",
+            composite_key=compute_composite_key(req_a),
+        )
+        adapter = ReplayAdapter([rec])
+        with pytest.raises(KeyError):
+            adapter.call(LLMRequest(model="model_b", prompt=prompt))
+
+    def test_duplicate_key_rejected_at_load(self) -> None:
+        req = LLMRequest(model="m", prompt="p")
+        key = compute_composite_key(req)
+        recs = [
+            InteractionRecord(
+                id="r1", model="m", prompt="p",
+                response="a", composite_key=key,
+            ),
+            InteractionRecord(
+                id="r2", model="m", prompt="p",
+                response="b", composite_key=key,
+            ),
+        ]
+        with pytest.raises(ValueError, match="Duplicate composite key"):
+            ReplayAdapter(recs)
+
+
+@pytest.fixture(autouse=True)
+def enforce_no_leak():
+    """Prove adapter never leaks across tests."""
+    assert get_active_adapter() is None
+    yield
+    assert get_active_adapter() is None

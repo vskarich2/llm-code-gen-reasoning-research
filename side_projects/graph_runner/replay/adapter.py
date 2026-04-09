@@ -6,6 +6,8 @@ Protocol:
 Implementations:
     ReplayAdapter — returns recorded responses, no external calls
     RecordingAdapter — wraps a real adapter, records all interactions
+
+Injection uses contextvars (no global mutable state).
 """
 
 from __future__ import annotations
@@ -14,11 +16,14 @@ import hashlib
 import json
 import logging
 import uuid
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 log = logging.getLogger("t3.replay")
+
+COMPOSITE_KEY_SEPARATOR = "|"
 
 
 # ============================================================
@@ -45,7 +50,7 @@ class InteractionRecord:
     model: str
     prompt: str
     response: str
-    prompt_hash: str
+    composite_key: str
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -59,48 +64,78 @@ class LLMAdapter(Protocol):
 
 
 # ============================================================
+# KEY COMPUTATION
+# ============================================================
+
+def compute_composite_key(request: LLMRequest) -> str:
+    """Composite key: hash(model | temperature | top_p | prompt).
+
+    Prevents collisions across different models or sampling parameters.
+    """
+    raw = COMPOSITE_KEY_SEPARATOR.join([
+        request.model,
+        str(request.temperature),
+        str(request.top_p),
+        request.prompt,
+    ])
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def compute_composite_key_from_parts(
+    model: str, prompt: str,
+    temperature: float = 0.0, top_p: float = 1.0,
+) -> str:
+    raw = COMPOSITE_KEY_SEPARATOR.join([
+        model, str(temperature), str(top_p), prompt,
+    ])
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+# ============================================================
 # REPLAY ADAPTER
 # ============================================================
 
 class ReplayAdapter:
-    """Returns recorded responses matched by exact prompt string.
+    """Returns recorded responses matched by composite key.
 
-    If a prompt is not found in the recording, raises KeyError.
-    No external calls. No fallback. No fuzzy matching.
+    Composite key = hash(model | temperature | top_p | prompt).
+    If key not found, raises KeyError. No fallback. No fuzzy matching.
+    Validates uniqueness at load time.
     """
 
     def __init__(self, records: list[InteractionRecord]) -> None:
-        self.by_prompt_hash: dict[str, InteractionRecord] = {}
-        self.by_prompt_exact: dict[str, InteractionRecord] = {}
+        self.by_key: dict[str, InteractionRecord] = {}
         self.call_count = 0
         self.miss_count = 0
 
         for rec in records:
-            self.by_prompt_hash[rec.prompt_hash] = rec
-            self.by_prompt_exact[rec.prompt] = rec
+            if rec.composite_key in self.by_key:
+                raise ValueError(
+                    f"Duplicate composite key in recordings: "
+                    f"{rec.composite_key[:16]} "
+                    f"(model={rec.model})"
+                )
+            self.by_key[rec.composite_key] = rec
 
     def call(self, request: LLMRequest) -> LLMResponse:
         self.call_count += 1
-        prompt_hash = hashlib.sha256(
-            request.prompt.encode(),
-        ).hexdigest()
+        key = compute_composite_key(request)
 
-        rec = self.by_prompt_hash.get(prompt_hash)
-        if rec is None:
-            rec = self.by_prompt_exact.get(request.prompt)
+        rec = self.by_key.get(key)
         if rec is None:
             self.miss_count += 1
             raise KeyError(
-                f"ReplayAdapter: no recorded response for prompt "
-                f"(hash={prompt_hash[:16]}, len={len(request.prompt)}). "
-                f"Searched {len(self.by_prompt_hash)} recordings."
+                f"ReplayAdapter: no recorded response for "
+                f"composite key (key={key[:16]}, "
+                f"model={request.model}, "
+                f"prompt_len={len(request.prompt)}). "
+                f"Searched {len(self.by_key)} recordings."
             )
 
         return LLMResponse(text=rec.response, request_id=rec.id)
 
     @classmethod
     def from_jsonl(cls, path: Path) -> ReplayAdapter:
-        """Load recordings from JSONL file."""
         records = load_recordings(path)
         return cls(records)
 
@@ -128,16 +163,14 @@ class RecordingAdapter:
     def call(self, request: LLMRequest) -> LLMResponse:
         response_text = self.call_fn(request.prompt, request.model)
 
-        prompt_hash = hashlib.sha256(
-            request.prompt.encode(),
-        ).hexdigest()
+        key = compute_composite_key(request)
 
         rec = InteractionRecord(
             id=uuid.uuid4().hex[:16],
             model=request.model,
             prompt=request.prompt,
             response=response_text,
-            prompt_hash=prompt_hash,
+            composite_key=key,
             metadata={
                 "temperature": request.temperature,
                 "top_p": request.top_p,
@@ -151,7 +184,7 @@ class RecordingAdapter:
                 "model": rec.model,
                 "prompt": rec.prompt,
                 "response": rec.response,
-                "prompt_hash": rec.prompt_hash,
+                "composite_key": rec.composite_key,
                 "metadata": rec.metadata,
             }, default=str)
             with open(self.output_path, "a", encoding="utf-8") as f:
@@ -167,7 +200,6 @@ class RecordingAdapter:
 def save_recordings(
     records: list[InteractionRecord], path: Path,
 ) -> None:
-    """Save recordings to JSONL."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         for rec in records:
@@ -176,14 +208,13 @@ def save_recordings(
                 "model": rec.model,
                 "prompt": rec.prompt,
                 "response": rec.response,
-                "prompt_hash": rec.prompt_hash,
+                "composite_key": rec.composite_key,
                 "metadata": rec.metadata,
             }, default=str)
             f.write(line + "\n")
 
 
 def load_recordings(path: Path) -> list[InteractionRecord]:
-    """Load recordings from JSONL."""
     records: list[InteractionRecord] = []
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -196,47 +227,51 @@ def load_recordings(path: Path) -> list[InteractionRecord]:
                 model=data["model"],
                 prompt=data["prompt"],
                 response=data["response"],
-                prompt_hash=data.get("prompt_hash", ""),
+                composite_key=data.get(
+                    "composite_key",
+                    data.get("prompt_hash", ""),
+                ),
                 metadata=data.get("metadata", {}),
             ))
     return records
 
 
 # ============================================================
-# INJECTION HOOK
+# INJECTION VIA CONTEXTVARS (NO GLOBAL MUTABLE STATE)
 # ============================================================
 
-# Module-level adapter slot. When set, call_model uses this
-# instead of making real API calls.
-active_adapter: LLMAdapter | None = None
+_adapter_var: ContextVar[LLMAdapter | None] = ContextVar(
+    "llm_adapter", default=None,
+)
 
 
-def install_adapter(adapter: LLMAdapter | None) -> None:
-    """Install an adapter globally. Set None to restore real calls."""
-    global active_adapter
-    active_adapter = adapter
+def install_adapter(adapter: LLMAdapter | None) -> Token:
+    """Install adapter into context. Returns token for reset."""
+    return _adapter_var.set(adapter)
 
 
 def get_active_adapter() -> LLMAdapter | None:
-    """Return the currently installed adapter, or None."""
-    return active_adapter
+    return _adapter_var.get()
+
+
+def reset_adapter(token: Token) -> None:
+    _adapter_var.reset(token)
 
 
 class AdapterContext:
-    """Context manager for safe adapter installation.
+    """Context manager for safe adapter installation via contextvars.
 
-    Restores the previous adapter on exit, even if an exception occurs.
-    Eliminates global state leak risk across tests.
+    Restores previous value on exit. No global mutable state.
     """
 
     def __init__(self, adapter: LLMAdapter) -> None:
         self.adapter = adapter
-        self.prev: LLMAdapter | None = None
+        self.token: Token | None = None
 
     def __enter__(self) -> LLMAdapter:
-        self.prev = get_active_adapter()
-        install_adapter(self.adapter)
+        self.token = install_adapter(self.adapter)
         return self.adapter
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        install_adapter(self.prev)
+        if self.token is not None:
+            reset_adapter(self.token)

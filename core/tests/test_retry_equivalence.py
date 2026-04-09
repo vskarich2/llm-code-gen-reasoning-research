@@ -1,191 +1,104 @@
-"""Retry equivalence tests: graph retry controller vs legacy retry_v2.
-
-Runs the same mocked LLM responses through both retry backends and
-compares trajectories + final outputs. Any mismatch is a migration bug.
+"""Retry equivalence tests: transitional retry controller vs legacy retry_v2.
 
 Run: .venv/bin/python -m pytest core/tests/test_retry_equivalence.py -v
 """
 
-import json
-import sys
-import time
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from __future__ import annotations
 
-sys.path.insert(0, ".")
+import json
+from unittest.mock import patch, MagicMock
 
 import pytest
 
+from core.constants.pipeline_constants import (
+    BACKEND_GRAPH_V1,
+    BACKEND_LEGACY_V2,
+)
+from core.tests.fixtures.pipeline_fixtures import (
+    build_fixed_response,
+    get_first_ddc_case_id,
+    get_first_generation_model,
+    get_first_retry_condition,
+    load_case_by_id,
+    load_test_config,
+    build_classifier_response,
+    RecordingLogger,
+)
+from side_projects.graph_runner.replay.adapter import (
+    AdapterContext,
+    LLMRequest,
+    LLMResponse,
+    get_active_adapter,
+)
 from side_projects.graph_runner.shadow_retry import compare_retry_results
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CASE_DATA = PROJECT_ROOT / "case_data"
+CASE_ID = get_first_ddc_case_id()
 
-
-# ── Mock LLM ──
-
-ATTEMPT_COUNTER = {"n": 0}
-
-
-def mock_call_model_pass_second(prompt, model, **kwargs):
-    """Mock: fail on attempt 0, pass on attempt 1."""
-    from core.pipeline.llm import ModelCallResult
-    prompt_lower = prompt.lower()
-
-    if "ground truth" in prompt_lower or "mechanism" in prompt_lower or "bug_type" in prompt_lower:
-        return ModelCallResult(
-            response="CORRECT\nCorrect mechanism.",
-            event_id=kwargs.get("parent_event_id") or 1,
-        )
-
-    if "reasoning" in prompt_lower and "commitments" in prompt_lower:
-        response = json.dumps({
-            "reasoning_internal_consistency": "CORRECT",
-            "reasoning_internal_consistency_justification": "test",
-            "commitments_internal_consistency": "CORRECT",
-            "commitments_internal_consistency_justification": "test",
-            "commitments_code_consistency": "CORRECT",
-            "commitments_code_consistency_justification": "test",
-            "reasoning_code_alignment": "CORRECT",
-            "reasoning_code_alignment_justification": "test",
-        })
-        return ModelCallResult(
-            response=response,
-            event_id=kwargs.get("parent_event_id") or 2,
-        )
-
-    if "mismatch" in prompt_lower or "critique" in prompt_lower:
-        return ModelCallResult(
-            response="The fix strategy targets the wrong module.",
-            event_id=kwargs.get("parent_event_id") or 3,
-        )
-
-    return ModelCallResult(
-        response="UNJUDGABLE\nNo data",
-        event_id=kwargs.get("parent_event_id") or 4,
-    )
-
-
-# ── Fixtures ──
 
 @pytest.fixture(scope="module")
 def config():
-    from core.config.experiment_config import load_config, is_config_loaded
-    if not is_config_loaded():
-        load_config("core/config/config_storage/smoke_ddc_cases.yaml")
-    from core.config.experiment_config import get_config
-    return get_config()
+    return load_test_config()
 
 
-@pytest.fixture(scope="module")
-def all_cases():
-    with open(CASE_DATA / "cases_v2.json") as f:
-        return json.load(f)
+@pytest.fixture(autouse=True)
+def enforce_no_leak():
+    assert get_active_adapter() is None
+    yield
+    assert get_active_adapter() is None
 
 
-def load_case(case_id, all_cases):
-    case = next(c for c in all_cases if c["id"] == case_id)
-    case = dict(case)
-    contents = {}
-    for fp in case["code_files"]:
-        contents[fp] = (CASE_DATA / fp).read_text()
-    case["code_files_contents"] = contents
-    case["logical_file_keys"] = {
-        fp.rsplit("/", 1)[-1]: content for fp, content in contents.items()
-    }
-    return case
+def make_combined_adapter(gen_resp: str) -> object:
+    """Adapter returning fixed gen + oracle + classifier responses."""
+    class Adapter:
+        def call(self, request: LLMRequest) -> LLMResponse:
+            lower = request.prompt.lower()
+            if ("ground truth" in lower
+                    or "true mechanism" in lower
+                    or "bug_type:" in lower):
+                return LLMResponse(text="CORRECT\nOK.", request_id="o")
+            if ("internal consistency" in lower
+                    and "reasoning_internal_consistency" in lower):
+                return LLMResponse(
+                    text=build_classifier_response(), request_id="c",
+                )
+            if "mismatch" in lower or "auditing" in lower:
+                return LLMResponse(text="Fix is wrong.", request_id="cr")
+            return LLMResponse(text=gen_resp, request_id="g")
+    return Adapter()
 
 
-def build_fixed_response(case, all_cases):
-    ref_path = CASE_DATA / "reference_fixes" / f"{case['id']}.py"
-    ref_code = ref_path.read_text()
-    bug_file = case["reference_fix"]["file"]
-    files = {}
-    for fp in case["code_files"]:
-        filename = fp.rsplit("/", 1)[-1]
-        if filename == bug_file:
-            files[filename] = ref_code
-        else:
-            files[filename] = "UNCHANGED"
-    return json.dumps({
-        "root_cause": f"Bug in {bug_file}",
-        "fix_strategy": "Fix the root cause",
-        "code_commitments": ["Fix must correct behavior"],
-        "files": files,
-    })
-
-
-# ── Run helpers ──
-
-def run_legacy_retry(case, condition, config, mock_fn):
-    """Run legacy retry_v2 with mocked LLM."""
+def run_legacy(case, condition, config, adapter):
     from core.pipeline.orchestration.retry_v2 import run_retry_v2
-    logger = MagicMock()
-    # Must patch at BOTH the definition site and the import site
-    with (
-        patch("core.pipeline.llm.call_model", side_effect=mock_fn),
-        patch("core.pipeline.orchestration.retry_v2.call_model", side_effect=mock_fn),
-    ):
-        cid, cond, ev = run_retry_v2(case, "test-model", condition, logger, 0)
+    model = get_first_generation_model(config)
+    logger = RecordingLogger()
+    with AdapterContext(adapter):
+        _, _, ev = run_retry_v2(case, model, condition, logger, 0)
     return ev
 
 
-def run_graph_retry(case, condition, config, mock_fn):
-    """Run graph retry controller with mocked LLM."""
+def run_graph(case, condition, config, adapter):
     from side_projects.graph_runner.retry_controller import run_retry_graph
-    logger = MagicMock()
-    with (
-        patch("core.pipeline.llm.call_model", side_effect=mock_fn),
-        patch("core.pipeline.orchestration.retry_v2.call_model", side_effect=mock_fn),
-    ):
-        cid, cond, ev = run_retry_graph(
-            case, "test-model", condition, logger, 0,
-        )
+    model = get_first_generation_model(config)
+    logger = RecordingLogger()
+    with AdapterContext(adapter):
+        _, _, ev = run_retry_graph(case, model, condition, logger, 0)
     return ev
 
-
-# ── Tests ──
 
 class TestRetryEquivalence:
-    """Graph retry must produce identical results to legacy retry."""
 
-    def test_single_attempt_pass(self, config, all_cases):
-        """Case passes on attempt 0 → no retry."""
-        case = load_case("logging_pipeline_chain", all_cases)
-        fixed_resp = build_fixed_response(case, all_cases)
+    def test_single_attempt_pass(self, config):
+        case, all_cases = load_case_by_id(CASE_ID)
+        gen_resp = build_fixed_response(case, all_cases)
+        condition = get_first_retry_condition(config)
 
-        def combined_mock(prompt, model, **kwargs):
-            from core.pipeline.llm import ModelCallResult
-            lower = prompt.lower()
-            if "ground truth" in lower or "mechanism" in lower or "bug_type" in lower:
-                return ModelCallResult(
-                    response="CORRECT\nCorrect mechanism.",
-                    event_id=kwargs.get("parent_event_id") or 1,
-                )
-            if "reasoning" in lower and "commitments" in lower:
-                return ModelCallResult(
-                    response=json.dumps({
-                        "reasoning_internal_consistency": "CORRECT",
-                        "reasoning_internal_consistency_justification": "t",
-                        "commitments_internal_consistency": "CORRECT",
-                        "commitments_internal_consistency_justification": "t",
-                        "commitments_code_consistency": "CORRECT",
-                        "commitments_code_consistency_justification": "t",
-                        "reasoning_code_alignment": "CORRECT",
-                        "reasoning_code_alignment_justification": "t",
-                    }),
-                    event_id=kwargs.get("parent_event_id") or 2,
-                )
-            # Generation call
-            return ModelCallResult(
-                response=fixed_resp,
-                event_id=kwargs.get("parent_event_id") or 3,
-            )
+        adapter = make_combined_adapter(gen_resp)
+        legacy = run_legacy(case, condition, config, adapter)
 
-        legacy = run_legacy_retry(case, "critique_strict_v3", config, combined_mock)
-        graph = run_graph_retry(case, "critique_strict_v3", config, combined_mock)
+        adapter2 = make_combined_adapter(gen_resp)
+        graph = run_graph(case, condition, config, adapter2)
 
-        diffs = compare_retry_results(case["id"], legacy, graph)
+        diffs = compare_retry_results(CASE_ID, legacy, graph)
         if diffs:
             lines = [f"MISMATCH ({len(diffs)} diffs):"]
             for d in diffs:
@@ -195,88 +108,41 @@ class TestRetryEquivalence:
                 )
             pytest.fail("\n".join(lines))
 
-    def test_trajectory_structure(self, config, all_cases):
-        """Both backends produce trajectory with same length."""
-        case = load_case("logging_pipeline_chain", all_cases)
-        fixed_resp = build_fixed_response(case, all_cases)
+    def test_trajectory_length(self, config):
+        case, all_cases = load_case_by_id(CASE_ID)
+        gen_resp = build_fixed_response(case, all_cases)
+        condition = get_first_retry_condition(config)
 
-        def mock_fn(prompt, model, **kwargs):
-            from core.pipeline.llm import ModelCallResult
-            lower = prompt.lower()
-            if "ground truth" in lower or "mechanism" in lower or "bug_type" in lower:
-                return ModelCallResult(
-                    response="CORRECT\nOK.", event_id=1,
-                )
-            if "reasoning" in lower and "commitments" in lower:
-                return ModelCallResult(
-                    response=json.dumps({
-                        "reasoning_internal_consistency": "CORRECT",
-                        "reasoning_internal_consistency_justification": "t",
-                        "commitments_internal_consistency": "CORRECT",
-                        "commitments_internal_consistency_justification": "t",
-                        "commitments_code_consistency": "CORRECT",
-                        "commitments_code_consistency_justification": "t",
-                        "reasoning_code_alignment": "CORRECT",
-                        "reasoning_code_alignment_justification": "t",
-                    }),
-                    event_id=2,
-                )
-            return ModelCallResult(response=fixed_resp, event_id=3)
-
-        legacy = run_legacy_retry(
-            case, "critique_strict_v3", config, mock_fn,
+        legacy = run_legacy(
+            case, condition, config, make_combined_adapter(gen_resp),
         )
-        graph = run_graph_retry(
-            case, "critique_strict_v3", config, mock_fn,
+        graph = run_graph(
+            case, condition, config, make_combined_adapter(gen_resp),
         )
 
-        assert legacy.get("num_attempts") == graph.get("num_attempts"), (
-            f"Attempt count mismatch: legacy={legacy.get('num_attempts')} "
-            f"graph={graph.get('num_attempts')}"
+        assert legacy.get("num_attempts") == graph.get("num_attempts")
+
+    def test_best_attempt_selection(self, config):
+        case, all_cases = load_case_by_id(CASE_ID)
+        gen_resp = build_fixed_response(case, all_cases)
+        condition = get_first_retry_condition(config)
+
+        legacy = run_legacy(
+            case, condition, config, make_combined_adapter(gen_resp),
+        )
+        graph = run_graph(
+            case, condition, config, make_combined_adapter(gen_resp),
         )
 
-    def test_best_attempt_selection(self, config, all_cases):
-        """Both backends select the same best attempt."""
-        case = load_case("logging_pipeline_chain", all_cases)
-        fixed_resp = build_fixed_response(case, all_cases)
-
-        def mock_fn(prompt, model, **kwargs):
-            from core.pipeline.llm import ModelCallResult
-            lower = prompt.lower()
-            if "ground truth" in lower or "mechanism" in lower or "bug_type" in lower:
-                return ModelCallResult(response="CORRECT\nOK.", event_id=1)
-            if "reasoning" in lower and "commitments" in lower:
-                return ModelCallResult(
-                    response=json.dumps({
-                        "reasoning_internal_consistency": "CORRECT",
-                        "reasoning_internal_consistency_justification": "t",
-                        "commitments_internal_consistency": "CORRECT",
-                        "commitments_internal_consistency_justification": "t",
-                        "commitments_code_consistency": "CORRECT",
-                        "commitments_code_consistency_justification": "t",
-                        "reasoning_code_alignment": "CORRECT",
-                        "reasoning_code_alignment_justification": "t",
-                    }),
-                    event_id=2,
-                )
-            return ModelCallResult(response=fixed_resp, event_id=3)
-
-        legacy = run_legacy_retry(
-            case, "critique_strict_v3", config, mock_fn,
+        assert (
+            legacy.get("best_attempt_idx")
+            == graph.get("best_attempt_idx")
         )
-        graph = run_graph_retry(
-            case, "critique_strict_v3", config, mock_fn,
-        )
-
-        assert legacy.get("best_attempt_idx") == graph.get("best_attempt_idx")
 
 
 class TestDispatchRouting:
-    """Verify the dispatch function routes correctly."""
 
-    def test_default_routes_to_legacy(self, config):
-        from core.pipeline.orchestration.runner import _dispatch_retry
-        from core.constants.pipeline_constants import BACKEND_LEGACY_V2
+    def test_default_is_legacy(self, config):
         backend = getattr(
             config.execution, "retry_backend", BACKEND_LEGACY_V2,
         )
