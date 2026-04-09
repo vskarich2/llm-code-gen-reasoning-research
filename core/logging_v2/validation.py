@@ -82,7 +82,12 @@ def validate_run_dir_absent(target: Path) -> None:
 
 
 def normalize_model_name(name: str, known_models: set[str]) -> str:
-    """Exact match normalization. Unknown names raise."""
+    """Validate model name by exact membership. No canonicalization.
+
+    This function performs no normalization, aliasing, or case-folding.
+    It only enforces that name is an exact member of known_models.
+    Returns name unchanged if valid. Raises RuntimeError otherwise.
+    """
     if name not in known_models:
         raise RuntimeError(f"Unknown model name: {name!r}")
     return name

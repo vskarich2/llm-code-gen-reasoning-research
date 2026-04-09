@@ -116,7 +116,13 @@ def validate_emittable(event: EmittableEvent) -> None:
 
 
 def validate_payload(event: EmittableEvent) -> None:
-    """Validate payload matches the schema for this event type."""
+    """Validate payload matches the schema for this event type.
+
+    Payload schemas use exact runtime types (type(v) is T), not isinstance
+    semantics. This means bool is NOT accepted for int fields, and
+    subclass types are rejected. None is never accepted for any field.
+    Extra keys beyond the schema are rejected.
+    """
     schema = PAYLOAD_SCHEMAS.get(event.event_type)
     if schema is None:
         raise RuntimeError(

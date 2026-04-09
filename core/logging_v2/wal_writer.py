@@ -15,6 +15,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from core.logging_v2.event_types import EVENT_TYPE_SPECS
 from core.logging_v2.events import (
     EmittableEvent,
     WALEvent,
@@ -52,15 +53,10 @@ class WALWriter:
                 f"writer has {self.run_id!r}"
             )
 
-        from core.logging_v2.event_types import EVENT_TYPE_SPECS
-
         if event.event_type not in EVENT_TYPE_SPECS:
             raise RuntimeError(
                 f"Unknown event_type: {event.event_type}"
             )
-
-        if SCHEMA_VERSION != "2.0":
-            raise RuntimeError("WAL schema version mismatch")
 
         validate_emittable(event)
 

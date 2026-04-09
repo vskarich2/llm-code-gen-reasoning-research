@@ -12,7 +12,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core.logging_v2.call_artifacts import CallArtifact
+from core.logging_v2.call_artifacts import (
+    CallArtifact,
+    compute_prompt_hash,
+    compute_response_hash,
+)
 from core.logging_v2.enums import CallPhase, CallStatus, EventType
 from core.logging_v2.events import WALEvent
 from core.logging_v2.enums import Emitter
@@ -90,22 +94,64 @@ def load_wal_events(run_root: Path) -> list[WALEvent]:
     return events
 
 
+REQUIRED_CALL_FIELDS = frozenset({
+    "call_id", "event_id", "timestamp", "model", "node", "phase",
+    "run_id", "case_id", "condition", "trial", "path", "prompt",
+    "prompt_hash", "prompt_length", "temperature", "top_p",
+    "response", "response_hash", "response_length", "latency_ms",
+    "status", "error",
+})
+
+
 def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
     calls_dir = run_root / "artifacts" / "calls"
     results: list[CallArtifact] = []
     if not calls_dir.exists():
         return results
     paths = list(calls_dir.rglob("*.json"))
-    records = []
+    records: list[tuple[dict, Path]] = []
 
     for json_path in paths:
         with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
-        records.append(data)
 
-    records.sort(key=lambda d: d["call_id"])
+        missing = REQUIRED_CALL_FIELDS - set(data.keys())
+        if missing:
+            raise RuntimeError(
+                f"Call artifact missing required fields "
+                f"{sorted(missing)}: {json_path}"
+            )
 
-    for data in records:
+        if "call_id" not in data:
+            raise RuntimeError(
+                f"Call artifact missing call_id: {json_path}"
+            )
+        if not isinstance(data["call_id"], str) or not data["call_id"]:
+            raise RuntimeError(
+                f"Invalid call_id in artifact: {json_path}"
+            )
+
+        actual_prompt_hash = compute_prompt_hash(data["prompt"])
+        if actual_prompt_hash != data["prompt_hash"]:
+            raise RuntimeError(
+                f"Prompt hash mismatch in {json_path}: "
+                f"expected {data['prompt_hash'][:16]}, "
+                f"got {actual_prompt_hash[:16]}"
+            )
+
+        actual_response_hash = compute_response_hash(data["response"])
+        if actual_response_hash != data["response_hash"]:
+            raise RuntimeError(
+                f"Response hash mismatch in {json_path}: "
+                f"expected {data['response_hash'][:16]}, "
+                f"got {actual_response_hash[:16]}"
+            )
+
+        records.append((data, json_path))
+
+    records.sort(key=lambda pair: pair[0]["call_id"])
+
+    for data, json_path in records:
         data["phase"] = CallPhase(data["phase"])
         data["status"] = CallStatus(data["status"])
         results.append(CallArtifact(**data))

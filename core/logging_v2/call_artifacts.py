@@ -20,6 +20,7 @@ from typing import Any
 
 from core.logging_v2.config import LoggingV2Config
 from core.logging_v2.enums import ArtifactGroup, Axis, CallPhase, CallStatus
+from core.logging_v2.axes import validate_call_index
 from core.logging_v2.paths import build_artifact_path
 
 
@@ -64,6 +65,7 @@ def write_call_json(
     call_index: int,
 ) -> str:
     """Write call JSON artifact. Returns relative path from run_root."""
+    validate_call_index(call_index)
     dir_path = build_artifact_path(
         run_root,
         ArtifactGroup.CALLS,
@@ -152,6 +154,7 @@ def write_call_txt(
     config: LoggingV2Config,
 ) -> None:
     """Write human-readable call text. Secondary, non-canonical."""
+    validate_call_index(call_index)
     dir_path = build_artifact_path(
         run_root,
         ArtifactGroup.CALLS,
