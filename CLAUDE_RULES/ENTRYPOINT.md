@@ -1,94 +1,306 @@
+```markdown
+
+# SYSTEM CONSTRAINTS (NON-NEGOTIABLE)
+
+## Multi-Collaborator Safety
+
+- Do not rename public interfaces without justification
+- Do not change schemas without migration logic
+- Do not modify config formats silently
+- Do not change CLI behavior without instruction
+
+## Dependency Discipline
+
+- Use `uv` for dependency management
+- Keep dependencies minimal
+- Do NOT introduce heavy or unnecessary dependencies
+
+## Experimental Discipline
+
+- All experiments must be reproducible
+- Randomness must be controlled
+- All behavior must be config-driven (no hardcoded parameters)
+
+## Decision Rule
+
+When choosing between options:
+
+- prefer minimal change
+- prefer explicit over implicit
+- prefer safe over clever
+- prefer local over global
+
+If uncertain:
+→ choose the least invasive correct solution
+
 # RULE EXECUTION PROTOCOL
 
 This is the mandatory execution protocol for all work in this repository.
 Every task follows this sequence. No exceptions.
 
-## STEP 1 — IDENTIFY TASK TYPE
+All rule definitions live under `CLAUDE_RULES/`.
+This file defines execution order and orchestration only.
+
+If any conflict exists:
+→ `INVARIANTS.md` takes precedence.
+
+---
+
+# GLOBAL ARTIFACT MANAGEMENT (MANDATORY)
+
+All generated artifacts MUST be written to the correct directory.
+
+Root:
+→ `artifacts/`
+
+Subdirectories:
+- plans → `artifacts/plans/`
+- analysis → `artifacts/analysis/`
+- audits → `artifacts/audits/`
+- docs → `artifacts/docs/`
+- outputs → `artifacts/outputs/`
+
+## Rules
+
+- NEVER write files outside `artifacts/` unless explicitly modifying existing repo files
+- NEVER create duplicate copies of modified source files
+- NEVER write files to the root directory
+
+---
+
+## PLAN VERSIONING RULE (STRICT)
+
+Plans MUST follow versioned progression:
+
+- File name must remain consistent
+- Versions increment using suffix:
+  → `_v1`, `_v2`, `_v3`, ...
+
+- Each revision MUST:
+  - be a FULL rewritten plan (no diffs)
+  - preserve the same base name
+  - be saved in the SAME directory
+
+Example:
+```
+
+artifacts/plans/fix_execution_pipeline_v1.md
+artifacts/plans/fix_execution_pipeline_v2.md
+
+```
+
+---
+
+## TIMESTAMP REQUIREMENT (MANDATORY)
+
+ALL artifacts MUST include a human-readable timestamp at the top:
+
+Format:
+```
+
+Date: YYYY-MM-DD
+Time: HH:MM (24h)
+
+```
+
+Applies to:
+- plans
+- analysis
+- audits
+- docs
+
+Forbidden:
+- missing timestamps
+- ambiguous or relative time references
+
+---
+
+## NO RANDOM FILE CREATION
+
+Forbidden:
+- writing “temporary” files
+- dumping modified code copies
+- creating files without explicit purpose
+
+If a file is not:
+- a planned artifact
+- or a required system file
+
+→ DO NOT CREATE IT
+
+---
+
+# STEP 1 — IDENTIFY TASK TYPE
 
 Classify the current task as exactly one of:
-- REFACTOR (changing existing code structure)
-- DEBUGGING (finding and fixing a defect)
-- FEATURE (adding new capability)
+- REFACTOR
+- DEBUGGING
+- FEATURE
 
-Load the corresponding task rules from `CLAUDE_RULES/tasks/`.
+If task-specific rules exist in:
+→ `CLAUDE_RULES/tasks/`
 
-## STEP 2 — LOAD RULE MODULES
+Load them.
 
-Always load:
-- `CLAUDE_RULES/core/invariants.md` (hard constraints, never skippable)
-- `CLAUDE_RULES/core/code_quality.md` (function/file limits, naming)
-- `CLAUDE_RULES/core/architecture.md` (module boundaries, data flow)
+---
 
-Then load the task-specific module from Step 1.
+# STEP 2 — LOAD RULE MODULES (MANDATORY ORDER)
 
-## STEP 3 — PRE-ACTION AUDIT
+Load:
 
-Before writing any code, execute `CLAUDE_RULES/audits/pre_action.md`:
-- List all files that will be modified
-- For each file, list functions that will change
-- Identify risk of invariant violations
-- Identify risk of duplicate code paths
-- Identify risk of scope creep
+1. `CLAUDE_RULES/INVARIANTS.md`
+2. `CLAUDE_RULES/SYSTEM.md`
+3. `CLAUDE_RULES/ENGINEERING.md`
+4. `CLAUDE_RULES/ANTI_PATTERNS.md`
+5. `CLAUDE_RULES/FUNCTIONAL_PROGRAMMING.md`
 
-Output the pre-action audit as a checklist. Wait for approval.
+Then load task-specific rules (if any).
 
-## STEP 4 — PRODUCE A PLAN
+---
 
-Write a plan that describes:
-- What changes will be made
-- Why each change is necessary
-- What tests will be added or updated
-- What invariants are at risk
+# STEP 3 — PRE-ACTION AUDIT (BLOCKING)
 
-The plan must be concrete (file names, function names, line ranges).
-No code in the plan. Text only.
+Execute:
+→ `CLAUDE_RULES/audits/pre_action.md`
 
-Wait for approval before proceeding.
+Output:
+- full checklist
+- saved to `artifacts/audits/`
 
-## STEP 5 — EXECUTE CHANGES
+STOP.
+Wait for approval.
+
+---
+
+# STEP 4 — PRODUCE A PLAN (BLOCKING)
+
+Write a concrete plan.
+
+Requirements:
+- NO code
+- specific and minimal
+- includes files, functions, risks, tests
+
+Output:
+- save to `artifacts/plans/`
+- apply versioning rule
+- include timestamp
+
+STOP.
+Wait for approval.
+
+---
+
+# STEP 5 — EXECUTE CHANGES
 
 After approval:
-- Make only the changes described in the plan
-- If new issues are discovered, STOP and return to Step 3
-- Do not expand scope
 
-For each file modified, state:
-- File name
-- What changed
-- Why it is safe
+- implement EXACTLY what was planned
+- do NOT expand scope
 
-## STEP 6 — POST-ACTION AUDIT
+If new issues arise:
+→ STOP
+→ return to Step 3
 
-After all changes, execute `CLAUDE_RULES/audits/post_action.md`.
+For each file modified:
+- state file name
+- describe change
+- justify safety
 
-Output a rule compliance report in this exact format:
+---
 
+# STEP 6 — POST-ACTION AUDIT (MANDATORY)
+
+Execute:
+→ `CLAUDE_RULES/audits/post_action.md`
+
+Requirements:
+- MUST evaluate real code changes
+- MUST include evidence
+- MUST NOT speculate
+
+Output:
+- full report
+- save to `artifacts/audits/`
+- include timestamp
+
+Rules:
+- ANY invariant failure → INVALID
+- ANY other failure → MUST FIX
+
+MANDATORY VALIDATION:
+
+Before declaring completion, you MUST run:
+
+    make all
+
+Rules:
+- If ANY step fails → the change is INVALID
+- You MUST diagnose and fix failures
+- You MUST NOT skip or bypass this step
+- You MUST report which step failed (lint, typecheck, semgrep, etc.)
+
+Completion is only allowed if:
+→ make all passes fully
+
+---
+
+# STEP 7 — CODE PATH / DEBUG AUDIT (STRICT)
+
+If performing debugging or audit:
+
+Execute:
+→ `CLAUDE_RULES/audits/code_path_audit.md`
+
+## Ground Truth Requirement
+
+You MUST:
+- inspect actual files (logs, outputs, code)
+- trace real execution paths
+- verify with concrete evidence
+
+Forbidden:
+- “likely”
+- “possibly”
+- “it seems”
+- guessing without inspection
+
+All claims MUST reference:
+- file
+- line
+- or concrete artifact
+
+If logs are requested:
+→ you MUST read them directly
+
+---
+
+# STEP 8 — COMMIT SUMMARY
+
+Do NOT commit.
+
+Output a commit-ready summary:
+- what changed
+- why
+- tests
+- architectural impact
+
+Constraints:
+- no first-person
+- no process narration
+- concise
+
+---
+
+# ENFORCEMENT
+
+- Steps 3 and 4 are BLOCKING
+- Step 6 is MANDATORY
+- Artifact rules are STRICT
+- Anti-pattern violations → immediate rejection
+- Invariant violations → system invalid
+- No work proceeds under uncertainty
+
+Primary rule:
+→ Do not violate INVARIANTS.md
 ```
-RULE COMPLIANCE REPORT
-======================
-INV-01 Single execution path      PASS
-INV-02 No duplicate logic         PASS
-INV-03 No silent failures         PASS
-INV-04 Config-driven params       FAIL — llm.py:42 hardcoded "gpt-4.1-nano"
-CQ-01  Max 50 lines/function      PASS
-CQ-02  Max 300 lines/file         FAIL — execution.py has 412 lines
-...
-```
-
-Every invariant must have PASS or FAIL with evidence.
-
-If any FAIL exists, report it and propose a fix before considering the task complete.
-
-## STEP 7 — COMMIT SUMMARY
-
-Do not commit. Output a commit-ready summary paragraph describing:
-- What was changed
-- Why it was changed
-- What tests were added
-- Any architectural considerations
-
-## ENFORCEMENT
-
-- Steps 3 and 4 are BLOCKING. No code before approval.
-- Step 6 is MANDATORY. No task is complete without the compliance report.
-- If a rule is violated, it must be fixed or explicitly acknowledged by the user.

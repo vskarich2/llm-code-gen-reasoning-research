@@ -1,56 +1,86 @@
 # CODE PATH AUDIT
 
-Use this audit when investigating execution flow, debugging hangs, or verifying
-that a critical variable has exactly one code path.
+Use this audit to trace execution flow, debug hangs, or verify that a variable or resource behaves correctly.
 
-## STEP 1 — IDENTIFY THE CRITICAL VARIABLE OR FLOW
+This is a diagnostic tool for detecting violations of INVARIANTS.md.
+
+---
+
+# STEP 1 — DEFINE THE SUBJECT
 
 State exactly what you are tracing:
-- A variable (e.g., "where does `eval_model` come from?")
-- A code path (e.g., "what happens when an API call times out?")
-- A resource (e.g., "where is the OpenAI client created and destroyed?")
 
-## STEP 2 — TRACE ALL PRODUCERS
+- Variable: "where does `eval_model` come from?"
+- Flow: "what happens when an API call times out?"
+- Resource: "where is the client created and destroyed?"
 
-For a variable: find every place it is assigned or modified.
-For a code path: find every branch that can reach it.
-For a resource: find every constructor call.
+---
 
-List each as: `file:line — description`
+# STEP 2 — TRACE ALL PRODUCERS
 
-## STEP 3 — TRACE ALL CONSUMERS
+Find every place the subject is created, assigned, or modified.
 
-For a variable: find every place it is read.
-For a code path: find every place it exits (return, raise, crash).
-For a resource: find every place it is used and every place it is closed.
+List:
+`file:line — description`
 
-List each as: `file:line — description`
+---
 
-## STEP 4 — VERIFY SINGLE PATH
+# STEP 3 — TRACE ALL CONSUMERS
 
-For the critical flow:
-- Is there exactly one producer? If not, which ones conflict?
-- Is there exactly one consumer path? If not, which ones diverge?
-- Are there any dead paths (code that is never reached)?
-- Are there any missing paths (states that are never handled)?
+Find every place the subject is used, read, or terminated.
 
-## STEP 5 — REPORT
+Include:
+- reads
+- returns
+- raises
+- cleanup
 
-Output:
+List:
+`file:line — description`
 
-```
+---
+
+# STEP 4 — ANALYZE FLOW INTEGRITY
+
+Check:
+
+- Are all producers intentional and consistent?
+- Are there conflicting producers?
+- Does every path lead to a valid consumer?
+- Are there dead paths (never reached)?
+- Are there missing paths (unhandled states)?
+- Is lifecycle complete (for resources)?
+
+---
+
+# STEP 5 — REPORT
 CODE PATH AUDIT: {subject}
-================================
+
 Producers:
-  1. {file}:{line} — {description}
-  2. ...
+
+{file}:{line} — {description}
+...
 
 Consumers:
-  1. {file}:{line} — {description}
-  2. ...
 
-Single path: YES | NO
+{file}:{line} — {description}
+...
+
+Consistent flow: YES | NO
 Conflicts: {description or "none"}
 Dead paths: {description or "none"}
 Missing paths: {description or "none"}
-```
+Lifecycle issues: {description or "none"}
+
+
+---
+
+# RULE
+
+If flow is:
+- conflicting
+- incomplete
+- duplicated without intent
+
+→ system behavior is unreliable
+→ likely violates INVARIANTS.md

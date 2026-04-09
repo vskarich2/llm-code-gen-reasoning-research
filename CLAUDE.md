@@ -1,99 +1,67 @@
-# CLAUDE.md — Mandatory Operating Rules
+# CLAUDE.md — BOOTSTRAP (MANDATORY)
 
-This file is automatically loaded at the start of every conversation.
-All rules are non-negotiable.
+This file is automatically loaded at the start of every session.
 
-## RULE SYSTEM
+It defines ONLY how to begin.
+All rules and constraints live in `CLAUDE_RULES/`.
 
-All behavioral rules live in `CLAUDE_RULES/`. Before any task, read and follow:
+---
 
-1. `CLAUDE_RULES/ENTRYPOINT.md` — the mandatory execution protocol (plan → approve → implement → audit)
-2. `CLAUDE_RULES/core/invariants.md` — hard constraints (10 invariants, every one checkable)
-3. `CLAUDE_RULES/core/code_quality.md` — function/file limits, naming, structure
-4. `CLAUDE_RULES/core/architecture.md` — module boundaries, data flow, resource lifecycle
-5. `CLAUDE_RULES/core/engineering_constraints.md` — engineering constraints
-6. `CLAUDE_RULES/core/functional_programming_constraints.md` — functional programming constraints
-7. `CLAUDE_RULES/SYSTEM.md` — system-level rules
-8. `CLAUDE_RULES/RULES.md` — additional rules
-9. `CLAUDE_RULES/anti_patterns.md` — patterns to avoid
-10. `CLAUDE_RULES/tests_required.md` — mandatory test requirements
+# 1. FIRST ACTION (MANDATORY)
 
-Task-specific rules:
-- `CLAUDE_RULES/tasks/refactor.md`
-- `CLAUDE_RULES/tasks/debugging.md`
-- `CLAUDE_RULES/tasks/feature_addition.md`
+You MUST immediately load:
 
-Audit checklists:
-- `CLAUDE_RULES/audits/pre_action.md` — run BEFORE writing code
-- `CLAUDE_RULES/audits/post_action.md` — run AFTER writing code
-- `CLAUDE_RULES/audits/code_path_audit.md` — for tracing execution flow
+→ `CLAUDE_RULES/ENTRYPOINT.md`
 
-## PROCESS (always follow)
+This file defines the full execution protocol.
 
-1. Plan first. No code before a written plan and user approval. 
-2. Pre-action audit before implementation.
-3. Post-action audit with PASS/FAIL compliance report after implementation.
-4. No scope creep. Do exactly what was approved, nothing more.
-5. Tests required for every behavioral change.
-6. No commits. Provide a commit summary paragraph at the end.
+You MUST follow it exactly.
 
-## PLANNING REQUIREMENTS (MANDATORY)
+---
 
-All plans must be persisted to disk and versioned.
+# 2. RULE AUTHORITY
 
-- Plans MUST be written to the `artifacts/plans/` directory.
-- File naming convention:
-  - `artifacts/plans/<task_name>_plan_v1.md`
-  - `artifacts/plans/<task_name>_plan_v2.md`
-  - `artifacts/plans/<task_name>_plan_v3.md`
-- Every revision MUST create a new versioned file. Never overwrite previous versions.
-- Version increments must be strictly monotonic (+1 each revision).
-- The task_name must be short, descriptive, and stable across revisions.
+All system rules are defined in:
 
-Plan lifecycle rules:
+- `CLAUDE_RULES/INVARIANTS.md` (source of truth)
+- `CLAUDE_RULES/SYSTEM.md` (operating behavior)
+- `CLAUDE_RULES/ENGINEERING.md` (implementation discipline)
+- `CLAUDE_RULES/ANTI_PATTERNS.md` (hard rejection rules)
+- `CLAUDE_RULES/FUNCTIONAL_PROGRAMMING.md` (design discipline)
 
-1. Initial plan:
-   - Create `artifacts/plans/<task_name>_plan_v1.md`
-   - Must fully specify scope, files touched, invariants, and risks
+You MUST NOT:
+- redefine these rules
+- approximate them
+- ignore them
 
-2. On revision:
-   - Create a NEW file: `artifacts/plans/<task_name>_plan_v{N+1}.md`
-   - Include:
-     - What changed from previous version
-     - Why the change was necessary
-     - Updated full plan (not a diff-only document)
+If any conflict exists:
+→ INVARIANTS.md takes precedence
 
-3. No plan reuse:
-   - Never edit an existing plan file
-   - Never collapse versions
-   - History must remain fully reconstructable
+---
 
-4. Blocking rule:
-   - If a plan is not written to `artifacts/plans/` with correct versioning, STOP
-   - Do not proceed to implementation
+# 3. EXECUTION MODEL
 
-## HARD CONSTRAINTS (memorize these)
+All work MUST follow:
 
-- ONE execution path. No parallel pipelines. Config-parameterized variation only.
-- No duplicate logic across files.
-- No silent failures. Log or raise every exception.
-- All experimental parameters from YAML config. Zero hardcoded values.
-- No threads. Single-process serial execution.
-- No infinite waits. Every network call has an explicit timeout.
-- Max 50 lines per function. Max 300 lines per file.
-- No new dependencies without explicit approval.
+ENTRYPOINT.md → PRE-ACTION → PLAN → APPROVAL → IMPLEMENT → POST-ACTION
 
-## THIS PROJECT
+No exceptions.
 
-- Research-grade LLM reasoning benchmark (CS372 final project)
-- 6 contributors — no breaking interface changes without migration
-- Reproducibility mandatory — seeds, deterministic config, no hidden state
-- Use `.venv/bin/python`, not system Python
-- Evaluation must be independent of generation (no measurement-intervention blur)
+---
 
-## WHEN UNCERTAIN
+# 4. NON-NEGOTIABLE BEHAVIOR
 
-- Is this the minimum change needed? If not, reduce scope.
-- Am I touching files outside my declared scope? If so, stop and re-plan.
-- Does equivalent logic already exist? If so, reuse it.
-- Will this pass the post-action audit? If not, redesign.
+- No code before plan approval
+- No scope expansion
+- No silent assumptions
+- No guessing without inspecting ground truth
+- No violation of invariants
+
+If uncertain:
+→ STOP and ask
+
+---
+
+# 5. PRIMARY RULE
+
+Do not violate INVARIANTS.md

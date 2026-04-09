@@ -1,44 +1,76 @@
 # PRE-ACTION AUDIT
 
-Execute this audit BEFORE writing any code.
-Output the checklist in full. Wait for approval before proceeding.
+Execute BEFORE writing any code.
+Output the checklist in full.
+Wait for approval before proceeding.
 
-## 1. SCOPE CHECK
+This audit ensures planned changes will not violate INVARIANTS.md, ENGINEERING.md, or ANTI_PATTERNS.md.
+
+---
+
+# 1. SCOPE DEFINITION
 
 - [ ] List every file that will be modified
 - [ ] List every function that will be added, changed, or deleted
 - [ ] Confirm no files outside this list will be touched
 
-## 2. DUPLICATE LOGIC CHECK
+---
 
-- [ ] For each new function: does equivalent logic already exist elsewhere?
-- [ ] If yes: reuse the existing function instead of creating a new one
-- [ ] For each modified function: will this create a second implementation of the same logic?
+# 2. DUPLICATION RISK
 
-## 3. INVARIANT RISK CHECK
+- [ ] Does equivalent logic already exist?
+- [ ] If yes: reuse instead of creating new logic
+- [ ] Will this introduce a second implementation of the same responsibility?
 
-- [ ] INV-01 (single path): does this change create a parallel execution path?
-- [ ] INV-02 (no duplicates): does this change duplicate any existing logic?
-- [ ] INV-03 (no silent failures): does this change introduce any unlogged exception handling?
-- [ ] INV-04 (config-driven): does this change introduce any hardcoded parameters?
-- [ ] INV-09 (no threads): does this change introduce threading or concurrency?
-- [ ] INV-10 (no infinite waits): does this change make network calls? If so, are timeouts set?
+---
 
-## 4. ARCHITECTURE CHECK
+# 3. INVARIANT RISK CHECK
 
-- [ ] Which module owns this change? (reference ARCH-01 module map)
-- [ ] Does the change respect data flow direction? (ARCH-02)
-- [ ] Does the change create any new global mutable state? (ARCH-04)
-- [ ] Does the change create any new external resources? If so, what is the cleanup path? (ARCH-05)
+- [ ] Could this change introduce a parallel execution path?
+- [ ] Could this change bypass the canonical pipeline?
+- [ ] Could this introduce silent failure or unhandled states?
+- [ ] Could this introduce hidden state or mutation?
+- [ ] Could this break determinism?
+- [ ] Could this break logging completeness or traceability?
+- [ ] Could this break config integrity or propagation?
 
-## 5. SCOPE CREEP CHECK
+If ANY answer is unclear:
+→ STOP and resolve before implementation
 
-- [ ] Is the planned change the MINIMUM required to achieve the goal?
-- [ ] Are there any "while I'm here" improvements included? If so, remove them.
-- [ ] Can the change be split into smaller independent steps?
+---
 
-## 6. TEST PLAN
+# 4. ARCHITECTURE & OWNERSHIP
 
-- [ ] What tests will be added or modified?
-- [ ] What existing tests might break?
-- [ ] How will the change be verified?
+- [ ] Which module owns this responsibility?
+- [ ] Is the change placed in the correct module?
+- [ ] Does this violate separation of concerns?
+- [ ] Does this introduce cross-module coupling?
+- [ ] Does this introduce new resources? If so, what is their lifecycle?
+
+---
+
+# 5. SCOPE DISCIPLINE
+
+- [ ] Is this the MINIMUM change required?
+- [ ] Is any unrelated improvement included? If yes, remove it
+- [ ] Can this be split into smaller steps?
+
+---
+
+# 6. TEST PLAN
+
+- [ ] What tests will be added or updated?
+- [ ] What failure modes are covered?
+- [ ] How will correctness be verified end-to-end?
+
+---
+
+# RULE
+
+If:
+- scope is unclear
+- ownership is unclear
+- invariant risk is unclear
+
+→ DO NOT IMPLEMENT
+→ return to planning

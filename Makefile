@@ -1,39 +1,47 @@
 .PHONY: format lint typecheck semgrep arch deadcode test all check
 
+# Use virtual environment binaries consistently
+VENV_BIN := .venv/bin
+
 # 1. Format (black)
 format:
-	.venv/bin/black .
+	$(VENV_BIN)/black .
 
-# 2. Lint (ruff — sole linter + import sorter, no flake8/isort)
+# 2. Lint (ruff — sole linter + import sorter)
 lint:
-	.venv/bin/ruff check .
+	$(VENV_BIN)/ruff check .
 
-# 3. Typecheck (pyright primary, mypy secondary)
+# 3. Typecheck (full project coverage)
 typecheck:
-	.venv/bin/pyright
-	.venv/bin/mypy runner.py execution.py evaluator.py exec_eval.py parse.py reconstructor.py llm.py live_metrics.py
+	$(VENV_BIN)/pyright
+	$(VENV_BIN)/mypy .
 
-# 4. Semgrep invariant enforcement
+# 4. Semgrep invariant enforcement (use venv, full repo)
 semgrep:
-	semgrep scan --config .semgrep.yml --error --exclude='.venv' --exclude='code_snippets_v2' --exclude='_archive' --exclude='tests' .
+	$(VENV_BIN)/semgrep scan --config .semgrep.yml \
+		--error \
+		--exclude='.venv' \
+		--exclude='code_snippets_v2' \
+		--exclude='_archive' \
+		--exclude='tests' \
+		.
 
 # 5. Architecture constraint enforcement
 arch:
-	.venv/bin/lint-imports
+	$(VENV_BIN)/lint-imports
 
-# 6. Dead code detection
+# 6. Dead code detection (full repo)
 deadcode:
-	.venv/bin/vulture runner.py execution.py evaluator.py exec_eval.py parse.py reconstructor.py llm.py live_metrics.py experiment_config.py constants.py failure_classifier.py --min-confidence 80
+	$(VENV_BIN)/vulture . --min-confidence 80
 
 # 7. Tests
 test:
-	.venv/bin/pytest tests/ -v --tb=short
+	$(VENV_BIN)/pytest tests/ -v --tb=short
 
-# Quick check (no typecheck, no deadcode, no tests)
+# Quick check (fast feedback loop)
 check: lint semgrep arch
 
-# Full suite — strict order: format → lint → typecheck → semgrep → arch → deadcode → test
-# Each step must pass before the next runs (make stops on first failure)
+# Full suite — strict ordered pipeline
 all:
 	$(MAKE) format
 	$(MAKE) lint

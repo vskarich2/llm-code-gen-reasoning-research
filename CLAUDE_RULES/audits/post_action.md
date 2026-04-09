@@ -1,64 +1,128 @@
-# POST-ACTION AUDIT
+```markdown id="audit-v2"
+# POST_ACTION_AUDIT
 
-Execute this audit AFTER all changes are complete.
-Output the full compliance report. Every line must have PASS or FAIL.
+Execute AFTER all changes are complete.
 
-## INVARIANT COMPLIANCE
+Output a full compliance report.
+Each line MUST be: PASS or FAIL with evidence.
 
-For each invariant, check the CHANGED FILES ONLY:
+Audit applies ONLY to changed files.
 
-```
-INV-01 Single execution path        PASS | FAIL — evidence
-INV-02 No duplicate logic           PASS | FAIL — evidence
-INV-03 No silent failures           PASS | FAIL — evidence
-INV-04 Config-driven parameters     PASS | FAIL — evidence
-INV-05 No hardcoded fallbacks       PASS | FAIL — evidence
-INV-06 Deterministic execution      PASS | FAIL — evidence
-INV-07 Eval-gen separation          PASS | FAIL — evidence
-INV-08 Complete logging             PASS | FAIL — evidence
-INV-09 No threads                   PASS | FAIL — evidence
-INV-10 No infinite waits            PASS | FAIL — evidence
-```
+---
 
-## CODE QUALITY COMPLIANCE
+# 1. INVARIANT COMPLIANCE
 
-For each changed file:
+Check against INVARIANTS.md.
 
 ```
-CQ-01 Max 50 lines/function         PASS | FAIL — {file}:{function} has {N} lines
-CQ-02 Max 300 lines/file            PASS | FAIL — {file} has {N} lines
-CQ-03 Descriptive function names    PASS | FAIL — {file}:{function} is vague
-CQ-04 Docstrings on public funcs    PASS | FAIL — {file}:{function} missing docstring
-CQ-05 No magic numbers              PASS | FAIL — {file}:{line} literal {N}
-CQ-06 Max 3 nesting levels          PASS | FAIL — {file}:{line} nesting depth {N}
-CQ-07 No dead code                  PASS | FAIL — {file}:{function} never called
-CQ-08 Import hygiene                PASS | FAIL — {file} unused import {module}
+
+INV-01 Execution entrypoint integrity     PASS | FAIL — evidence
+INV-02 No duplicate implementations       PASS | FAIL — evidence
+INV-03 No silent failure                  PASS | FAIL — evidence
+INV-04 Contract enforcement               PASS | FAIL — evidence
+INV-05 No silent defaults                 PASS | FAIL — evidence
+INV-06 Determinism preserved              PASS | FAIL — evidence
+INV-07 Generation/evaluation separation   PASS | FAIL — evidence
+INV-08 Terminal logging completeness      PASS | FAIL — evidence
+INV-09 Bounded external calls             PASS | FAIL — evidence
+INV-10 Resource lifecycle                 PASS | FAIL — evidence
+INV-11 Single source of truth (local)     PASS | FAIL — evidence
+INV-12 Raw artifact preservation          PASS | FAIL — evidence
+INV-13 Metric provenance clarity          PASS | FAIL — evidence
+INV-14 Centralized decision logic         PASS | FAIL — evidence
+INV-15 Integration integrity              PASS | FAIL — evidence
+INV-16 Pipeline structure preserved       PASS | FAIL — evidence
+INV-17 No pipeline bypass                 PASS | FAIL — evidence
+INV-18 Stage separation preserved         PASS | FAIL — evidence
+INV-19 Config source integrity            PASS | FAIL — evidence
+INV-20 Config propagation                 PASS | FAIL — evidence
+INV-21 Config observability               PASS | FAIL — evidence
+INV-22 End-to-end consistency             PASS | FAIL — evidence
+INV-23 No partial updates                 PASS | FAIL — evidence
+
 ```
 
-## ARCHITECTURE COMPLIANCE
+---
+
+# 2. ENGINEERING COMPLIANCE
+
+Check against ENGINEERING.md.
 
 ```
-ARCH-01 Module responsibility       PASS | FAIL — {function} placed in wrong module
-ARCH-02 Data flow direction         PASS | FAIL — {file} imports from downstream {module}
-ARCH-03 Single source of truth      PASS | FAIL — {state} has multiple owners
-ARCH-04 No global mutable state     PASS | FAIL — {file}:{line} mutable module-level {var}
-ARCH-05 Resource lifecycle          PASS | FAIL — {resource} created without cleanup
-ARCH-06 No cross-module side effects PASS | FAIL — {file} mutates {module}.{var}
-ARCH-07 File placement              PASS | FAIL — {function} belongs in {correct_module}
+
+EC-01 Explicit contracts              PASS | FAIL — evidence
+EC-02 Fail-fast boundaries            PASS | FAIL — evidence
+EC-03 Function size & responsibility  PASS | FAIL — evidence
+EC-04 File scope discipline           PASS | FAIL — evidence
+EC-05 Control flow simplicity         PASS | FAIL — evidence
+EC-06 No hidden side effects          PASS | FAIL — evidence
+EC-07 Reuse before new code           PASS | FAIL — evidence
+EC-08 Correct placement               PASS | FAIL — evidence
+EC-09 Testability                     PASS | FAIL — evidence
+EC-10 Minimal/local changes           PASS | FAIL — evidence
+EC-11 Naming clarity                  PASS | FAIL — evidence
+EC-12 Import hygiene                  PASS | FAIL — evidence
+EC-13 Docstrings present              PASS | FAIL — evidence
+EC-14 No magic numbers                PASS | FAIL — evidence
+
 ```
 
-## SCOPE VERIFICATION
+---
+
+# 3. ANTI-PATTERN CHECK
+
+Check against ANTI_PATTERNS.md.
 
 ```
-SCOPE-01 Only declared files changed    PASS | FAIL — unexpected change to {file}
-SCOPE-02 No feature creep               PASS | FAIL — {description of extra change}
-SCOPE-03 Tests added/updated            PASS | FAIL — no tests for {change}
+
+AP-01 No silent failure patterns      PASS | FAIL — evidence
+AP-02 No hidden state                PASS | FAIL — evidence
+AP-03 No mutable defaults            PASS | FAIL — evidence
+AP-04 No implicit failure paths      PASS | FAIL — evidence
+AP-05 Input validation present       PASS | FAIL — evidence
+AP-06 No duplicate logic introduced  PASS | FAIL — evidence
+AP-07 No hidden side effects         PASS | FAIL — evidence
+AP-08 No pipeline bypass             PASS | FAIL — evidence
+
 ```
 
-## SUMMARY
+---
+
+# 4. SCOPE VERIFICATION
+
+```
+
+SCOPE-01 Only declared files changed     PASS | FAIL — evidence
+SCOPE-02 No scope creep                  PASS | FAIL — evidence
+SCOPE-03 Tests added/updated             PASS | FAIL — evidence
+
+```
+
+---
+
+# 5. SUMMARY
+
+```
 
 Total checks: {N}
 Passed: {N}
 Failed: {N}
 
-If any FAIL: list each with proposed fix.
+```
+
+If any FAIL:
+- list each failure
+- include root cause
+- propose minimal fix
+
+---
+
+# RULE
+
+If any invariant FAILS:
+→ change is INVALID
+
+If engineering or anti-pattern FAILS:
+→ fix required before approval
+```
+
