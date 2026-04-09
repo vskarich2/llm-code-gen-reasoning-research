@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     KEY_CONFIG,
     KEY_GEN_EVENT_ID,
     KEY_MODEL,
@@ -15,12 +15,12 @@ from side_projects.graph_runner.constants import (
     KEY_RAW_RESPONSE,
     NODE_TYPE_EFFECT,
 )
-from side_projects.graph_runner.effect_wrapper import (
+from side_projects.graph_runner.runtime.effect_wrapper import (
     EffectLog,
     get_noop_logger,
     wrap_llm_call,
 )
-from side_projects.graph_runner.node_interface import BaseNode, NodeResult
+from side_projects.graph_runner.graph.node_interface import BaseNode, NodeResult
 
 
 class GenerateNode(BaseNode):

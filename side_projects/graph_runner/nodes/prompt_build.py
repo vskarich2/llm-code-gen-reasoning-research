@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     CASE_FIELD_LOGICAL_FILE_KEYS,
     KEY_CASE,
     KEY_CONDITION,
@@ -18,7 +18,7 @@ from side_projects.graph_runner.constants import (
     KEY_RETRY_CONTEXT,
     NODE_TYPE_PURE,
 )
-from side_projects.graph_runner.node_interface import BaseNode, NodeResult
+from side_projects.graph_runner.graph.node_interface import BaseNode, NodeResult
 
 
 class PromptBuildNode(BaseNode):

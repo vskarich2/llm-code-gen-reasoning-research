@@ -36,7 +36,7 @@ def run_shadow(
     graph_ev = None
     graph_error = None
     try:
-        from side_projects.graph_runner.run_single_attempt import (
+        from side_projects.graph_runner.control.run_single_attempt import (
             run_graph_v1,
         )
         from unittest.mock import MagicMock

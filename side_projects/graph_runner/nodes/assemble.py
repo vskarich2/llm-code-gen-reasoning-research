@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     FIELD_PRIMARY,
     KEY_ARTIFACT_ID,
     KEY_AST_RESULT,
@@ -42,7 +42,7 @@ from side_projects.graph_runner.constants import (
     KEY_STRICT_PARSE,
     NODE_TYPE_PURE,
 )
-from side_projects.graph_runner.node_interface import BaseNode, NodeResult
+from side_projects.graph_runner.graph.node_interface import BaseNode, NodeResult
 
 
 ALL_INPUT_KEYS = frozenset({

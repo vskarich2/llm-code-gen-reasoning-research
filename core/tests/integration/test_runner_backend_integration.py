@@ -135,7 +135,7 @@ class TestSingleAttemptDispatch:
         try:
             config.execution.single_attempt_backend = BACKEND_GRAPH_V1
             with patch(
-                "side_projects.graph_runner.run_single_attempt"
+                "side_projects.graph_runner.control.run_single_attempt"
                 ".run_graph_v1",
             ) as mock:
                 mock.return_value = ("cid", "cond", {"pass": True})
@@ -155,7 +155,7 @@ class TestSingleAttemptDispatch:
         try:
             config.execution.single_attempt_backend = BACKEND_SHADOW
             with patch(
-                "side_projects.graph_runner.shadow_compare.run_shadow",
+                "side_projects.graph_runner.control.shadow_compare.run_shadow",
             ) as mock:
                 mock.return_value = ("cid", "cond", {"pass": True})
                 _dispatch_single_attempt(
@@ -191,7 +191,7 @@ class TestRetryDispatch:
         try:
             config.execution.retry_backend = BACKEND_GRAPH_V1
             with patch(
-                "side_projects.graph_runner.retry_controller"
+                "side_projects.graph_runner.control.retry_controller"
                 ".run_retry_graph",
             ) as mock:
                 mock.return_value = ("cid", "cond", {"pass": True})
@@ -209,7 +209,7 @@ class TestRetryDispatch:
         try:
             config.execution.retry_backend = BACKEND_SHADOW
             with patch(
-                "side_projects.graph_runner.shadow_retry"
+                "side_projects.graph_runner.control.shadow_retry"
                 ".run_shadow_retry",
             ) as mock:
                 mock.return_value = ("cid", "cond", {"pass": True})
@@ -243,7 +243,7 @@ class TestShadowSafety:
             config.execution.single_attempt_backend = BACKEND_SHADOW
             with AdapterContext(adapter):
                 with patch(
-                    "side_projects.graph_runner.run_single_attempt"
+                    "side_projects.graph_runner.control.run_single_attempt"
                     ".run_graph_v1",
                     side_effect=RuntimeError("boom"),
                 ):

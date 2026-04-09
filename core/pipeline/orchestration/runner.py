@@ -186,11 +186,11 @@ def _dispatch_single_attempt(
         )
 
     if backend == BACKEND_GRAPH_V1:
-        from side_projects.graph_runner.run_single_attempt import run_graph_v1
+        from side_projects.graph_runner.control.run_single_attempt import run_graph_v1
         return run_graph_v1(case, model, condition, logger, case_start_eid)
 
     if backend == BACKEND_SHADOW:
-        from side_projects.graph_runner.shadow_compare import run_shadow
+        from side_projects.graph_runner.control.shadow_compare import run_shadow
         return run_shadow(case, model, condition, logger, case_start_eid)
 
     # Default: BACKEND_LEGACY_V2
@@ -226,7 +226,7 @@ def _dispatch_retry(
         )
 
     if backend == BACKEND_GRAPH_V1:
-        from side_projects.graph_runner.retry_controller import (
+        from side_projects.graph_runner.control.retry_controller import (
             run_retry_graph,
         )
         return run_retry_graph(
@@ -234,7 +234,7 @@ def _dispatch_retry(
         )
 
     if backend == BACKEND_SHADOW:
-        from side_projects.graph_runner.shadow_retry import (
+        from side_projects.graph_runner.control.shadow_retry import (
             run_shadow_retry,
         )
         return run_shadow_retry(

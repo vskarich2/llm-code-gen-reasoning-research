@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Type
 
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     NODE_ID_ASSEMBLE,
     NODE_ID_AST_VERIFY,
     NODE_ID_CLASSIFIER_AGGREGATION,
@@ -26,7 +26,7 @@ from side_projects.graph_runner.constants import (
     NODE_ID_ROUTE,
     NODE_ID_SPEC_ORACLE,
 )
-from side_projects.graph_runner.node_interface import BaseNode
+from side_projects.graph_runner.graph.node_interface import BaseNode
 
 
 class NodeRegistry:
@@ -84,7 +84,7 @@ def register_phase1_nodes() -> None:
     from side_projects.graph_runner.nodes.normalize import NormalizeNode
     from side_projects.graph_runner.nodes.reconstruct import ReconstructNode
     from side_projects.graph_runner.nodes.ast_verify import ASTNode
-    from side_projects.graph_runner.nodes.spec_oracle import SpecOracleNode
+    from side_projects.graph_runner.nodes.oracles.spec_oracle import SpecOracleNode
 
     REGISTRY.register(NODE_ID_PARSE, ParseNode)
     REGISTRY.register(NODE_ID_ROUTE, RouteNode)

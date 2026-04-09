@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     CASE_FIELD_LOGICAL_FILE_KEYS,
     DDC_FAMILIES,
     DDC_TRAP_SEPARATOR,
@@ -64,7 +64,7 @@ from side_projects.graph_runner.constants import (
     NODE_ID_SPEC_ORACLE,
     CASE_FIELD_ID,
 )
-from side_projects.graph_runner.engine.types import (
+from side_projects.graph_runner.graph.types import (
     EdgeSpec,
     ExecutionContext,
     GraphSpec,
@@ -84,7 +84,7 @@ def make_adapter(node_instance: Any) -> Any:
     def executor(
         context: ExecutionContext, inputs: Mapping[str, Any],
     ) -> NodeResult:
-        from side_projects.graph_runner.engine.types import (
+        from side_projects.graph_runner.graph.types import (
             NodeResult as EngineResult,
         )
         old_result = node_instance.execute(dict(inputs))
@@ -129,7 +129,7 @@ def build_pipeline_graph(config: Any = None) -> GraphSpec:
     from side_projects.graph_runner.nodes.normalize import NormalizeNode
     from side_projects.graph_runner.nodes.reconstruct import ReconstructNode
     from side_projects.graph_runner.nodes.ast_verify import ASTNode
-    from side_projects.graph_runner.nodes.spec_oracle import SpecOracleNode
+    from side_projects.graph_runner.nodes.oracles.spec_oracle import SpecOracleNode
     from side_projects.graph_runner.nodes.metrics import MetricsNode
     from side_projects.graph_runner.nodes.assemble import AssembleNode
     from side_projects.graph_runner.nodes.log import LogNode

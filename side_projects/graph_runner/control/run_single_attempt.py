@@ -12,16 +12,16 @@ import time
 from typing import Any
 from unittest.mock import MagicMock
 
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     KEY_CASE,
     KEY_CONDITION,
     KEY_CONFIG,
     KEY_MODEL,
     KEY_RETRY_CONTEXT,
 )
-from side_projects.graph_runner.dag import build_pipeline_graph, SEED_KEYS
-from side_projects.graph_runner.engine.scheduler import run_graph
-from side_projects.graph_runner.engine.types import ExecutionContext
+from side_projects.graph_runner.graph.dag import build_pipeline_graph, SEED_KEYS
+from side_projects.graph_runner.graph.scheduler import run_graph
+from side_projects.graph_runner.graph.types import ExecutionContext
 
 log = logging.getLogger("t3.graph_single_attempt")
 

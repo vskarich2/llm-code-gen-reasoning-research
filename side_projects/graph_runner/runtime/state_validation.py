@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     KEY_EXECUTION_RESULT,
     KEY_PARSE_MODE,
     KEY_ROUTING,

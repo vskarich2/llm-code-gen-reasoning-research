@@ -6,7 +6,7 @@ importing the V2 orchestration layer.
 
 from __future__ import annotations
 
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     EXEC_STRUCTURAL_FAILURE,
     EXEC_SUCCESS,
     EXEC_SYNTAX_ERROR,

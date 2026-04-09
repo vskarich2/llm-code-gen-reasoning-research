@@ -52,7 +52,7 @@ class TestSingleAttemptReplay:
 
         condition = get_first_single_attempt_condition(config)
         with AdapterContext(adapter):
-            from side_projects.graph_runner.run_single_attempt import (
+            from side_projects.graph_runner.control.run_single_attempt import (
                 run_graph_v1,
             )
             cid, cond, ev = run_graph_v1(
@@ -105,7 +105,7 @@ class TestRetryReplay:
         adapter = PromptClassifyingAdapter(gen_resp)
 
         with AdapterContext(adapter):
-            from side_projects.graph_runner.retry_controller import (
+            from side_projects.graph_runner.control.retry_controller import (
                 run_retry_graph,
             )
             cid, cond, ev = run_retry_graph(

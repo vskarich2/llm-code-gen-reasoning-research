@@ -30,7 +30,7 @@ from side_projects.graph_runner.replay.adapter import (
     LLMResponse,
     get_active_adapter,
 )
-from side_projects.graph_runner.shadow_retry import compare_retry_results
+from side_projects.graph_runner.control.shadow_retry import compare_retry_results
 
 CASE_ID = get_first_ddc_case_id()
 
@@ -77,7 +77,7 @@ def run_legacy(case, condition, config, adapter):
 
 
 def run_graph(case, condition, config, adapter):
-    from side_projects.graph_runner.retry_controller import run_retry_graph
+    from side_projects.graph_runner.control.retry_controller import run_retry_graph
     model = get_first_generation_model(config)
     logger = RecordingLogger()
     with AdapterContext(adapter):
@@ -153,13 +153,13 @@ class TestDispatchRouting:
         assert callable(_dispatch_retry)
 
     def test_retry_controller_importable(self):
-        from side_projects.graph_runner.retry_controller import (
+        from side_projects.graph_runner.control.retry_controller import (
             run_retry_graph,
         )
         assert callable(run_retry_graph)
 
     def test_shadow_retry_importable(self):
-        from side_projects.graph_runner.shadow_retry import (
+        from side_projects.graph_runner.control.shadow_retry import (
             run_shadow_retry,
         )
         assert callable(run_shadow_retry)

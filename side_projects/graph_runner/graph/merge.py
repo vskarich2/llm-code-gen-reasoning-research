@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from side_projects.graph_runner.engine.errors import MergeConflictError
-from side_projects.graph_runner.engine.types import ExecutionState, NodeResult
+from side_projects.graph_runner.graph.errors import MergeConflictError
+from side_projects.graph_runner.graph.types import ExecutionState, NodeResult
 
 
 def merge_node_result(

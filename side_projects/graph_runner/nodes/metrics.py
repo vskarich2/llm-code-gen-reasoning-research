@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     EXEC_KEY_EXECUTION_CATEGORY,
     EXEC_SUCCESS,
     FIELD_CANONICAL_DIMS,
@@ -33,7 +33,7 @@ from side_projects.graph_runner.constants import (
     RECON_SUCCESS,
     ROUTE_SOURCE_NONE,
 )
-from side_projects.graph_runner.node_interface import BaseNode, NodeResult
+from side_projects.graph_runner.graph.node_interface import BaseNode, NodeResult
 
 
 class MetricsNode(BaseNode):

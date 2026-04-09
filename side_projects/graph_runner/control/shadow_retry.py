@@ -35,7 +35,7 @@ def run_shadow_retry(
     graph_error = None
     try:
         from unittest.mock import MagicMock
-        from side_projects.graph_runner.retry_controller import (
+        from side_projects.graph_runner.control.retry_controller import (
             run_retry_graph,
         )
         shadow_logger = MagicMock()

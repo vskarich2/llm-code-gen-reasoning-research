@@ -11,14 +11,14 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     KEY_FINAL_RESULT,
     KEY_LOG_STATUS,
     LOG_STATUS_SKIPPED,
     LOG_STATUS_WRITTEN,
     NODE_TYPE_EFFECT,
 )
-from side_projects.graph_runner.node_interface import BaseNode, NodeResult
+from side_projects.graph_runner.graph.node_interface import BaseNode, NodeResult
 
 
 class LogNode(BaseNode):

@@ -12,7 +12,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, FrozenSet
 
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     NODE_TYPE_EFFECT,
     NODE_TYPE_PURE,
     OUTCOME_SUCCESS,
@@ -107,7 +107,7 @@ class BaseNode(ABC):
 
     def validate_enum_fields(self, result: NodeResult) -> None:
         """Validate all closed-enum fields in outputs."""
-        from side_projects.graph_runner.state_validation import (
+        from side_projects.graph_runner.runtime.state_validation import (
             validate_node_outputs,
         )
         validate_node_outputs(result.outputs)

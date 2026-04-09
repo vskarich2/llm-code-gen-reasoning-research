@@ -21,7 +21,7 @@ from core.pipeline.parsing.parser_v2 import (
     parse_v2_format,
     parse_v2_recovery,
 )
-from side_projects.graph_runner.node_interface import BaseNode, NodeResult
+from side_projects.graph_runner.graph.node_interface import BaseNode, NodeResult
 
 
 class ParseNode(BaseNode):

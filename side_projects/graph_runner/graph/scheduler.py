@@ -10,18 +10,18 @@ import logging
 import time
 from typing import Any, Mapping
 
-from side_projects.graph_runner.engine.errors import (
+from side_projects.graph_runner.graph.errors import (
     DeadGraphError,
     GuardEvaluationError,
     NodeContractError,
     NodeExecutionError,
 )
-from side_projects.graph_runner.engine.merge import (
+from side_projects.graph_runner.graph.merge import (
     mark_failed,
     mark_skipped,
     merge_node_result,
 )
-from side_projects.graph_runner.engine.types import (
+from side_projects.graph_runner.graph.types import (
     ExecutionContext,
     ExecutionState,
     ExecutionSummary,
@@ -32,7 +32,7 @@ from side_projects.graph_runner.engine.types import (
     SKIP_UNSATISFIABLE_INPUTS,
     SKIP_UPSTREAM_FAILED,
 )
-from side_projects.graph_runner.engine.validation import (
+from side_projects.graph_runner.graph.graph_validation import (
     compute_topological_order,
     validate_graph,
 )

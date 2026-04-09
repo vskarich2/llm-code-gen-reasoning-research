@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     ATTR_EXECUTION_EQUIVALENT,
     ATTR_FILES_DICT,
     ATTR_PARSE_VALID,
@@ -40,7 +40,7 @@ from side_projects.graph_runner.constants import (
     ROUTE_SOURCE_RECOVERY,
     ROUTE_SOURCE_STRICT,
 )
-from side_projects.graph_runner.node_interface import BaseNode, NodeResult
+from side_projects.graph_runner.graph.node_interface import BaseNode, NodeResult
 
 
 class RoutingDecision:

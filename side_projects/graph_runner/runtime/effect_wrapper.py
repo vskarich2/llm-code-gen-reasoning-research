@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     EFFECT_FIELD_CALL_TYPE,
     EFFECT_FIELD_DURATION_MS,
     EFFECT_FIELD_ERROR_TYPE,

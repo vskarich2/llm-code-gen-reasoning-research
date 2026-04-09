@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from core.logging_.node_logger import log_node_warning
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     FIELD_PRIMARY,
     FIELD_SELECTED_SOURCE,
     KEY_ARTIFACT_ID,

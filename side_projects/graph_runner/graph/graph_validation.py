@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from side_projects.graph_runner.engine.errors import GraphValidationError
-from side_projects.graph_runner.engine.types import GraphSpec
+from side_projects.graph_runner.graph.errors import GraphValidationError
+from side_projects.graph_runner.graph.types import GraphSpec
 
 
 def validate_graph(

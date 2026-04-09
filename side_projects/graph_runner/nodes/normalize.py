@@ -16,7 +16,7 @@ from core.constants.pipeline_constants import (
     NODE_TYPE_PURE,
 )
 from core.evaluation.reasoning_v2 import normalize_generation_v2
-from side_projects.graph_runner.node_interface import BaseNode, NodeResult
+from side_projects.graph_runner.graph.node_interface import BaseNode, NodeResult
 
 
 class NormalizeNode(BaseNode):

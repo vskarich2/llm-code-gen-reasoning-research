@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch, MagicMock
 
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     KEY_ARTIFACT_ID,
     KEY_AST_RESULT,
     KEY_CASE,
@@ -225,24 +225,24 @@ def run_graph_pipeline(
     from side_projects.graph_runner.nodes.normalize import NormalizeNode
     from side_projects.graph_runner.nodes.reconstruct import ReconstructNode
     from side_projects.graph_runner.nodes.ast_verify import ASTNode
-    from side_projects.graph_runner.nodes.spec_oracle import SpecOracleNode
+    from side_projects.graph_runner.nodes.oracles.spec_oracle import SpecOracleNode
     from side_projects.graph_runner.nodes.execute import ExecuteNode
     from side_projects.graph_runner.nodes.oracles.inline_oracle import InlineOracleNode
     from side_projects.graph_runner.nodes.oracles.oracle_aggregation import OracleAggregationNode
     from side_projects.graph_runner.nodes.classifiers.reasoning_classifier import ReasoningClassifierNode
     from side_projects.graph_runner.nodes.classifiers.classifier_aggregation import ClassifierAggregationNode
-    from side_projects.graph_runner.engine.types import (
+    from side_projects.graph_runner.graph.types import (
         NodeSpec, GraphSpec, EdgeSpec, ExecutionContext, NodeResult,
     )
-    from side_projects.graph_runner.engine.scheduler import run_graph
-    from side_projects.graph_runner.dag import make_adapter
-    from side_projects.graph_runner.constants import (
+    from side_projects.graph_runner.graph.scheduler import run_graph
+    from side_projects.graph_runner.graph.dag import make_adapter
+    from side_projects.graph_runner.runtime.constants import (
         NODE_ID_PARSE, NODE_ID_ROUTE, NODE_ID_NORMALIZE,
         NODE_ID_RECONSTRUCT, NODE_ID_AST_VERIFY, NODE_ID_SPEC_ORACLE,
         NODE_ID_EXECUTE, NODE_ID_ORACLE_INLINE, NODE_ID_ORACLE_AGGREGATION,
         NODE_ID_CLASSIFIER_REASONING, NODE_ID_CLASSIFIER_AGGREGATION,
     )
-    from side_projects.graph_runner.dag import guard_spec_oracle
+    from side_projects.graph_runner.graph.dag import guard_spec_oracle
 
     recovery_exec = True
     if config is not None and hasattr(config, "execution"):

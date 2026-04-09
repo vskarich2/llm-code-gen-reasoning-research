@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     CASE_FIELD_TEMPLATE,
     EXEC_KEY_EXECUTION,
     EXEC_KEY_EXECUTION_CATEGORY,
@@ -30,12 +30,12 @@ from side_projects.graph_runner.constants import (
     STATUS_GENERATION_CONTRACT_VIOLATION,
     TEMPLATE_SWEBENCH_REAL_WORLD,
 )
-from side_projects.graph_runner.effect_wrapper import (
+from side_projects.graph_runner.runtime.effect_wrapper import (
     EffectLog,
     get_noop_logger,
     wrap_subprocess_call,
 )
-from side_projects.graph_runner.node_interface import BaseNode, NodeResult
+from side_projects.graph_runner.graph.node_interface import BaseNode, NodeResult
 
 
 class ExecuteNode(BaseNode):

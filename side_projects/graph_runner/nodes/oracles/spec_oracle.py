@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     CASE_FIELD_ID,
     DDC_FAMILIES,
     DDC_TRAP_SEPARATOR,
@@ -18,7 +18,7 @@ from side_projects.graph_runner.constants import (
     NODE_TYPE_PURE,
 )
 from core.evaluation.spec_oracle import run_spec_oracle
-from side_projects.graph_runner.node_interface import BaseNode, NodeResult
+from side_projects.graph_runner.graph.node_interface import BaseNode, NodeResult
 
 
 def is_ddc_case(case: dict[str, Any]) -> bool:

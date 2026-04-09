@@ -12,7 +12,7 @@ import json
 from typing import Any
 
 from core.pipeline.reconstructor import ReconstructionResult, reconstruct_strict
-from side_projects.graph_runner.constants import (
+from side_projects.graph_runner.runtime.constants import (
     ARTIFACT_ID_NONE,
     CASE_FIELD_LOGICAL_FILE_KEYS,
     FILE_MARKER_MODIFIED,
@@ -28,7 +28,7 @@ from side_projects.graph_runner.constants import (
     RECON_SUCCESS,
     STATUS_GENERATION_CONTRACT_VIOLATION,
 )
-from side_projects.graph_runner.node_interface import BaseNode, NodeResult
+from side_projects.graph_runner.graph.node_interface import BaseNode, NodeResult
 
 
 def build_full_code(
