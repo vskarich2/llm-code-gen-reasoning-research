@@ -1,7 +1,10 @@
-"""Shadow mode for retry: run both legacy and graph, diff trajectories.
+"""Shadow mode for retry: run both legacy retry_v2 and transitional retry controller.
 
-Returns the legacy result. Graph result is for validation only.
-Any mismatch is logged as a structured warning.
+The transitional controller preserves retry_v2 semantics by delegating
+per-attempt stages to V2 stage functions. This shadow mode validates
+the controller layer, not full graph-native retry.
+
+Returns the legacy result authoritatively.
 """
 
 from __future__ import annotations

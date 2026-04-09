@@ -172,11 +172,18 @@ def _dispatch_single_attempt(
     from core.config.experiment_config import get_config
     from core.constants.pipeline_constants import (
         BACKEND_GRAPH_V1, BACKEND_LEGACY_V2, BACKEND_SHADOW,
+        VALID_BACKENDS,
     )
     config = get_config()
     backend = getattr(
         config.execution, "single_attempt_backend", BACKEND_LEGACY_V2,
     )
+
+    if backend not in VALID_BACKENDS:
+        raise RuntimeError(
+            f"Invalid execution.single_attempt_backend={backend!r}. "
+            f"Expected one of {sorted(VALID_BACKENDS)}"
+        )
 
     if backend == BACKEND_GRAPH_V1:
         from side_projects.graph_runner.run_single_attempt import run_graph_v1
@@ -205,11 +212,18 @@ def _dispatch_retry(
     from core.config.experiment_config import get_config
     from core.constants.pipeline_constants import (
         BACKEND_GRAPH_V1, BACKEND_LEGACY_V2, BACKEND_SHADOW,
+        VALID_BACKENDS,
     )
     config = get_config()
     backend = getattr(
         config.execution, "retry_backend", BACKEND_LEGACY_V2,
     )
+
+    if backend not in VALID_BACKENDS:
+        raise RuntimeError(
+            f"Invalid execution.retry_backend={backend!r}. "
+            f"Expected one of {sorted(VALID_BACKENDS)}"
+        )
 
     if backend == BACKEND_GRAPH_V1:
         from side_projects.graph_runner.retry_controller import (

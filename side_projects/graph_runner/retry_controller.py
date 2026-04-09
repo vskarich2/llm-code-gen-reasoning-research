@@ -1,13 +1,11 @@
-"""Graph-based retry controller — state machine over single-attempt DAG.
+"""Retry orchestration controller over the migration boundary.
 
-Replicates retry_v2.py semantics EXACTLY by:
-1. Using _build_retry_prompt_for_attempt for prompt construction (V2 function)
-2. Using the graph engine for stages 2-9 (parse through metrics)
-3. Using the V2 critique/hint generation functions directly
-4. Using the V2 result assembly path for the final event dict
+This controller migrates retry orchestration and backend dispatch while
+preserving exact retry_v2.py semantics by delegating per-attempt stage
+execution to existing V2 stage functions.
 
-This is NOT a reimplementation. It delegates to V2 functions for all
-policy decisions and only replaces the per-attempt stage execution.
+This is intentionally transitional: the controller layer is migrated,
+but the retry attempt internals are not yet fully graph-native.
 """
 
 from __future__ import annotations
@@ -32,11 +30,11 @@ def run_retry_graph(
     logger: Any,
     case_start_eid: int = 0,
 ) -> tuple[str, str, dict]:
-    """Graph-based retry that matches retry_v2.py semantics exactly.
+    """Transitional retry controller preserving retry_v2.py semantics.
 
-    Uses V2 functions for: prompt construction, critique generation,
-    retry stopping, best-attempt selection, result assembly.
-    Uses graph engine for: stages 2-9 (parse → metrics).
+    Per-attempt stage execution is delegated to V2 stage functions
+    for exact migration safety. Full graph-native retry remains
+    future work.
     """
     from core.config.experiment_config import get_config
     from core.evaluation.evaluator_v2 import (

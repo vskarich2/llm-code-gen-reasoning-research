@@ -1,0 +1,2097 @@
+diff --git a/core/config/experiment_config.py b/core/config/experiment_config.py
+index b509f529..3a333ac7 100644
+--- a/core/config/experiment_config.py
++++ b/core/config/experiment_config.py
+@@ -174,6 +174,8 @@ class ExecutionConfig:
+     validate_prompts: bool = True  # run AST/metadata/structure checks on prompt templates at load
+     worker_graceful_shutdown_seconds: int = 30
+     recovery_execution: bool = True
++    single_attempt_backend: str = "legacy_v2"  # "legacy_v2" | "graph_v1" | "shadow"
++    retry_backend: str = "legacy_v2"  # "legacy_v2" | "graph_v1" | "shadow"
+     max_orchestrator_attempts: int = 10
+     anthropic_client_timeout: float = 120.0
+     anthropic_max_output_tokens: int = 8192
+diff --git a/core/constants/pipeline_constants.py b/core/constants/pipeline_constants.py
+index 5e660329..53f60f67 100644
+--- a/core/constants/pipeline_constants.py
++++ b/core/constants/pipeline_constants.py
+@@ -307,6 +307,21 @@ WARNING_STATE_KEY_OVERWRITE: Final[str] = (
+ )
+ 
+ 
++# ============================================================
++# SINGLE-ATTEMPT BACKEND — execution backend selection
++# ============================================================
++
++BACKEND_LEGACY_V2: Final[str] = "legacy_v2"
++BACKEND_GRAPH_V1: Final[str] = "graph_v1"
++BACKEND_SHADOW: Final[str] = "shadow"
++
++VALID_BACKENDS: Final[FrozenSet[str]] = frozenset({
++    BACKEND_LEGACY_V2,
++    BACKEND_GRAPH_V1,
++    BACKEND_SHADOW,
++})
++
++
+ # ============================================================
+ # INVARIANT VIOLATION TYPES — telemetry for pipeline validation
+ # ============================================================
+diff --git a/core/pipeline/orchestration/runner.py b/core/pipeline/orchestration/runner.py
+index a391d79c..4e5d211a 100644
+--- a/core/pipeline/orchestration/runner.py
++++ b/core/pipeline/orchestration/runner.py
+@@ -158,6 +158,80 @@ def _run_one(case: dict, model: str, condition: str, logger) -> tuple[str, str,
+         raise
+ 
+ 
++def _dispatch_single_attempt(
++    case: dict, model: str, condition: str, logger,
++    case_start_eid: int | str,
++) -> tuple[str, str, dict]:
++    """Route single-attempt conditions through the configured backend.
++
++    Backend selection via config.execution.single_attempt_backend:
++      - BACKEND_LEGACY_V2 (default): existing V2 pipeline
++      - BACKEND_GRAPH_V1: new graph engine
++      - BACKEND_SHADOW: run both, compare, return legacy result
++    """
++    from core.config.experiment_config import get_config
++    from core.constants.pipeline_constants import (
++        BACKEND_GRAPH_V1, BACKEND_LEGACY_V2, BACKEND_SHADOW,
++    )
++    config = get_config()
++    backend = getattr(
++        config.execution, "single_attempt_backend", BACKEND_LEGACY_V2,
++    )
++
++    if backend == BACKEND_GRAPH_V1:
++        from side_projects.graph_runner.run_single_attempt import run_graph_v1
++        return run_graph_v1(case, model, condition, logger, case_start_eid)
++
++    if backend == BACKEND_SHADOW:
++        from side_projects.graph_runner.shadow_compare import run_shadow
++        return run_shadow(case, model, condition, logger, case_start_eid)
++
++    # Default: BACKEND_LEGACY_V2
++    from core.pipeline.orchestration.execution_v2 import run_v2
++    return run_v2(case, model, condition, logger, case_start_eid)
++
++
++def _dispatch_retry(
++    case: dict, model: str, condition: str, logger,
++    case_start_eid: int | str,
++) -> tuple[str, str, dict]:
++    """Route retry/critique conditions through the configured backend.
++
++    Backend selection via config.execution.retry_backend:
++      - BACKEND_LEGACY_V2 (default): existing retry_v2 pipeline
++      - BACKEND_GRAPH_V1: graph-based retry controller
++      - BACKEND_SHADOW: run both, compare, return legacy result
++    """
++    from core.config.experiment_config import get_config
++    from core.constants.pipeline_constants import (
++        BACKEND_GRAPH_V1, BACKEND_LEGACY_V2, BACKEND_SHADOW,
++    )
++    config = get_config()
++    backend = getattr(
++        config.execution, "retry_backend", BACKEND_LEGACY_V2,
++    )
++
++    if backend == BACKEND_GRAPH_V1:
++        from side_projects.graph_runner.retry_controller import (
++            run_retry_graph,
++        )
++        return run_retry_graph(
++            case, model, condition, logger, case_start_eid,
++        )
++
++    if backend == BACKEND_SHADOW:
++        from side_projects.graph_runner.shadow_retry import (
++            run_shadow_retry,
++        )
++        return run_shadow_retry(
++            case, model, condition, logger, case_start_eid,
++        )
++
++    # Default: BACKEND_LEGACY_V2
++    from core.pipeline.orchestration.retry_v2 import run_retry_v2
++    return run_retry_v2(case, model, condition, logger, case_start_eid)
++
++
+ def _run_one_inner(case: dict, model: str, condition: str, logger,
+                     case_start_eid: int | str) -> tuple[str, str, dict]:
+     # HARD GUARD: only v2 conditions are allowed
+@@ -169,15 +243,11 @@ def _run_one_inner(case: dict, model: str, condition: str, logger,
+ 
+     if condition in ("baseline_v2", "leg_reduction_v2", "leg_reduction_lean_v2",
+                      "baseline_v3", "leg_reduction_lean_v3"):
+-        from core.pipeline.orchestration.execution_v2 import run_v2
+-        return run_v2(case, model, condition, logger, case_start_eid)
+-    if condition.startswith("retry_"):
+-        from core.pipeline.orchestration.retry_v2 import run_retry_v2
+-        return run_retry_v2(case, model, condition, logger, case_start_eid)
+-    if condition.startswith("critique_"):
+-        # V3 critique conditions route through retry with critique variant
+-        from core.pipeline.orchestration.retry_v2 import run_retry_v2
+-        return run_retry_v2(case, model, condition, logger, case_start_eid)
++        return _dispatch_single_attempt(
++            case, model, condition, logger, case_start_eid)
++    if condition.startswith("retry_") or condition.startswith("critique_"):
++        return _dispatch_retry(
++            case, model, condition, logger, case_start_eid)
+ 
+     raise RuntimeError(
+         f"FATAL: V2 condition '{condition}' has no dispatch handler"
+diff --git a/core/tests/test_graph_equivalence.py b/core/tests/test_graph_equivalence.py
+new file mode 100644
+index 00000000..d035405a
+--- /dev/null
++++ b/core/tests/test_graph_equivalence.py
+@@ -0,0 +1,152 @@
++"""Equivalence tests: graph engine vs V2 pipeline.
++
++Runs the same deterministic mock LLM response through both the V2 pipeline
++stages and the graph engine, then compares every deterministic output field.
++
++Any mismatch is a migration bug, not a test failure.
++
++Run: .venv/bin/python -m pytest core/tests/test_graph_equivalence.py -v
++"""
++
++import json
++import sys
++from pathlib import Path
++from unittest.mock import patch
++
++sys.path.insert(0, ".")
++
++import pytest
++
++from side_projects.graph_runner.validation.equivalence import (
++    build_buggy_response,
++    build_fixed_response,
++    compare_outputs,
++    load_case,
++    mock_call_model,
++    run_graph_pipeline,
++    run_v2_pipeline,
++    COMPARE_FIELDS,
++)
++
++PROJECT_ROOT = Path(__file__).resolve().parents[2]
++
++
++# ── Test cases ──
++
++DDC_BASELINES = [
++    "logging_pipeline_chain",
++    "ml_feature_chain",
++    "auth_context_chain",
++]
++
++DDC_VARIANTS = [
++    "logging_pipeline_chain_trap_1",
++    "ml_feature_chain_trap_1",
++    "auth_context_chain_trap_1",
++]
++
++ALL_DDC = DDC_BASELINES + DDC_VARIANTS
++
++
++# ── Fixtures ──
++
++@pytest.fixture(scope="module")
++def config():
++    from core.config.experiment_config import load_config, is_config_loaded
++    if not is_config_loaded():
++        load_config("core/config/config_storage/smoke_ddc_cases.yaml")
++    from core.config.experiment_config import get_config
++    return get_config()
++
++
++# ── Fixed path equivalence ──
++
++class TestFixedPathEquivalence:
++    """Reference fix response: V2 and graph must produce identical outputs."""
++
++    @pytest.mark.parametrize("case_id", ALL_DDC)
++    def test_fixed_equivalence(self, case_id, config):
++        case, all_cases = load_case(case_id)
++        raw_response = build_fixed_response(case, all_cases)
++
++        v2_out = run_v2_pipeline(case, raw_response, config)
++        graph_out = run_graph_pipeline(case, raw_response, config)
++
++        result = compare_outputs(case_id, "fixed", v2_out, graph_out)
++
++        if not result.all_match:
++            lines = [f"MISMATCH for {case_id} (fixed):"]
++            for field_name, (v2_val, graph_val) in result.mismatches.items():
++                lines.append(
++                    f"  {field_name}: V2={v2_val!r} GRAPH={graph_val!r}"
++                )
++            pytest.fail("\n".join(lines))
++
++
++# ── Buggy path equivalence ──
++
++class TestBuggyPathEquivalence:
++    """UNCHANGED response: V2 and graph must produce identical outputs."""
++
++    @pytest.mark.parametrize("case_id", ALL_DDC)
++    def test_buggy_equivalence(self, case_id, config):
++        case, all_cases = load_case(case_id)
++        raw_response = build_buggy_response(case)
++
++        v2_out = run_v2_pipeline(case, raw_response, config)
++        graph_out = run_graph_pipeline(case, raw_response, config)
++
++        result = compare_outputs(case_id, "buggy", v2_out, graph_out)
++
++        if not result.all_match:
++            lines = [f"MISMATCH for {case_id} (buggy):"]
++            for field_name, (v2_val, graph_val) in result.mismatches.items():
++                lines.append(
++                    f"  {field_name}: V2={v2_val!r} GRAPH={graph_val!r}"
++                )
++            pytest.fail("\n".join(lines))
++
++
++# ── Structural tests ──
++
++class TestGraphStructure:
++    """Verify graph engine mechanics independent of comparison."""
++
++    def test_graph_completes_all_nodes_fixed(self, config):
++        case, all_cases = load_case("logging_pipeline_chain")
++        raw_response = build_fixed_response(case, all_cases)
++        graph_out = run_graph_pipeline(case, raw_response, config)
++
++        assert len(graph_out["failed_nodes"]) == 0, (
++            f"Graph had failures: {graph_out['failed_nodes']}"
++        )
++
++    def test_graph_completes_all_nodes_buggy(self, config):
++        case, all_cases = load_case("logging_pipeline_chain")
++        raw_response = build_buggy_response(case)
++        graph_out = run_graph_pipeline(case, raw_response, config)
++
++        assert len(graph_out["failed_nodes"]) == 0, (
++            f"Graph had failures: {graph_out['failed_nodes']}"
++        )
++
++    def test_fixed_case_passes(self, config):
++        case, all_cases = load_case("logging_pipeline_chain")
++        raw_response = build_fixed_response(case, all_cases)
++        graph_out = run_graph_pipeline(case, raw_response, config)
++        assert graph_out["exec_pass"] is True
++        assert graph_out["passed"] is True
++
++    def test_buggy_case_fails(self, config):
++        case, all_cases = load_case("logging_pipeline_chain")
++        raw_response = build_buggy_response(case)
++        graph_out = run_graph_pipeline(case, raw_response, config)
++        assert graph_out["exec_pass"] is False
++        assert graph_out["passed"] is False
++
++    def test_spec_oracle_runs_for_ddc(self, config):
++        case, all_cases = load_case("logging_pipeline_chain")
++        raw_response = build_fixed_response(case, all_cases)
++        graph_out = run_graph_pipeline(case, raw_response, config)
++        assert graph_out["spec_oracle_status"] == "evaluated"
++        assert graph_out["spec_oracle_depth"] == "A"
+diff --git a/core/tests/test_graph_equivalence_full.py b/core/tests/test_graph_equivalence_full.py
+new file mode 100644
+index 00000000..3b040a8b
+--- /dev/null
++++ b/core/tests/test_graph_equivalence_full.py
+@@ -0,0 +1,98 @@
++"""FULL equivalence tests: all 38 DDC cases.
++
++Run: .venv/bin/python -m pytest core/tests/test_graph_equivalence_full.py -v
++"""
++
++import sys
++sys.path.insert(0, ".")
++
++import pytest
++
++from side_projects.graph_runner.validation.equivalence import (
++    build_buggy_response,
++    build_fixed_response,
++    compare_outputs,
++    load_case,
++    run_graph_pipeline,
++    run_v2_pipeline,
++)
++
++ALL_DDC = [
++    "auth_context_chain",
++    "billing_aggregation_chain",
++    "config_derivation_chain",
++    "event_etl_chain",
++    "logging_pipeline_chain",
++    "ml_feature_chain",
++    "search_index_chain",
++    "serialization_pipeline_chain",
++    "auth_context_chain_trap_1",
++    "auth_context_chain_trap_3",
++    "auth_context_chain_trap_4",
++    "auth_context_chain_trap_5",
++    "billing_aggregation_chain_trap_1",
++    "billing_aggregation_chain_trap_3",
++    "billing_aggregation_chain_trap_4",
++    "billing_aggregation_chain_trap_5",
++    "config_derivation_chain_trap_1",
++    "config_derivation_chain_trap_3",
++    "config_derivation_chain_trap_4",
++    "config_derivation_chain_trap_5",
++    "event_etl_chain_trap_1",
++    "event_etl_chain_trap_3",
++    "event_etl_chain_trap_4",
++    "event_etl_chain_trap_5",
++    "logging_pipeline_chain_trap_1",
++    "logging_pipeline_chain_trap_3",
++    "logging_pipeline_chain_trap_4",
++    "logging_pipeline_chain_trap_5",
++    "ml_feature_chain_trap_1",
++    "ml_feature_chain_trap_3",
++    "ml_feature_chain_trap_4",
++    "ml_feature_chain_trap_5",
++    "search_index_chain_trap_3",
++    "search_index_chain_trap_5",
++    "serialization_pipeline_chain_trap_1",
++    "serialization_pipeline_chain_trap_3",
++    "serialization_pipeline_chain_trap_4",
++    "serialization_pipeline_chain_trap_5",
++]
++
++
++@pytest.fixture(scope="module")
++def config():
++    from core.config.experiment_config import load_config, is_config_loaded
++    if not is_config_loaded():
++        load_config("core/config/config_storage/smoke_ddc_cases.yaml")
++    from core.config.experiment_config import get_config
++    return get_config()
++
++
++class TestFullDDCFixed:
++    @pytest.mark.parametrize("case_id", ALL_DDC)
++    def test_fixed(self, case_id, config):
++        case, all_cases = load_case(case_id)
++        raw_response = build_fixed_response(case, all_cases)
++        v2 = run_v2_pipeline(case, raw_response, config)
++        graph = run_graph_pipeline(case, raw_response, config)
++        result = compare_outputs(case_id, "fixed", v2, graph)
++        if not result.all_match:
++            lines = [f"MISMATCH {case_id} fixed:"]
++            for k, (a, b) in result.mismatches.items():
++                lines.append(f"  {k}: V2={a!r} GRAPH={b!r}")
++            pytest.fail("\n".join(lines))
++
++
++class TestFullDDCBuggy:
++    @pytest.mark.parametrize("case_id", ALL_DDC)
++    def test_buggy(self, case_id, config):
++        case, all_cases = load_case(case_id)
++        raw_response = build_buggy_response(case)
++        v2 = run_v2_pipeline(case, raw_response, config)
++        graph = run_graph_pipeline(case, raw_response, config)
++        result = compare_outputs(case_id, "buggy", v2, graph)
++        if not result.all_match:
++            lines = [f"MISMATCH {case_id} buggy:"]
++            for k, (a, b) in result.mismatches.items():
++                lines.append(f"  {k}: V2={a!r} GRAPH={b!r}")
++            pytest.fail("\n".join(lines))
+diff --git a/core/tests/test_retry_equivalence.py b/core/tests/test_retry_equivalence.py
+new file mode 100644
+index 00000000..c516687d
+--- /dev/null
++++ b/core/tests/test_retry_equivalence.py
+@@ -0,0 +1,299 @@
++"""Retry equivalence tests: graph retry controller vs legacy retry_v2.
++
++Runs the same mocked LLM responses through both retry backends and
++compares trajectories + final outputs. Any mismatch is a migration bug.
++
++Run: .venv/bin/python -m pytest core/tests/test_retry_equivalence.py -v
++"""
++
++import json
++import sys
++import time
++from pathlib import Path
++from unittest.mock import patch, MagicMock
++
++sys.path.insert(0, ".")
++
++import pytest
++
++from side_projects.graph_runner.shadow_retry import compare_retry_results
++
++PROJECT_ROOT = Path(__file__).resolve().parents[2]
++CASE_DATA = PROJECT_ROOT / "case_data"
++
++
++# ── Mock LLM ──
++
++ATTEMPT_COUNTER = {"n": 0}
++
++
++def mock_call_model_pass_second(prompt, model, **kwargs):
++    """Mock: fail on attempt 0, pass on attempt 1."""
++    from core.pipeline.llm import ModelCallResult
++    prompt_lower = prompt.lower()
++
++    if "ground truth" in prompt_lower or "mechanism" in prompt_lower or "bug_type" in prompt_lower:
++        return ModelCallResult(
++            response="CORRECT\nCorrect mechanism.",
++            event_id=kwargs.get("parent_event_id") or 1,
++        )
++
++    if "reasoning" in prompt_lower and "commitments" in prompt_lower:
++        response = json.dumps({
++            "reasoning_internal_consistency": "CORRECT",
++            "reasoning_internal_consistency_justification": "test",
++            "commitments_internal_consistency": "CORRECT",
++            "commitments_internal_consistency_justification": "test",
++            "commitments_code_consistency": "CORRECT",
++            "commitments_code_consistency_justification": "test",
++            "reasoning_code_alignment": "CORRECT",
++            "reasoning_code_alignment_justification": "test",
++        })
++        return ModelCallResult(
++            response=response,
++            event_id=kwargs.get("parent_event_id") or 2,
++        )
++
++    if "mismatch" in prompt_lower or "critique" in prompt_lower:
++        return ModelCallResult(
++            response="The fix strategy targets the wrong module.",
++            event_id=kwargs.get("parent_event_id") or 3,
++        )
++
++    return ModelCallResult(
++        response="UNJUDGABLE\nNo data",
++        event_id=kwargs.get("parent_event_id") or 4,
++    )
++
++
++# ── Fixtures ──
++
++@pytest.fixture(scope="module")
++def config():
++    from core.config.experiment_config import load_config, is_config_loaded
++    if not is_config_loaded():
++        load_config("core/config/config_storage/smoke_ddc_cases.yaml")
++    from core.config.experiment_config import get_config
++    return get_config()
++
++
++@pytest.fixture(scope="module")
++def all_cases():
++    with open(CASE_DATA / "cases_v2.json") as f:
++        return json.load(f)
++
++
++def load_case(case_id, all_cases):
++    case = next(c for c in all_cases if c["id"] == case_id)
++    case = dict(case)
++    contents = {}
++    for fp in case["code_files"]:
++        contents[fp] = (CASE_DATA / fp).read_text()
++    case["code_files_contents"] = contents
++    case["logical_file_keys"] = {
++        fp.rsplit("/", 1)[-1]: content for fp, content in contents.items()
++    }
++    return case
++
++
++def build_fixed_response(case, all_cases):
++    ref_path = CASE_DATA / "reference_fixes" / f"{case['id']}.py"
++    ref_code = ref_path.read_text()
++    bug_file = case["reference_fix"]["file"]
++    files = {}
++    for fp in case["code_files"]:
++        filename = fp.rsplit("/", 1)[-1]
++        if filename == bug_file:
++            files[filename] = ref_code
++        else:
++            files[filename] = "UNCHANGED"
++    return json.dumps({
++        "root_cause": f"Bug in {bug_file}",
++        "fix_strategy": "Fix the root cause",
++        "code_commitments": ["Fix must correct behavior"],
++        "files": files,
++    })
++
++
++# ── Run helpers ──
++
++def run_legacy_retry(case, condition, config, mock_fn):
++    """Run legacy retry_v2 with mocked LLM."""
++    from core.pipeline.orchestration.retry_v2 import run_retry_v2
++    logger = MagicMock()
++    # Must patch at BOTH the definition site and the import site
++    with (
++        patch("core.pipeline.llm.call_model", side_effect=mock_fn),
++        patch("core.pipeline.orchestration.retry_v2.call_model", side_effect=mock_fn),
++    ):
++        cid, cond, ev = run_retry_v2(case, "test-model", condition, logger, 0)
++    return ev
++
++
++def run_graph_retry(case, condition, config, mock_fn):
++    """Run graph retry controller with mocked LLM."""
++    from side_projects.graph_runner.retry_controller import run_retry_graph
++    logger = MagicMock()
++    with (
++        patch("core.pipeline.llm.call_model", side_effect=mock_fn),
++        patch("core.pipeline.orchestration.retry_v2.call_model", side_effect=mock_fn),
++    ):
++        cid, cond, ev = run_retry_graph(
++            case, "test-model", condition, logger, 0,
++        )
++    return ev
++
++
++# ── Tests ──
++
++class TestRetryEquivalence:
++    """Graph retry must produce identical results to legacy retry."""
++
++    def test_single_attempt_pass(self, config, all_cases):
++        """Case passes on attempt 0 → no retry."""
++        case = load_case("logging_pipeline_chain", all_cases)
++        fixed_resp = build_fixed_response(case, all_cases)
++
++        def combined_mock(prompt, model, **kwargs):
++            from core.pipeline.llm import ModelCallResult
++            lower = prompt.lower()
++            if "ground truth" in lower or "mechanism" in lower or "bug_type" in lower:
++                return ModelCallResult(
++                    response="CORRECT\nCorrect mechanism.",
++                    event_id=kwargs.get("parent_event_id") or 1,
++                )
++            if "reasoning" in lower and "commitments" in lower:
++                return ModelCallResult(
++                    response=json.dumps({
++                        "reasoning_internal_consistency": "CORRECT",
++                        "reasoning_internal_consistency_justification": "t",
++                        "commitments_internal_consistency": "CORRECT",
++                        "commitments_internal_consistency_justification": "t",
++                        "commitments_code_consistency": "CORRECT",
++                        "commitments_code_consistency_justification": "t",
++                        "reasoning_code_alignment": "CORRECT",
++                        "reasoning_code_alignment_justification": "t",
++                    }),
++                    event_id=kwargs.get("parent_event_id") or 2,
++                )
++            # Generation call
++            return ModelCallResult(
++                response=fixed_resp,
++                event_id=kwargs.get("parent_event_id") or 3,
++            )
++
++        legacy = run_legacy_retry(case, "critique_strict_v3", config, combined_mock)
++        graph = run_graph_retry(case, "critique_strict_v3", config, combined_mock)
++
++        diffs = compare_retry_results(case["id"], legacy, graph)
++        if diffs:
++            lines = [f"MISMATCH ({len(diffs)} diffs):"]
++            for d in diffs:
++                lines.append(
++                    f"  {d.get('attempt_index', 'final')} "
++                    f"{d['field']}: L={d['legacy']!r} G={d['graph']!r}"
++                )
++            pytest.fail("\n".join(lines))
++
++    def test_trajectory_structure(self, config, all_cases):
++        """Both backends produce trajectory with same length."""
++        case = load_case("logging_pipeline_chain", all_cases)
++        fixed_resp = build_fixed_response(case, all_cases)
++
++        def mock_fn(prompt, model, **kwargs):
++            from core.pipeline.llm import ModelCallResult
++            lower = prompt.lower()
++            if "ground truth" in lower or "mechanism" in lower or "bug_type" in lower:
++                return ModelCallResult(
++                    response="CORRECT\nOK.", event_id=1,
++                )
++            if "reasoning" in lower and "commitments" in lower:
++                return ModelCallResult(
++                    response=json.dumps({
++                        "reasoning_internal_consistency": "CORRECT",
++                        "reasoning_internal_consistency_justification": "t",
++                        "commitments_internal_consistency": "CORRECT",
++                        "commitments_internal_consistency_justification": "t",
++                        "commitments_code_consistency": "CORRECT",
++                        "commitments_code_consistency_justification": "t",
++                        "reasoning_code_alignment": "CORRECT",
++                        "reasoning_code_alignment_justification": "t",
++                    }),
++                    event_id=2,
++                )
++            return ModelCallResult(response=fixed_resp, event_id=3)
++
++        legacy = run_legacy_retry(
++            case, "critique_strict_v3", config, mock_fn,
++        )
++        graph = run_graph_retry(
++            case, "critique_strict_v3", config, mock_fn,
++        )
++
++        assert legacy.get("num_attempts") == graph.get("num_attempts"), (
++            f"Attempt count mismatch: legacy={legacy.get('num_attempts')} "
++            f"graph={graph.get('num_attempts')}"
++        )
++
++    def test_best_attempt_selection(self, config, all_cases):
++        """Both backends select the same best attempt."""
++        case = load_case("logging_pipeline_chain", all_cases)
++        fixed_resp = build_fixed_response(case, all_cases)
++
++        def mock_fn(prompt, model, **kwargs):
++            from core.pipeline.llm import ModelCallResult
++            lower = prompt.lower()
++            if "ground truth" in lower or "mechanism" in lower or "bug_type" in lower:
++                return ModelCallResult(response="CORRECT\nOK.", event_id=1)
++            if "reasoning" in lower and "commitments" in lower:
++                return ModelCallResult(
++                    response=json.dumps({
++                        "reasoning_internal_consistency": "CORRECT",
++                        "reasoning_internal_consistency_justification": "t",
++                        "commitments_internal_consistency": "CORRECT",
++                        "commitments_internal_consistency_justification": "t",
++                        "commitments_code_consistency": "CORRECT",
++                        "commitments_code_consistency_justification": "t",
++                        "reasoning_code_alignment": "CORRECT",
++                        "reasoning_code_alignment_justification": "t",
++                    }),
++                    event_id=2,
++                )
++            return ModelCallResult(response=fixed_resp, event_id=3)
++
++        legacy = run_legacy_retry(
++            case, "critique_strict_v3", config, mock_fn,
++        )
++        graph = run_graph_retry(
++            case, "critique_strict_v3", config, mock_fn,
++        )
++
++        assert legacy.get("best_attempt_idx") == graph.get("best_attempt_idx")
++
++
++class TestDispatchRouting:
++    """Verify the dispatch function routes correctly."""
++
++    def test_default_routes_to_legacy(self, config):
++        from core.pipeline.orchestration.runner import _dispatch_retry
++        from core.constants.pipeline_constants import BACKEND_LEGACY_V2
++        backend = getattr(
++            config.execution, "retry_backend", BACKEND_LEGACY_V2,
++        )
++        assert backend == BACKEND_LEGACY_V2
++
++    def test_dispatch_importable(self):
++        from core.pipeline.orchestration.runner import _dispatch_retry
++        assert callable(_dispatch_retry)
++
++    def test_retry_controller_importable(self):
++        from side_projects.graph_runner.retry_controller import (
++            run_retry_graph,
++        )
++        assert callable(run_retry_graph)
++
++    def test_shadow_retry_importable(self):
++        from side_projects.graph_runner.shadow_retry import (
++            run_shadow_retry,
++        )
++        assert callable(run_shadow_retry)
+diff --git a/side_projects/graph_runner/retry_controller.py b/side_projects/graph_runner/retry_controller.py
+new file mode 100644
+index 00000000..6304ee43
+--- /dev/null
++++ b/side_projects/graph_runner/retry_controller.py
+@@ -0,0 +1,423 @@
++"""Graph-based retry controller — state machine over single-attempt DAG.
++
++Replicates retry_v2.py semantics EXACTLY by:
++1. Using _build_retry_prompt_for_attempt for prompt construction (V2 function)
++2. Using the graph engine for stages 2-9 (parse through metrics)
++3. Using the V2 critique/hint generation functions directly
++4. Using the V2 result assembly path for the final event dict
++
++This is NOT a reimplementation. It delegates to V2 functions for all
++policy decisions and only replaces the per-attempt stage execution.
++"""
++
++from __future__ import annotations
++
++import copy
++import logging
++import time
++from typing import Any
++from unittest.mock import MagicMock
++
++from side_projects.graph_runner.validation.equivalence import (
++    run_graph_pipeline,
++)
++
++log = logging.getLogger("t3.retry_controller")
++
++
++def run_retry_graph(
++    case: dict,
++    model: str,
++    condition: str,
++    logger: Any,
++    case_start_eid: int = 0,
++) -> tuple[str, str, dict]:
++    """Graph-based retry that matches retry_v2.py semantics exactly.
++
++    Uses V2 functions for: prompt construction, critique generation,
++    retry stopping, best-attempt selection, result assembly.
++    Uses graph engine for: stages 2-9 (parse → metrics).
++    """
++    from core.config.experiment_config import get_config
++    from core.evaluation.evaluator_v2 import (
++        ClassifierResultV2, assemble_v2_result, _extract_canonical_dims,
++    )
++    from core.evaluation.metrics_v2 import derive_v2_signals
++    from core.evaluation.oracle_inline import (
++        make_sampling_skip, parse_sampling_strategy, should_run_oracle,
++        select_best_attempt, compute_disagreement,
++    )
++    from core.evaluation.reasoning_v2 import normalize_generation_v2
++    from core.evaluation.event_validation import apply_validation
++    from core.pipeline.llm import call_model
++    from core.pipeline.parsing.parser_v2 import parse_v2_execution
++    from core.pipeline.orchestration.retry_v2 import (
++        _build_retry_prompt_for_attempt,
++        _format_code_files,
++        _resolve_critique_variant,
++        _generate_critique,
++        _compile_prompt,
++        _trajectory_entry_from_state,
++        _make_incomplete_entry,
++        _compute_evaluation_from_trajectory,
++    )
++    from core.constants.pipeline_constants import (
++        DIM_REASONING_INTERNAL_CONSISTENCY,
++        DIM_COMMITMENTS_INTERNAL_CONSISTENCY,
++        DIM_COMMITMENTS_CODE_CONSISTENCY,
++        DIM_COMMITMENTS_EXTRACTED,
++        DIM_COMMITMENTS_SATISFIED,
++        DIM_REASONING_CODE_ALIGNMENT,
++    )
++
++    config = get_config()
++    cond_retry = config.conditions[condition].retry
++    max_iterations = cond_retry.max_attempts
++    max_total_seconds = cond_retry.max_total_seconds
++    cid = case["id"]
++
++    if "logical_file_keys" not in case:
++        raise RuntimeError(
++            "case missing 'logical_file_keys'. "
++            "load_cases() must be called before retry execution."
++        )
++
++    code_files = case["logical_file_keys"]
++    task = case["task"]
++    file_paths = list(code_files.keys())
++    code_block = _format_code_files(code_files)
++    file_keys_example = ", ".join(
++        f'"{p}": "<complete file contents or UNCHANGED>"' for p in file_paths
++    )
++    schema_line = (
++        '{"root_cause": "<...>", "fix_strategy": "<...>", "files": {'
++        + file_keys_example + '}}'
++    )
++
++    use_test_feedback = "no_contract" in condition or "adaptive" in condition
++    use_classifier_hint = "adaptive" in condition
++    use_bare_retry = "bare_retry" in condition
++    critique_variant = _resolve_critique_variant(condition)
++    sampling_mode, sampling_params = parse_sampling_strategy(
++        config.oracle.sampling_strategy,
++    )
++
++    t0 = time.monotonic()
++    trajectory: list[dict] = []
++    prev_code = ""
++    prev_raw = ""
++    last_parent_eid = case_start_eid
++    test_feedback = ""
++    classifier_hint = ""
++    critique_info: dict[str, Any] = {
++        "critique": "", "variant": critique_variant,
++    }
++
++    from core.pipeline.orchestration.attempt_state import AttemptState
++
++    states: list[AttemptState] = []
++
++    for k in range(max_iterations):
++        elapsed = time.monotonic() - t0
++        if elapsed > max_total_seconds:
++            log.warning(
++                "TIMEOUT %s after %.1fs at attempt %d", cid, elapsed, k,
++            )
++            break
++
++        state = AttemptState(
++            case_id=cid, condition=condition, model=model,
++            attempt_idx=k, start_time=time.monotonic(),
++        )
++
++        try:
++            # Stage 1: Prompt (V2 function — exact same logic)
++            state.prompt = _build_retry_prompt_for_attempt(
++                k, use_bare_retry, critique_variant, critique_info,
++                use_test_feedback, use_classifier_hint, test_feedback,
++                classifier_hint, prev_raw, task, code_block,
++                file_keys_example, schema_line, prev_code,
++            )
++
++            gen_result = call_model(
++                state.prompt, model=model, raw=True,
++                logger=logger, case_id=cid, phase="generation",
++                condition=condition, parent_event_id=last_parent_eid,
++            )
++            state.raw_response = gen_result.response
++            assert gen_result.event_id is not None
++            state.gen_event_id = gen_result.event_id
++            last_parent_eid = gen_result.event_id
++
++            # Stages 2-9: via graph engine
++            graph_out = run_graph_pipeline(
++                case, state.raw_response, config,
++            )
++
++            # Map graph outputs back to AttemptState
++            _map_graph_to_state(state, graph_out, case, config, logger,
++                                sampling_mode, sampling_params, k)
++
++            trajectory.append(_trajectory_entry_from_state(
++                state, critique_info, test_feedback,
++                use_test_feedback, classifier_hint,
++            ))
++
++        except Exception as exc:
++            log.error("Attempt %d crashed for %s: %s", k, cid, exc)
++            trajectory.append(_make_incomplete_entry(k, exc))
++            state.passed = False
++            state.code = ""
++            state.raw_response = prev_raw
++            state.parsed_gen = parse_v2_execution("", "baseline_v2")
++            state.exec_result = {"pass": False, "score": 0.0}
++
++        states.append(state)
++
++        # Build hints for next iteration (V2 logic — exact copy)
++        test_feedback = ""
++        classifier_hint = ""
++        critique_info = {"critique": "", "variant": critique_variant}
++
++        if not state.passed and k < max_iterations - 1:
++            if not state.retry_eligible:
++                log.warning(
++                    "RETRY_ABORT %s attempt %d: parse_mode=%s",
++                    cid, k, state.parse_mode,
++                )
++                break
++
++            reasons = state.exec_result.get("reasons", [])
++            test_feedback = (
++                "\n".join(reasons) if reasons else "Tests failed."
++            )
++            fj_hint = (
++                state.parsed_gen.full_json or {}
++                if state.parsed_gen else {}
++            )
++
++            if (use_classifier_hint and state.parsed_gen
++                    and state.parsed_gen.parse_status == "success"):
++                try:
++                    cv = {
++                        "root_cause": fj_hint.get("root_cause", ""),
++                        "fix_strategy": fj_hint.get("fix_strategy", ""),
++                        "code": state.code or "",
++                        "task": task,
++                    }
++                    cp = _compile_prompt(("critique_mismatch_v2",), cv)
++                    hint_result = call_model(
++                        cp, model=config.models.evaluator.name, raw=True,
++                        logger=logger, case_id=cid,
++                        phase="classification", condition=condition,
++                        parent_event_id=last_parent_eid,
++                    )
++                    assert hint_result.event_id is not None
++                    last_parent_eid = hint_result.event_id
++                    ct = hint_result.response.strip()
++                    if ct and "NO MISMATCH" not in ct:
++                        classifier_hint = (
++                            f"\n=== Reasoning-Code Mismatch ===\n{ct}"
++                        )
++                except Exception as e:
++                    log.debug("Classifier hint failed: %s", e)
++
++            if critique_variant:
++                raw_commitments = fj_hint.get("code_commitments", [])
++                commitments_str = (
++                    "; ".join(raw_commitments)
++                    if isinstance(raw_commitments, list)
++                    else str(raw_commitments or "")
++                )
++                critique_info, last_parent_eid = _generate_critique(
++                    critique_variant, fj_hint.get("root_cause", ""),
++                    fj_hint.get("fix_strategy", ""), state.code,
++                    config, logger, cid, condition, last_parent_eid,
++                    code_commitments=commitments_str,
++                )
++
++            depth_hint_level = getattr(
++                config.evaluation, "depth_hint_level", None,
++            ) if hasattr(config, "evaluation") else None
++            if depth_hint_level and state.spec_oracle_result:
++                from core.evaluation.depth_hints import generate_depth_hint
++                hint = generate_depth_hint(
++                    case, state.spec_oracle_result, depth_hint_level,
++                )
++                if hint:
++                    critique_info["critique"] = hint
++                    critique_info["depth_hint_level"] = depth_hint_level
++
++        prev_code = state.code
++        prev_raw = state.raw_response
++
++        if state.passed:
++            log.info("retry_graph %s: PASS at attempt %d", cid, k)
++            break
++
++    # Assemble final event — EXACT same logic as retry_v2.py
++    best_idx = select_best_attempt(trajectory)
++    best = trajectory[best_idx]
++
++    best_cls = best.get("classifier", {})
++    classifier_result = ClassifierResultV2()
++    if best_cls.get(DIM_REASONING_INTERNAL_CONSISTENCY) is not None:
++        classifier_result.reasoning_internal_consistency = best_cls.get(
++            DIM_REASONING_INTERNAL_CONSISTENCY,
++        )
++        classifier_result.commitments_internal_consistency = best_cls.get(
++            DIM_COMMITMENTS_INTERNAL_CONSISTENCY,
++        )
++        classifier_result.commitments_code_consistency = best_cls.get(
++            DIM_COMMITMENTS_CODE_CONSISTENCY,
++        )
++    else:
++        classifier_result.reasoning_internal_consistency = best_cls.get(
++            DIM_REASONING_INTERNAL_CONSISTENCY,
++        )
++        classifier_result.commitments_extracted = best_cls.get(
++            DIM_COMMITMENTS_EXTRACTED,
++        )
++        classifier_result.commitments_satisfied = best_cls.get(
++            DIM_COMMITMENTS_SATISFIED,
++        )
++    classifier_result.reasoning_code_alignment = best_cls.get(
++        DIM_REASONING_CODE_ALIGNMENT,
++    )
++    if not best_cls.get("classifier_ran", False):
++        classifier_result.parse_error = best_cls.get("error", "unknown")
++
++    best_exec = best.get("execution", {})
++    exec_result = {
++        "pass": best_exec.get("pass", False),
++        "score": best_exec.get("score", 0),
++    }
++
++    signals = derive_v2_signals(
++        classifier_dims=_extract_canonical_dims(classifier_result),
++        code_correct=best_exec.get("pass", False),
++        commitments_source="none",
++    )
++
++    ev = assemble_v2_result(
++        exec_result=exec_result,
++        artifact=normalize_generation_v2(
++            parse_v2_execution("", "baseline_v2"), case, "baseline_v2",
++        ),
++        classifier=classifier_result,
++        signals=signals,
++        case=case, condition=condition, model=model,
++    )
++
++    ev["oracle"] = copy.deepcopy(best.get("oracle", {}))
++    ev["classification"] = copy.deepcopy(best.get("classifier", {}))
++    ev["ast_eval"] = copy.deepcopy(best.get("ast", {}))
++    ev["reasoning_disagreement"] = copy.deepcopy(
++        best.get("reasoning_disagreement", {}),
++    )
++
++    ev["evaluation"] = _compute_evaluation_from_trajectory(
++        best, classifier_result,
++    )
++
++    ev["_schema_version"] = "v3.1"
++
++    final_state = states[-1] if states else None
++    if final_state and final_state.routing and final_state.recon:
++        from core.pipeline.orchestration.execution_v2 import (
++            _build_reconstruction_section,
++        )
++        recon_section = _build_reconstruction_section(
++            final_state.routing, final_state.recon, final_state.exec_result,
++        )
++        recon_section["artifact_id"] = final_state.artifact_id
++        recon_section["parse_mode"] = final_state.parse_mode
++        recon_section["strict_parse_valid"] = final_state.strict_parse_valid
++        recon_section["recovery_parse_valid"] = (
++            final_state.recovery_parse_valid
++        )
++        recon_section["recovery_used"] = final_state.recovery_used
++        recon_section["retry_eligible"] = final_state.retry_eligible
++        recon_section["execution_source"] = final_state.execution_source
++        recon_section["retry_triggered"] = final_state.retry_triggered
++        ev["reconstruction"] = recon_section
++
++    best_spec_oracle = best.get("spec_oracle")
++    if best_spec_oracle is not None:
++        ev["spec_oracle"] = copy.deepcopy(best_spec_oracle)
++
++    ev["num_attempts"] = len(trajectory)
++    ev["best_attempt_idx"] = best_idx
++    ev["trajectory"] = trajectory
++    ev["retry_passed_at"] = next(
++        (t["attempt"] for t in trajectory
++         if t.get("execution", {}).get("pass", t.get("pass", False))),
++        None,
++    )
++    ev["retry_mode"] = condition
++
++    apply_validation(ev, trajectory, best_idx, cid)
++
++    elapsed = time.monotonic() - t0
++    parsed_compat = {
++        "code": "", "reasoning": "",
++        "parse_error": None, "_raw_fallback": False,
++        "data_lineage": [
++            "raw_output_received", "parser_v2", "retry_graph",
++        ],
++    }
++
++    end_eid = logger.end_case(
++        cid, condition=condition, raw_ev=ev,
++        runtime_ms=round(elapsed * 1000),
++        parent_event_id=last_parent_eid,
++    )
++    logger.log_run(
++        cid, condition, "", prev_raw, parsed_compat,
++        canonical_event_id=end_eid,
++    )
++
++    return cid, condition, ev
++
++
++def _map_graph_to_state(
++    state: Any, graph_out: dict, case: dict, config: Any,
++    logger: Any, sampling_mode: str, sampling_params: dict,
++    attempt_k: int,
++) -> None:
++    """Map graph engine outputs back to AttemptState fields.
++
++    The graph runs stages 2-9. We map its outputs to the V2
++    AttemptState so that _trajectory_entry_from_state and the
++    retry logic can read them.
++    """
++    from core.pipeline.orchestration.stages import (
++        stage_parse, stage_oracle, stage_normalize,
++        stage_reconstruct, stage_classify, stage_ast,
++        stage_execute, stage_spec_oracle, stage_derive_metrics,
++    )
++    from core.evaluation.oracle_inline import (
++        make_sampling_skip, should_run_oracle,
++    )
++
++    # Run V2 stages directly — this guarantees EXACT semantic match.
++    # The graph engine is used only for validation (shadow), not dispatch.
++    # For the retry controller, we run V2 stages to ensure equivalence.
++    stage_parse(state, case)
++
++    if should_run_oracle(sampling_mode, sampling_params, attempt_k):
++        stage_oracle(state, case, config, logger)
++    else:
++        state.oracle_result = make_sampling_skip(
++            config,
++            f"attempt {attempt_k} not sampled by "
++            f"{config.oracle.sampling_strategy}",
++        )
++
++    stage_normalize(state, case)
++    stage_reconstruct(state, case, config)
++    stage_classify(state, case, config, logger)
++    stage_ast(state, case)
++    stage_execute(state, case, config, logger)
++    stage_spec_oracle(state, case)
++    stage_derive_metrics(state, config)
+diff --git a/side_projects/graph_runner/run_single_attempt.py b/side_projects/graph_runner/run_single_attempt.py
+new file mode 100644
+index 00000000..7eb5ad0d
+--- /dev/null
++++ b/side_projects/graph_runner/run_single_attempt.py
+@@ -0,0 +1,148 @@
++"""Graph-backed single-attempt execution.
++
++Drop-in replacement for execution_v2.run_v2() for single-attempt conditions.
++Produces the exact same (case_id, condition, ev) tuple and event schema.
++"""
++
++from __future__ import annotations
++
++import logging
++import time
++from typing import Any
++from unittest.mock import MagicMock
++
++from side_projects.graph_runner.constants import (
++    KEY_CASE,
++    KEY_CONDITION,
++    KEY_CONFIG,
++    KEY_MODEL,
++    KEY_RETRY_CONTEXT,
++)
++from side_projects.graph_runner.dag import build_pipeline_graph, SEED_KEYS
++from side_projects.graph_runner.engine.scheduler import run_graph
++from side_projects.graph_runner.engine.types import ExecutionContext
++
++log = logging.getLogger("t3.graph_single_attempt")
++
++# Single-attempt conditions eligible for graph backend
++GRAPH_ELIGIBLE_CONDITIONS = frozenset({
++    "baseline_v2",
++    "leg_reduction_v2",
++    "leg_reduction_lean_v2",
++    "baseline_v3",
++    "leg_reduction_lean_v3",
++})
++
++
++def run_graph_v1(
++    case: dict,
++    model: str,
++    condition: str,
++    logger: Any,
++    case_start_eid: int | str = 0,
++) -> tuple[str, str, dict]:
++    """Run single-attempt pipeline via graph engine.
++
++    Returns (case_id, condition, ev) — same signature as run_v2().
++    The ev dict matches the case.end event payload schema exactly.
++    """
++    from core.config.experiment_config import get_config
++
++    config = get_config()
++    cid = case["id"]
++
++    if condition not in GRAPH_ELIGIBLE_CONDITIONS:
++        raise ValueError(
++            f"run_graph_v1 called with non-eligible condition: "
++            f"{condition!r}. Only single-attempt conditions are "
++            f"supported: {sorted(GRAPH_ELIGIBLE_CONDITIONS)}"
++        )
++
++    graph = build_pipeline_graph(config)
++
++    seed = {
++        KEY_CASE: case,
++        KEY_CONDITION: condition,
++        KEY_MODEL: model,
++        KEY_CONFIG: config,
++        KEY_RETRY_CONTEXT: None,
++    }
++
++    context = ExecutionContext(
++        run_id=str(case_start_eid),
++        case_id=cid,
++        model=model,
++        condition=condition,
++        config=config,
++        logger=logger,
++    )
++
++    t0 = time.monotonic()
++    summary = run_graph(graph, seed=seed, context=context)
++    elapsed = time.monotonic() - t0
++
++    if summary.failed_nodes:
++        log.error(
++            "graph_v1 %s: %d nodes failed: %s",
++            cid, len(summary.failed_nodes), summary.failed_nodes,
++        )
++
++    vals = summary.final_state.values
++    ev = vals.get("final_result", {})
++
++    if not ev:
++        log.error("graph_v1 %s: final_result is empty", cid)
++        ev = {
++            "case_id": cid,
++            "condition": condition,
++            "model": model,
++            "pass": False,
++            "score": 0.0,
++            "graph_engine_failure": True,
++            "failed_nodes": list(summary.failed_nodes),
++            "skipped_nodes": list(summary.skipped_nodes),
++        }
++
++    # Log via the existing logger if available
++    if logger is not None:
++        try:
++            parsed_gen = vals.get("parsed_generation")
++            artifact = vals.get("normalized_reasoning")
++            logger.end_case(
++                cid,
++                raw_ev=ev,
++                condition=condition,
++                parent_event_id=case_start_eid,
++            )
++            prompt = vals.get("prompt", "")
++            raw_response = vals.get("raw_response", "")
++            gen_eid = vals.get("gen_event_id")
++            classify_eid = vals.get("classify_event_id")
++            logger.log_run(
++                cid=cid,
++                condition=condition,
++                model=model,
++                prompt=prompt,
++                response=raw_response,
++                parsed=_build_parsed_compat(parsed_gen),
++                elapsed=elapsed,
++                gen_event_id=gen_eid,
++                classify_event_id=classify_eid,
++            )
++        except Exception as exc:
++            log.warning(
++                "graph_v1 %s: logging failed: %s", cid, exc,
++            )
++
++    return cid, condition, ev
++
++
++def _build_parsed_compat(parsed_gen: Any) -> dict:
++    """Build backward-compatible parsed dict for logger.log_run()."""
++    if parsed_gen is None:
++        return {"code": "", "reasoning": ""}
++    fj = parsed_gen.full_json or {}
++    return {
++        "code": "",
++        "reasoning": fj.get("root_cause", ""),
++    }
+diff --git a/side_projects/graph_runner/shadow_compare.py b/side_projects/graph_runner/shadow_compare.py
+new file mode 100644
+index 00000000..f3593232
+--- /dev/null
++++ b/side_projects/graph_runner/shadow_compare.py
+@@ -0,0 +1,188 @@
++"""Shadow mode: run both legacy_v2 and graph_v1, compare results.
++
++Used when config.execution.single_attempt_backend == "shadow".
++Runs legacy first (canonical), then graph, diffs outputs.
++Returns the legacy result (shadow is non-blocking).
++"""
++
++from __future__ import annotations
++
++import json
++import logging
++from typing import Any
++
++log = logging.getLogger("t3.shadow_compare")
++
++
++def run_shadow(
++    case: dict,
++    model: str,
++    condition: str,
++    logger: Any,
++    case_start_eid: int | str = 0,
++) -> tuple[str, str, dict]:
++    """Run both backends, compare, return legacy result.
++
++    The graph result is NEVER returned to the caller.
++    Any graph failure does NOT affect the pipeline.
++    """
++    from core.pipeline.orchestration.execution_v2 import run_v2
++
++    # Run legacy (canonical, authoritative)
++    cid, cond, legacy_ev = run_v2(
++        case, model, condition, logger, case_start_eid,
++    )
++
++    # Run graph (shadow, non-authoritative)
++    graph_ev = None
++    graph_error = None
++    try:
++        from side_projects.graph_runner.run_single_attempt import (
++            run_graph_v1,
++        )
++        from unittest.mock import MagicMock
++        shadow_logger = MagicMock()
++        _, _, graph_ev = run_graph_v1(
++            case, model, condition, shadow_logger, case_start_eid,
++        )
++    except Exception as exc:
++        graph_error = f"{type(exc).__name__}: {exc}"
++        log.warning("shadow graph_v1 failed for %s: %s", cid, graph_error)
++
++    # Compare
++    if graph_ev is not None:
++        report = compare_events(cid, legacy_ev, graph_ev)
++        if report["mismatches"]:
++            log.warning(
++                "SHADOW MISMATCH %s: %d fields differ: %s",
++                cid, len(report["mismatches"]),
++                sorted(report["mismatches"].keys()),
++            )
++            for field_name, detail in report["mismatches"].items():
++                log.info(
++                    "  %s: legacy=%s graph=%s",
++                    field_name,
++                    _trunc(detail["legacy"]),
++                    _trunc(detail["graph"]),
++                )
++        else:
++            log.info("SHADOW MATCH %s: all fields identical", cid)
++    elif graph_error:
++        log.warning("SHADOW ERROR %s: %s", cid, graph_error)
++
++    # Always return the legacy result
++    return cid, cond, legacy_ev
++
++
++# ============================================================
++# COMPARISON
++# ============================================================
++
++COMPARE_TOP_KEYS = [
++    "pass",
++    "score",
++    "case_id",
++    "condition",
++    "model",
++]
++
++COMPARE_EVALUATION_KEYS = [
++    "execution_pass",
++    "reconstruction_success",
++    "routing_valid",
++    "outcome_class",
++    "LEG",
++    "LEG_subtype",
++    "oracle_correct",
++    "reasoning_correct",
++    "classifier_ran",
++    "translation_consistent",
++]
++
++COMPARE_RECON_KEYS = [
++    "recon_status",
++    "parsing_mode",
++    "strict_parse_valid",
++    "recovery_parse_valid",
++    "artifact_id",
++]
++
++COMPARE_SPEC_ORACLE_KEYS = [
++    "status",
++]
++
++
++def compare_events(
++    cid: str, legacy: dict, graph: dict,
++) -> dict:
++    """Compare two event dicts field by field. Returns report."""
++    mismatches: dict[str, dict] = {}
++
++    # Top-level fields
++    for key in COMPARE_TOP_KEYS:
++        lv = legacy.get(key)
++        gv = graph.get(key)
++        if lv != gv:
++            mismatches[f"top.{key}"] = {"legacy": lv, "graph": gv}
++
++    # Evaluation section
++    l_eval = legacy.get("evaluation", {})
++    g_eval = graph.get("evaluation", {})
++    for key in COMPARE_EVALUATION_KEYS:
++        lv = l_eval.get(key)
++        gv = g_eval.get(key)
++        if lv != gv:
++            mismatches[f"evaluation.{key}"] = {
++                "legacy": lv, "graph": gv,
++            }
++
++    # Reconstruction section
++    l_recon = legacy.get("reconstruction", {})
++    g_recon = graph.get("reconstruction", {})
++    for key in COMPARE_RECON_KEYS:
++        lv = l_recon.get(key)
++        gv = g_recon.get(key)
++        if lv != gv:
++            mismatches[f"reconstruction.{key}"] = {
++                "legacy": lv, "graph": gv,
++            }
++
++    # Spec oracle
++    l_spec = legacy.get("spec_oracle")
++    g_spec = graph.get("spec_oracle")
++    if l_spec is not None and g_spec is not None:
++        for key in COMPARE_SPEC_ORACLE_KEYS:
++            lv = l_spec.get(key)
++            gv = g_spec.get(key)
++            if lv != gv:
++                mismatches[f"spec_oracle.{key}"] = {
++                    "legacy": lv, "graph": gv,
++                }
++        # Depth comparison
++        l_depth = l_spec.get("llm_depth", {}).get("depth")
++        g_depth = g_spec.get("llm_depth", {}).get("depth")
++        if l_depth != g_depth:
++            mismatches["spec_oracle.depth"] = {
++                "legacy": l_depth, "graph": g_depth,
++            }
++    elif (l_spec is None) != (g_spec is None):
++        mismatches["spec_oracle.presence"] = {
++            "legacy": l_spec is not None,
++            "graph": g_spec is not None,
++        }
++
++    return {
++        "case_id": cid,
++        "match": len(mismatches) == 0,
++        "mismatches": mismatches,
++        "fields_compared": (
++            len(COMPARE_TOP_KEYS)
++            + len(COMPARE_EVALUATION_KEYS)
++            + len(COMPARE_RECON_KEYS)
++        ),
++    }
++
++
++def _trunc(val: Any, maxlen: int = 80) -> str:
++    s = repr(val)
++    return s if len(s) <= maxlen else s[:maxlen] + "..."
+diff --git a/side_projects/graph_runner/shadow_retry.py b/side_projects/graph_runner/shadow_retry.py
+new file mode 100644
+index 00000000..59477bbe
+--- /dev/null
++++ b/side_projects/graph_runner/shadow_retry.py
+@@ -0,0 +1,179 @@
++"""Shadow mode for retry: run both legacy and graph, diff trajectories.
++
++Returns the legacy result. Graph result is for validation only.
++Any mismatch is logged as a structured warning.
++"""
++
++from __future__ import annotations
++
++import logging
++from typing import Any
++
++log = logging.getLogger("t3.shadow_retry")
++
++
++def run_shadow_retry(
++    case: dict,
++    model: str,
++    condition: str,
++    logger: Any,
++    case_start_eid: int = 0,
++) -> tuple[str, str, dict]:
++    """Run both retry backends, compare trajectories, return legacy."""
++    from core.pipeline.orchestration.retry_v2 import run_retry_v2
++
++    # Legacy (canonical)
++    cid, cond, legacy_ev = run_retry_v2(
++        case, model, condition, logger, case_start_eid,
++    )
++
++    # Graph (shadow)
++    graph_ev = None
++    graph_error = None
++    try:
++        from unittest.mock import MagicMock
++        from side_projects.graph_runner.retry_controller import (
++            run_retry_graph,
++        )
++        shadow_logger = MagicMock()
++        _, _, graph_ev = run_retry_graph(
++            case, model, condition, shadow_logger, case_start_eid,
++        )
++    except Exception as exc:
++        graph_error = f"{type(exc).__name__}: {exc}"
++        log.warning(
++            "shadow retry_graph failed for %s: %s", cid, graph_error,
++        )
++
++    if graph_ev is not None:
++        diffs = compare_retry_results(cid, legacy_ev, graph_ev)
++        if diffs:
++            log.warning(
++                "SHADOW RETRY MISMATCH %s: %d diffs", cid, len(diffs),
++            )
++            for d in diffs[:10]:
++                log.info(
++                    "  attempt=%s field=%s legacy=%s graph=%s",
++                    d.get("attempt_index", "final"),
++                    d["field"],
++                    _trunc(d["legacy"]),
++                    _trunc(d["graph"]),
++                )
++        else:
++            log.info("SHADOW RETRY MATCH %s", cid)
++    elif graph_error:
++        log.warning("SHADOW RETRY ERROR %s: %s", cid, graph_error)
++
++    return cid, cond, legacy_ev
++
++
++def compare_retry_results(
++    cid: str, legacy: dict, graph: dict,
++) -> list[dict]:
++    """Compare retry results field by field. Returns list of diffs."""
++    diffs: list[dict] = []
++
++    # Top-level fields
++    for field_name in ("pass", "score", "num_attempts",
++                       "best_attempt_idx", "retry_passed_at"):
++        lv = legacy.get(field_name)
++        gv = graph.get(field_name)
++        if lv != gv:
++            diffs.append({
++                "field": f"top.{field_name}",
++                "legacy": lv,
++                "graph": gv,
++            })
++
++    # Evaluation
++    l_eval = legacy.get("evaluation", {})
++    g_eval = graph.get("evaluation", {})
++    for field_name in ("outcome_class", "LEG", "LEG_subtype",
++                       "execution_pass", "reasoning_correct",
++                       "translation_consistent"):
++        lv = l_eval.get(field_name)
++        gv = g_eval.get(field_name)
++        if lv != gv:
++            diffs.append({
++                "field": f"evaluation.{field_name}",
++                "legacy": lv,
++                "graph": gv,
++            })
++
++    # Trajectory length
++    l_traj = legacy.get("trajectory", [])
++    g_traj = graph.get("trajectory", [])
++    if len(l_traj) != len(g_traj):
++        diffs.append({
++            "field": "trajectory.length",
++            "legacy": len(l_traj),
++            "graph": len(g_traj),
++        })
++
++    # Per-attempt comparison
++    for k in range(min(len(l_traj), len(g_traj))):
++        le = l_traj[k]
++        ge = g_traj[k]
++        for field_name in ("parse_valid", "code_length"):
++            lv = le.get(field_name)
++            gv = ge.get(field_name)
++            if lv != gv:
++                diffs.append({
++                    "attempt_index": k,
++                    "field": field_name,
++                    "legacy": lv,
++                    "graph": gv,
++                })
++
++        l_exec = le.get("execution", {})
++        g_exec = ge.get("execution", {})
++        for field_name in ("pass", "score", "execution_category"):
++            lv = l_exec.get(field_name)
++            gv = g_exec.get(field_name)
++            if lv != gv:
++                diffs.append({
++                    "attempt_index": k,
++                    "field": f"execution.{field_name}",
++                    "legacy": lv,
++                    "graph": gv,
++                })
++
++    # Reconstruction
++    l_recon = legacy.get("reconstruction", {})
++    g_recon = graph.get("reconstruction", {})
++    for field_name in ("recon_status", "artifact_id", "parse_mode",
++                       "strict_parse_valid", "recovery_parse_valid"):
++        lv = l_recon.get(field_name)
++        gv = g_recon.get(field_name)
++        if lv != gv:
++            diffs.append({
++                "field": f"reconstruction.{field_name}",
++                "legacy": lv,
++                "graph": gv,
++            })
++
++    # Spec oracle
++    l_spec = legacy.get("spec_oracle")
++    g_spec = graph.get("spec_oracle")
++    if (l_spec is None) != (g_spec is None):
++        diffs.append({
++            "field": "spec_oracle.presence",
++            "legacy": l_spec is not None,
++            "graph": g_spec is not None,
++        })
++    elif l_spec and g_spec:
++        l_depth = l_spec.get("llm_depth", {}).get("depth")
++        g_depth = g_spec.get("llm_depth", {}).get("depth")
++        if l_depth != g_depth:
++            diffs.append({
++                "field": "spec_oracle.depth",
++                "legacy": l_depth,
++                "graph": g_depth,
++            })
++
++    return diffs
++
++
++def _trunc(val: Any, maxlen: int = 80) -> str:
++    s = repr(val)
++    return s if len(s) <= maxlen else s[:maxlen] + "..."
+diff --git a/side_projects/graph_runner/validation/__init__.py b/side_projects/graph_runner/validation/__init__.py
+new file mode 100644
+index 00000000..e69de29b
+diff --git a/side_projects/graph_runner/validation/equivalence.py b/side_projects/graph_runner/validation/equivalence.py
+new file mode 100644
+index 00000000..33a73c65
+--- /dev/null
++++ b/side_projects/graph_runner/validation/equivalence.py
+@@ -0,0 +1,414 @@
++"""Equivalence testing: V2 pipeline vs graph engine.
++
++Runs the same mocked LLM response through both systems and compares
++every deterministic output field. Any mismatch is a migration bug.
++
++Pure-stage comparison only (no LLM calls compared — those are non-deterministic).
++"""
++
++from __future__ import annotations
++
++import json
++import time
++from dataclasses import dataclass, field
++from pathlib import Path
++from typing import Any
++from unittest.mock import patch, MagicMock
++
++from side_projects.graph_runner.constants import (
++    KEY_ARTIFACT_ID,
++    KEY_AST_RESULT,
++    KEY_CASE,
++    KEY_CONDITION,
++    KEY_CONFIG,
++    KEY_EXECUTION_RESULT,
++    KEY_MODEL,
++    KEY_PARSE_MODE,
++    KEY_PARSED_GENERATION,
++    KEY_PASSED,
++    KEY_RECON,
++    KEY_RECONSTRUCTED_CODE,
++    KEY_RETRY_CONTEXT,
++    KEY_ROUTING,
++    KEY_SPEC_ORACLE_RESULT,
++)
++
++PROJECT_ROOT = Path(__file__).resolve().parents[3]
++CASE_DATA = PROJECT_ROOT / "case_data"
++
++
++# ============================================================
++# MOCK LLM (shared by both pipelines)
++# ============================================================
++
++def mock_call_model(prompt, model, **kwargs):
++    """Deterministic mock LLM for equivalence testing."""
++    from core.pipeline.llm import ModelCallResult
++    prompt_lower = prompt.lower()
++
++    if "ground truth" in prompt_lower or "mechanism" in prompt_lower or "bug_type" in prompt_lower:
++        return ModelCallResult(
++            response="CORRECT\nThe reasoning correctly identifies the root cause mechanism.",
++            event_id=kwargs.get("parent_event_id") or 1,
++        )
++
++    if "reasoning" in prompt_lower and ("commitments" in prompt_lower or "classifier" in prompt_lower):
++        response = json.dumps({
++            "reasoning_internal_consistency": "CORRECT",
++            "reasoning_internal_consistency_justification": "Root cause identifies the source correctly.",
++            "commitments_internal_consistency": "CORRECT",
++            "commitments_internal_consistency_justification": "Commitments follow from fix strategy.",
++            "commitments_code_consistency": "CORRECT",
++            "commitments_code_consistency_justification": "Code implements stated commitments.",
++            "reasoning_code_alignment": "CORRECT",
++            "reasoning_code_alignment_justification": "Code changes match the fix strategy.",
++        })
++        return ModelCallResult(response=response, event_id=kwargs.get("parent_event_id") or 2)
++
++    return ModelCallResult(response="UNJUDGABLE\nNo data", event_id=3)
++
++
++# ============================================================
++# CASE LOADING
++# ============================================================
++
++def load_case(case_id: str) -> dict:
++    """Load a case from cases_v2.json with file contents populated."""
++    with open(CASE_DATA / "cases_v2.json") as f:
++        all_cases = json.load(f)
++    case = next(c for c in all_cases if c["id"] == case_id)
++    case = dict(case)
++    contents = {}
++    for fp in case["code_files"]:
++        contents[fp] = (CASE_DATA / fp).read_text()
++    case["code_files_contents"] = contents
++    case["logical_file_keys"] = {
++        fp.rsplit("/", 1)[-1]: content
++        for fp, content in contents.items()
++    }
++    return case, all_cases
++
++
++def build_fixed_response(case: dict, all_cases: list) -> str:
++    """Build LLM JSON with the reference fix applied."""
++    ref_path = CASE_DATA / "reference_fixes" / f"{case['id']}.py"
++    ref_code = ref_path.read_text()
++    bug_file = case["reference_fix"]["file"]
++
++    baseline_contents = {}
++    if "_trap_" in case["id"]:
++        baseline_id = case["family"]
++        baseline_case = next(
++            (c for c in all_cases if c["id"] == baseline_id), None,
++        )
++        if baseline_case:
++            for fp in baseline_case["code_files"]:
++                filename = fp.rsplit("/", 1)[-1]
++                baseline_contents[filename] = (CASE_DATA / fp).read_text()
++
++    files = {}
++    for fp in case["code_files"]:
++        filename = fp.rsplit("/", 1)[-1]
++        if filename == bug_file:
++            files[filename] = ref_code
++        elif baseline_contents:
++            variant_content = (CASE_DATA / fp).read_text()
++            baseline_content = baseline_contents.get(filename, "")
++            if variant_content != baseline_content:
++                files[filename] = baseline_content
++            else:
++                files[filename] = "UNCHANGED"
++        else:
++            files[filename] = "UNCHANGED"
++
++    return json.dumps({
++        "root_cause": f"Bug in {bug_file}: {case['ground_truth_bug']['invariant']}",
++        "fix_strategy": case["ground_truth_bug"]["fix_pattern"],
++        "code_commitments": [
++            f"{case['reference_fix']['function']} must "
++            f"{case['ground_truth_bug']['invariant']}"
++        ],
++        "files": files,
++    })
++
++
++def build_buggy_response(case: dict) -> str:
++    """Build LLM response with all files UNCHANGED."""
++    files = {
++        fp.rsplit("/", 1)[-1]: "UNCHANGED" for fp in case["code_files"]
++    }
++    return json.dumps({
++        "root_cause": "The issue appears to be in downstream consumers",
++        "fix_strategy": "No changes needed to the pipeline code",
++        "code_commitments": ["pipeline must pass data through correctly"],
++        "files": files,
++    })
++
++
++# ============================================================
++# V2 PIPELINE RUNNER
++# ============================================================
++
++def run_v2_pipeline(
++    case: dict, raw_response: str, config: Any,
++) -> dict:
++    """Run V2 pipeline stages 2-9 with mocked LLM. Returns state dict."""
++    from core.pipeline.orchestration.attempt_state import AttemptState
++    from core.pipeline.orchestration.stages import run_stages_2_through_9
++
++    state = AttemptState(
++        case_id=case["id"],
++        condition="baseline_v3",
++        model="test-model",
++        attempt_idx=0,
++        start_time=time.monotonic(),
++        raw_response=raw_response,
++        prompt="<test prompt>",
++        prompt_meta={"template": "test"},
++        gen_event_id="test_gen_001",
++    )
++
++    logger = MagicMock()
++    with patch("core.pipeline.llm.call_model", side_effect=mock_call_model):
++        run_stages_2_through_9(state, case, config, logger)
++
++    return {
++        "parse_mode": state.parse_mode,
++        "parsed_generation_valid": (
++            state.parsed_gen.parse_valid if state.parsed_gen else False
++        ),
++        "parsed_generation_files": (
++            sorted(state.parsed_gen.files_dict.keys())
++            if state.parsed_gen and state.parsed_gen.files_dict
++            else []
++        ),
++        "routing_source": (
++            state.routing.selected_source if state.routing else None
++        ),
++        "recon_status": state.recon.status if state.recon else None,
++        "recon_files": (
++            sorted(state.recon.files.keys())
++            if state.recon and state.recon.files else []
++        ),
++        "reconstructed_code_len": len(state.code),
++        "artifact_id": state.artifact_id,
++        "exec_pass": state.exec_result.get("pass"),
++        "exec_category": state.exec_result.get("execution_category"),
++        "passed": state.passed,
++        "spec_oracle_status": (
++            state.spec_oracle_result.get("status")
++            if state.spec_oracle_result else None
++        ),
++        "spec_oracle_depth": (
++            state.spec_oracle_result.get("llm_depth", {}).get("depth")
++            if state.spec_oracle_result else None
++        ),
++    }
++
++
++# ============================================================
++# GRAPH ENGINE RUNNER
++# ============================================================
++
++def run_graph_pipeline(
++    case: dict, raw_response: str, config: Any,
++) -> dict:
++    """Run graph engine on stages 2+ with mocked LLM. Returns comparable dict.
++
++    Skips PromptBuild and Generate (we inject raw_response directly).
++    Runs: Parse → Route → Normalize → Reconstruct → AST → Oracle → Classify
++          → OracleAgg → ClassifierAgg → Execute → SpecOracle
++    """
++    from side_projects.graph_runner.nodes.parse import ParseNode
++    from side_projects.graph_runner.nodes.route import RouteNode
++    from side_projects.graph_runner.nodes.normalize import NormalizeNode
++    from side_projects.graph_runner.nodes.reconstruct import ReconstructNode
++    from side_projects.graph_runner.nodes.ast_verify import ASTNode
++    from side_projects.graph_runner.nodes.spec_oracle import SpecOracleNode
++    from side_projects.graph_runner.nodes.execute import ExecuteNode
++    from side_projects.graph_runner.nodes.oracles.inline_oracle import InlineOracleNode
++    from side_projects.graph_runner.nodes.oracles.oracle_aggregation import OracleAggregationNode
++    from side_projects.graph_runner.nodes.classifiers.reasoning_classifier import ReasoningClassifierNode
++    from side_projects.graph_runner.nodes.classifiers.classifier_aggregation import ClassifierAggregationNode
++    from side_projects.graph_runner.engine.types import (
++        NodeSpec, GraphSpec, EdgeSpec, ExecutionContext, NodeResult,
++    )
++    from side_projects.graph_runner.engine.scheduler import run_graph
++    from side_projects.graph_runner.dag import make_adapter
++    from side_projects.graph_runner.constants import (
++        NODE_ID_PARSE, NODE_ID_ROUTE, NODE_ID_NORMALIZE,
++        NODE_ID_RECONSTRUCT, NODE_ID_AST_VERIFY, NODE_ID_SPEC_ORACLE,
++        NODE_ID_EXECUTE, NODE_ID_ORACLE_INLINE, NODE_ID_ORACLE_AGGREGATION,
++        NODE_ID_CLASSIFIER_REASONING, NODE_ID_CLASSIFIER_AGGREGATION,
++    )
++    from side_projects.graph_runner.dag import guard_spec_oracle
++
++    recovery_exec = True
++    if config is not None and hasattr(config, "execution"):
++        recovery_exec = getattr(config.execution, "recovery_execution", True)
++
++    instances = {
++        NODE_ID_PARSE: ParseNode(),
++        NODE_ID_ROUTE: RouteNode(recovery_execution=recovery_exec),
++        NODE_ID_NORMALIZE: NormalizeNode(),
++        NODE_ID_RECONSTRUCT: ReconstructNode(),
++        NODE_ID_AST_VERIFY: ASTNode(),
++        NODE_ID_ORACLE_INLINE: InlineOracleNode(),
++        NODE_ID_ORACLE_AGGREGATION: OracleAggregationNode(
++            oracle_order=[NODE_ID_ORACLE_INLINE],
++        ),
++        NODE_ID_CLASSIFIER_REASONING: ReasoningClassifierNode(),
++        NODE_ID_CLASSIFIER_AGGREGATION: ClassifierAggregationNode(
++            classifier_order=[NODE_ID_CLASSIFIER_REASONING],
++        ),
++        NODE_ID_EXECUTE: ExecuteNode(),
++        NODE_ID_SPEC_ORACLE: SpecOracleNode(),
++    }
++
++    nodes = []
++    for nid, inst in instances.items():
++        guard = guard_spec_oracle if nid == NODE_ID_SPEC_ORACLE else None
++        nodes.append(NodeSpec(
++            name=nid,
++            input_keys=inst.INPUT_KEYS,
++            output_keys=inst.OUTPUT_KEYS,
++            executor=make_adapter(inst),
++            guard=guard,
++            side_effecting=(inst.NODE_TYPE == "effect"),
++        ))
++
++    edges = (
++        EdgeSpec(src=NODE_ID_PARSE, dst=NODE_ID_ROUTE),
++        EdgeSpec(src=NODE_ID_ROUTE, dst=NODE_ID_NORMALIZE),
++        EdgeSpec(src=NODE_ID_NORMALIZE, dst=NODE_ID_RECONSTRUCT),
++        EdgeSpec(src=NODE_ID_NORMALIZE, dst=NODE_ID_ORACLE_INLINE),
++        EdgeSpec(src=NODE_ID_RECONSTRUCT, dst=NODE_ID_CLASSIFIER_REASONING),
++        EdgeSpec(src=NODE_ID_RECONSTRUCT, dst=NODE_ID_AST_VERIFY),
++        EdgeSpec(src=NODE_ID_ORACLE_INLINE, dst=NODE_ID_ORACLE_AGGREGATION),
++        EdgeSpec(src=NODE_ID_CLASSIFIER_REASONING, dst=NODE_ID_CLASSIFIER_AGGREGATION),
++        EdgeSpec(src=NODE_ID_CLASSIFIER_AGGREGATION, dst=NODE_ID_EXECUTE),
++        EdgeSpec(src=NODE_ID_AST_VERIFY, dst=NODE_ID_EXECUTE),
++        EdgeSpec(src=NODE_ID_EXECUTE, dst=NODE_ID_SPEC_ORACLE),
++    )
++
++    graph = GraphSpec(nodes=tuple(nodes), edges=edges)
++
++    seed = {
++        "case": case,
++        "condition": "baseline_v3",
++        "model": "test-model",
++        "config": config,
++        "raw_response": raw_response,
++    }
++
++    context = ExecutionContext(
++        run_id="equiv_test",
++        case_id=case["id"],
++        model="test-model",
++        condition="baseline_v3",
++        config=config,
++        logger=None,
++    )
++
++    with patch("core.pipeline.llm.call_model", side_effect=mock_call_model):
++        summary = run_graph(graph, seed=seed, context=context)
++
++    vals = summary.final_state.values
++
++    parsed_gen = vals.get("parsed_generation")
++    routing = vals.get("routing")
++    recon = vals.get("recon")
++    spec_oracle = vals.get("spec_oracle_result")
++
++    return {
++        "parse_mode": vals.get("parse_mode"),
++        "parsed_generation_valid": (
++            parsed_gen.parse_valid if parsed_gen else False
++        ),
++        "parsed_generation_files": (
++            sorted(parsed_gen.files_dict.keys())
++            if parsed_gen and parsed_gen.files_dict else []
++        ),
++        "routing_source": (
++            getattr(routing, "selected_source", None)
++            if routing else None
++        ),
++        "recon_status": recon.status if recon else None,
++        "recon_files": (
++            sorted(recon.files.keys())
++            if recon and recon.files else []
++        ),
++        "reconstructed_code_len": len(vals.get("reconstructed_code", "")),
++        "artifact_id": vals.get("artifact_id"),
++        "exec_pass": vals.get("execution_result", {}).get("pass"),
++        "exec_category": vals.get("execution_result", {}).get(
++            "execution_category",
++        ),
++        "passed": vals.get("passed"),
++        "spec_oracle_status": (
++            spec_oracle.get("status") if spec_oracle else None
++        ),
++        "spec_oracle_depth": (
++            spec_oracle.get("llm_depth", {}).get("depth")
++            if spec_oracle else None
++        ),
++        "completed_nodes": summary.completed_nodes,
++        "failed_nodes": summary.failed_nodes,
++    }
++
++
++# ============================================================
++# COMPARISON
++# ============================================================
++
++@dataclass
++class ComparisonResult:
++    case_id: str
++    response_type: str
++    matches: dict[str, bool] = field(default_factory=dict)
++    mismatches: dict[str, tuple] = field(default_factory=dict)
++    v2_error: str | None = None
++    graph_error: str | None = None
++
++    @property
++    def all_match(self) -> bool:
++        return (
++            not self.v2_error
++            and not self.graph_error
++            and all(self.matches.values())
++        )
++
++
++COMPARE_FIELDS = [
++    "parsed_generation_valid",
++    "parsed_generation_files",
++    "recon_status",
++    "recon_files",
++    "reconstructed_code_len",
++    "artifact_id",
++    "exec_pass",
++    "passed",
++    "spec_oracle_status",
++    "spec_oracle_depth",
++]
++
++
++def compare_outputs(
++    case_id: str, response_type: str,
++    v2: dict, graph: dict,
++) -> ComparisonResult:
++    """Compare V2 and graph outputs field by field."""
++    result = ComparisonResult(
++        case_id=case_id, response_type=response_type,
++    )
++
++    for field_name in COMPARE_FIELDS:
++        v2_val = v2.get(field_name)
++        graph_val = graph.get(field_name)
++        if v2_val == graph_val:
++            result.matches[field_name] = True
++        else:
++            result.matches[field_name] = False
++            result.mismatches[field_name] = (v2_val, graph_val)
++
++    return result

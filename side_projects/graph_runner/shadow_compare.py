@@ -1,8 +1,7 @@
-"""Shadow mode: run both legacy_v2 and graph_v1, compare results.
+"""Shadow mode for single-attempt: run both legacy_v2 and graph_v1, compare results.
 
-Used when config.execution.single_attempt_backend == "shadow".
-Runs legacy first (canonical), then graph, diffs outputs.
-Returns the legacy result (shadow is non-blocking).
+Returns the legacy result authoritatively. Graph result is non-blocking validation.
+Any graph failure does NOT affect the pipeline.
 """
 
 from __future__ import annotations

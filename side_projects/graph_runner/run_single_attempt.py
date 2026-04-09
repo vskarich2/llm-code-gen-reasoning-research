@@ -1,6 +1,7 @@
-"""Graph-backed single-attempt execution.
+"""Graph-engine single-attempt execution backend.
 
 Drop-in replacement for execution_v2.run_v2() for single-attempt conditions.
+Uses the graph execution engine for the full DAG pipeline.
 Produces the exact same (case_id, condition, ev) tuple and event schema.
 """
 
@@ -41,7 +42,11 @@ def run_graph_v1(
     logger: Any,
     case_start_eid: int | str = 0,
 ) -> tuple[str, str, dict]:
-    """Run single-attempt pipeline via graph engine.
+    """Run single-attempt pipeline via graph execution engine.
+
+    This is a true graph-native execution path: the full DAG
+    (prompt → generate → parse → ... → log) runs through the
+    graph engine scheduler.
 
     Returns (case_id, condition, ev) — same signature as run_v2().
     The ev dict matches the case.end event payload schema exactly.
