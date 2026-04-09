@@ -46,6 +46,11 @@ class WALWriter:
 
         Returns event_id. Caller never sets event_id or seq.
         """
+        if event.run_id != self.run_id:
+            raise RuntimeError(
+                f"run_id mismatch: event has {event.run_id!r}, "
+                f"writer has {self.run_id!r}"
+            )
         validate_emittable(event)
 
         self.seq += 1

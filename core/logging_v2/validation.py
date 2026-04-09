@@ -81,6 +81,8 @@ def validate_run_dir_absent(target: Path) -> None:
         )
 
 
-def normalize_model_name(name: str) -> str:
+def normalize_model_name(name: str, known_models: set[str]) -> str:
     """Exact match normalization. Unknown names raise."""
+    if name not in known_models:
+        raise RuntimeError(f"Unknown model name: {name!r}")
     return name

@@ -134,6 +134,11 @@ def validate_payload(event: EmittableEvent) -> None:
                 f"expected {expected_type.__name__}, "
                 f"got {type(event.payload[key]).__name__}"
             )
+    extra = set(event.payload.keys()) - set(schema.keys())
+    if extra:
+        raise RuntimeError(
+            f"Unexpected payload keys for {event.event_type.value}: {sorted(extra)}"
+        )
 
 
 def validate_axis_consistency(event: EmittableEvent) -> None:

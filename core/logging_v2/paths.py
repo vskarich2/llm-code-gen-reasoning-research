@@ -42,6 +42,8 @@ def build_artifact_path(
         ValueError: Missing required axis, negative index, unsafe chars.
         TypeError: Value type does not match AxisSpec.value_type.
     """
+    # NOTE: artifacts root is intentionally fixed to "artifacts" per spec.
+    # Do not derive from config to avoid multi-source-of-truth issues.
     parts: list[str] = [
         "artifacts",
         artifact_group.value,

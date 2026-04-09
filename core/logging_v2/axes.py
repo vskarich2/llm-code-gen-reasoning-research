@@ -38,7 +38,7 @@ AXIS_SPECS: dict[Axis, AxisSpec] = {
     Axis.TRIAL:     AxisSpec(axis=Axis.TRIAL,      prefix="trial_", required=True,  zero_indexed=True,  value_type=int),
     Axis.PATH:      AxisSpec(axis=Axis.PATH,       prefix="path_",  required=True,  zero_indexed=True,  value_type=int),
     Axis.NODE:      AxisSpec(axis=Axis.NODE,       prefix=None,     required=False, zero_indexed=False, value_type=str),
-    Axis.CALL:      AxisSpec(axis=Axis.CALL,       prefix="call_",  required=False, zero_indexed=False, value_type=str),
+    Axis.CALL:      AxisSpec(axis=Axis.CALL,       prefix="call_",  required=False, zero_indexed=False, value_type=int),
 }
 
 FILESYSTEM_FORBIDDEN = frozenset({"/", "\\", ":", "..", "\x00"})

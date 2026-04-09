@@ -14,7 +14,8 @@ from typing import Any
 
 from core.logging_v2.call_artifacts import CallArtifact
 from core.logging_v2.enums import CallPhase, CallStatus, EventType
-from core.logging_v2.events import WALEvent, Emitter
+from core.logging_v2.events import WALEvent
+from core.logging_v2.enums import Emitter
 from core.logging_v2.manifest import RunManifest, RunStatus
 
 
@@ -94,7 +95,7 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
     results: list[CallArtifact] = []
     if not calls_dir.exists():
         return results
-    for json_path in sorted(calls_dir.rglob("*.json")):
+    for json_path in calls_dir.rglob("*.json"):
         with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
         data["phase"] = CallPhase(data["phase"])
