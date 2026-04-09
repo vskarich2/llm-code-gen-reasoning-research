@@ -6,11 +6,11 @@ importing the V2 orchestration layer.
 
 from __future__ import annotations
 
-from core.constants.pipeline_constants import (
-    EXEC_INVARIANT_FAILURE,
+from side_projects.graph_runner.constants import (
     EXEC_STRUCTURAL_FAILURE,
     EXEC_SUCCESS,
-    EXEC_SYNTAX_FAILURE,
+    EXEC_SYNTAX_ERROR,
+    EXEC_UNKNOWN,
 )
 
 
@@ -25,9 +25,9 @@ def build_swebench_exec_result(case: dict) -> dict:
     elif fail_cat == "EMPTY_PATCH":
         category = EXEC_STRUCTURAL_FAILURE
     elif fail_cat in ("SYNTAX_ERROR", "IMPORT_ERROR"):
-        category = EXEC_SYNTAX_FAILURE
+        category = EXEC_SYNTAX_ERROR
     else:
-        category = EXEC_INVARIANT_FAILURE
+        category = EXEC_UNKNOWN
 
     return {
         "pass": resolved,

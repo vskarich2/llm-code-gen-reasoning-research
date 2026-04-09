@@ -10,15 +10,16 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Final, FrozenSet
+from typing import Any, FrozenSet
 
-from core.constants.pipeline_constants import (
+from side_projects.graph_runner.constants import (
     NODE_TYPE_EFFECT,
     NODE_TYPE_PURE,
+    OUTCOME_SUCCESS,
     VALID_NODE_TYPES,
 )
 
-_log = logging.getLogger("t3.node_interface")
+log = logging.getLogger("t3.node_interface")
 
 
 class NodeResult:
@@ -33,7 +34,7 @@ class NodeResult:
     def __init__(
         self,
         outputs: dict[str, Any],
-        outcome: str = "success",
+        outcome: str = OUTCOME_SUCCESS,
     ) -> None:
         self.outputs = outputs
         self.outcome = outcome
@@ -46,14 +47,14 @@ class BaseNode(ABC):
       - NAME: str
       - INPUT_KEYS: frozenset[str]
       - OUTPUT_KEYS: frozenset[str]
-      - NODE_TYPE: "pure" or "effect"
+      - NODE_TYPE: NODE_TYPE_PURE or NODE_TYPE_EFFECT
       - execute(inputs: dict) -> NodeResult
     """
 
     NAME: str
     INPUT_KEYS: FrozenSet[str]
     OUTPUT_KEYS: FrozenSet[str]
-    NODE_TYPE: str  # NODE_TYPE_PURE or NODE_TYPE_EFFECT
+    NODE_TYPE: str
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -67,7 +68,7 @@ class BaseNode(ABC):
         if cls.NODE_TYPE not in VALID_NODE_TYPES:
             raise TypeError(
                 f"Node {cls.__name__}.NODE_TYPE must be "
-                f"'{NODE_TYPE_PURE}' or '{NODE_TYPE_EFFECT}', "
+                f"{NODE_TYPE_PURE!r} or {NODE_TYPE_EFFECT!r}, "
                 f"got {cls.NODE_TYPE!r}"
             )
         if not isinstance(cls.INPUT_KEYS, frozenset):
@@ -84,7 +85,7 @@ class BaseNode(ABC):
         missing = self.INPUT_KEYS - set(state.keys())
         if missing:
             raise ValueError(
-                f"Node '{self.NAME}' missing required inputs: "
+                f"Node {self.NAME!r} missing required inputs: "
                 f"{sorted(missing)}"
             )
 
@@ -95,17 +96,24 @@ class BaseNode(ABC):
         extra = produced - self.OUTPUT_KEYS
         if missing:
             raise ValueError(
-                f"Node '{self.NAME}' did not produce declared "
+                f"Node {self.NAME!r} did not produce declared "
                 f"outputs: {sorted(missing)}"
             )
         if extra:
             raise ValueError(
-                f"Node '{self.NAME}' produced undeclared "
+                f"Node {self.NAME!r} produced undeclared "
                 f"outputs: {sorted(extra)}"
             )
 
+    def validate_enum_fields(self, result: NodeResult) -> None:
+        """Validate all closed-enum fields in outputs."""
+        from side_projects.graph_runner.state_validation import (
+            validate_node_outputs,
+        )
+        validate_node_outputs(result.outputs)
+
     def run(self, state: dict[str, Any]) -> NodeResult:
-        """Validate inputs, execute, validate outputs.
+        """Validate inputs, execute, validate outputs + enums.
 
         This is the public entry point called by the runner.
         Subclasses override execute(), not run().
@@ -114,6 +122,7 @@ class BaseNode(ABC):
         inputs = {k: state[k] for k in self.INPUT_KEYS}
         result = self.execute(inputs)
         self.validate_outputs(result)
+        self.validate_enum_fields(result)
         return result
 
     @abstractmethod

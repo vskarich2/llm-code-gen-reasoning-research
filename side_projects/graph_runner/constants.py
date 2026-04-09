@@ -21,6 +21,8 @@ from core.constants.pipeline_constants import (
     KEY_CONDITION,
     KEY_CONFIG,
     KEY_CRITIQUE_TEXT,
+    KEY_DISAGREEMENT,
+    KEY_EVALUATION,
     KEY_EXECUTION_RESULT,
     KEY_FINAL_RESULT,
     KEY_FORMAT_PARSE,
@@ -47,32 +49,80 @@ from core.constants.pipeline_constants import (
     KEY_SPEC_ORACLE_RESULT,
     KEY_STRICT_PARSE,
     DDC_FAMILIES,
-    EXEC_INVARIANT_FAILURE,
-    EXEC_STRUCTURAL_FAILURE,
-    EXEC_SUCCESS,
-    EXEC_SYNTAX_FAILURE,
     NODE_TYPE_EFFECT,
     NODE_TYPE_PURE,
-    PARSE_MODE_FAILED,
-    PARSE_MODE_RECOVERED,
-    PARSE_MODE_STRICT,
-    RECON_MISSING_FILES,
-    RECON_SUCCESS,
     VALID_NODE_TYPES,
 )
 
 
 # ============================================================
-# ROUTING VALUES — used by RouteNode routing decision
+# PARSE MODES — closed enum, self-describing values
 # ============================================================
 
-SOURCE_STRICT: Final[str] = "strict"
-SOURCE_RECOVERY: Final[str] = "recovery"
-SOURCE_NONE: Final[str] = "none"
+PARSE_MODE_STRICT: Final[str] = "PARSE_MODE_STRICT"
+PARSE_MODE_RECOVERED: Final[str] = "PARSE_MODE_RECOVERED"
+PARSE_MODE_FAILED: Final[str] = "PARSE_MODE_FAILED"
+
+VALID_PARSE_MODES: Final[FrozenSet[str]] = frozenset({
+    PARSE_MODE_STRICT,
+    PARSE_MODE_RECOVERED,
+    PARSE_MODE_FAILED,
+})
 
 
 # ============================================================
-# ROUTING DECISION FIELD NAMES — used by RoutingDecision slots
+# ROUTING SOURCES — closed enum, self-describing values
+# ============================================================
+
+ROUTE_SOURCE_STRICT: Final[str] = "ROUTE_SOURCE_STRICT"
+ROUTE_SOURCE_RECOVERY: Final[str] = "ROUTE_SOURCE_RECOVERY"
+ROUTE_SOURCE_FORMAT: Final[str] = "ROUTE_SOURCE_FORMAT"
+ROUTE_SOURCE_NONE: Final[str] = "ROUTE_SOURCE_NONE"
+
+VALID_ROUTE_SOURCES: Final[FrozenSet[str]] = frozenset({
+    ROUTE_SOURCE_STRICT,
+    ROUTE_SOURCE_RECOVERY,
+    ROUTE_SOURCE_FORMAT,
+    ROUTE_SOURCE_NONE,
+})
+
+
+# ============================================================
+# EXECUTION CATEGORIES — closed enum, self-describing values
+# ============================================================
+
+EXEC_SUCCESS: Final[str] = "EXEC_SUCCESS"
+EXEC_SYNTAX_ERROR: Final[str] = "EXEC_SYNTAX_ERROR"
+EXEC_IMPORT_ERROR: Final[str] = "EXEC_IMPORT_ERROR"
+EXEC_RUNTIME_ERROR: Final[str] = "EXEC_RUNTIME_ERROR"
+EXEC_TIMEOUT: Final[str] = "EXEC_TIMEOUT"
+EXEC_STRUCTURAL_FAILURE: Final[str] = "EXEC_STRUCTURAL_FAILURE"
+EXEC_UNKNOWN: Final[str] = "EXEC_UNKNOWN"
+
+VALID_EXEC_CATEGORIES: Final[FrozenSet[str]] = frozenset({
+    EXEC_SUCCESS,
+    EXEC_SYNTAX_ERROR,
+    EXEC_IMPORT_ERROR,
+    EXEC_RUNTIME_ERROR,
+    EXEC_TIMEOUT,
+    EXEC_STRUCTURAL_FAILURE,
+    EXEC_UNKNOWN,
+})
+
+
+# ============================================================
+# INVARIANT VIOLATION TYPES — closed enum
+# ============================================================
+
+INV_MISSING_PARSED: Final[str] = "INV_MISSING_PARSED"
+INV_EMPTY_CODE: Final[str] = "INV_EMPTY_CODE"
+INV_MISSING_EXECUTION: Final[str] = "INV_MISSING_EXECUTION"
+INV_EMPTY_CRITIQUE: Final[str] = "INV_EMPTY_CRITIQUE"
+INV_INVALID_TRANSITION: Final[str] = "INV_INVALID_TRANSITION"
+
+
+# ============================================================
+# ROUTING DECISION FIELD NAMES
 # ============================================================
 
 FIELD_SELECTED_SOURCE: Final[str] = "selected_source"
@@ -143,6 +193,14 @@ AST_REASON_RECON_FAILED: Final[str] = "reconstruction_failed"
 
 
 # ============================================================
+# RECONSTRUCTION STATUS
+# ============================================================
+
+RECON_SUCCESS: Final[str] = "SUCCESS"
+RECON_MISSING_FILES: Final[str] = "RECON_MISSING_FILES"
+
+
+# ============================================================
 # NORMALIZED REASONING ATTRIBUTE NAMES
 # ============================================================
 
@@ -185,6 +243,7 @@ LOG_STATUS_SKIPPED: Final[str] = "skipped_no_output_path"
 # NODE REGISTRY IDS
 # ============================================================
 
+NODE_ID_PROMPT_BUILD: Final[str] = "prompt_build"
 NODE_ID_PARSE: Final[str] = "parse"
 NODE_ID_ROUTE: Final[str] = "route"
 NODE_ID_NORMALIZE: Final[str] = "normalize"
@@ -194,6 +253,8 @@ NODE_ID_SPEC_ORACLE: Final[str] = "spec_oracle"
 NODE_ID_GENERATE: Final[str] = "generate"
 NODE_ID_EXECUTE: Final[str] = "execute"
 NODE_ID_LOG: Final[str] = "log"
+NODE_ID_METRICS: Final[str] = "metrics"
+NODE_ID_ASSEMBLE: Final[str] = "assemble"
 NODE_ID_ORACLE_INLINE: Final[str] = "oracle.inline"
 NODE_ID_ORACLE_AGGREGATION: Final[str] = "oracle_aggregation"
 NODE_ID_CLASSIFIER_REASONING: Final[str] = "classifier.reasoning"
@@ -201,7 +262,7 @@ NODE_ID_CLASSIFIER_AGGREGATION: Final[str] = "classifier_aggregation"
 
 
 # ============================================================
-# EXEC RESULT SCHEMA KEYS — dict keys in execution result output
+# EXEC RESULT SCHEMA KEYS
 # ============================================================
 
 EXEC_KEY_PASS: Final[str] = "pass"
@@ -228,3 +289,12 @@ DDC_TRAP_SEPARATOR: Final[str] = "_trap_"
 
 FILE_MARKER_MODIFIED: Final[str] = "MODIFIED"
 FILE_MARKER_UNCHANGED: Final[str] = "UNCHANGED"
+
+
+# ============================================================
+# NODE OUTCOME VALUES
+# ============================================================
+
+OUTCOME_SUCCESS: Final[str] = "success"
+OUTCOME_ERROR: Final[str] = "error"
+OUTCOME_SKIPPED: Final[str] = "skipped"

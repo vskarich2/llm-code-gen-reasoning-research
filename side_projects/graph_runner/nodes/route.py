@@ -36,9 +36,9 @@ from side_projects.graph_runner.constants import (
     PARSE_MODE_FAILED,
     PARSE_MODE_RECOVERED,
     PARSE_MODE_STRICT,
-    SOURCE_NONE,
-    SOURCE_RECOVERY,
-    SOURCE_STRICT,
+    ROUTE_SOURCE_NONE,
+    ROUTE_SOURCE_RECOVERY,
+    ROUTE_SOURCE_STRICT,
 )
 from side_projects.graph_runner.node_interface import BaseNode, NodeResult
 
@@ -152,17 +152,17 @@ class RouteNode(BaseNode):
             getattr(strict, ATTR_PARSE_VALID, False)
             and strict_valid
         ):
-            selected = SOURCE_STRICT
+            selected = ROUTE_SOURCE_STRICT
             recovery_used = False
         elif (
             self.recovery_execution
             and getattr(recovery, ATTR_PARSE_VALID, False)
             and recovery_valid
         ):
-            selected = SOURCE_RECOVERY
+            selected = ROUTE_SOURCE_RECOVERY
             recovery_used = True
         else:
-            selected = SOURCE_NONE
+            selected = ROUTE_SOURCE_NONE
             recovery_used = False
 
         routing = RoutingDecision(
@@ -177,12 +177,12 @@ class RouteNode(BaseNode):
         )
 
         parsed_gen = (
-            recovery if selected == SOURCE_RECOVERY else strict
+            recovery if selected == ROUTE_SOURCE_RECOVERY else strict
         )
 
-        if selected == SOURCE_NONE:
+        if selected == ROUTE_SOURCE_NONE:
             parse_mode = PARSE_MODE_FAILED
-        elif selected == SOURCE_RECOVERY:
+        elif selected == ROUTE_SOURCE_RECOVERY:
             parse_mode = PARSE_MODE_RECOVERED
         else:
             parse_mode = PARSE_MODE_STRICT
