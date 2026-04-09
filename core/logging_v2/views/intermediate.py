@@ -7,6 +7,7 @@ Ordering uses WAL seq exclusively. No filename or timestamp sorting.
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,7 +20,6 @@ from core.logging_v2.call_artifacts import (
 )
 from core.logging_v2.enums import CallPhase, CallStatus, EventType
 from core.logging_v2.events import WALEvent
-from core.logging_v2.enums import Emitter
 from core.logging_v2.manifest import RunManifest, RunStatus
 
 
@@ -97,9 +97,16 @@ def load_wal_events(run_root: Path) -> list[WALEvent]:
 REQUIRED_CALL_FIELDS = frozenset({
     "call_id", "event_id", "timestamp", "model", "node", "phase",
     "run_id", "case_id", "condition", "trial", "path", "prompt",
-    "prompt_hash", "prompt_length", "temperature", "top_p",
+    "prompt_hash", "prompt_length", "temperature", "top_p", "max_tokens",
     "response", "response_hash", "response_length", "latency_ms",
     "status", "error",
+})
+
+CALL_ID_PATTERN = re.compile(r"\d{8}")
+
+NON_EMPTY_STRING_FIELDS = frozenset({
+    "event_id", "model", "node", "case_id", "condition", "run_id",
+    "timestamp",
 })
 
 
@@ -108,10 +115,11 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
     results: list[CallArtifact] = []
     if not calls_dir.exists():
         return results
-    paths = list(calls_dir.rglob("*.json"))
-    records: list[tuple[dict, Path]] = []
+    json_paths = list(calls_dir.rglob("*.json"))
+    validated: list[dict] = []
+    seen_call_ids: set[str] = set()
 
-    for json_path in paths:
+    for json_path in json_paths:
         with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
 
@@ -122,14 +130,20 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
                 f"{sorted(missing)}: {json_path}"
             )
 
-        if "call_id" not in data:
-            raise RuntimeError(
-                f"Call artifact missing call_id: {json_path}"
-            )
         if not isinstance(data["call_id"], str) or not data["call_id"]:
             raise RuntimeError(
                 f"Invalid call_id in artifact: {json_path}"
             )
+        if not CALL_ID_PATTERN.fullmatch(data["call_id"]):
+            raise RuntimeError(
+                f"Invalid call_id format in artifact: {json_path}: "
+                f"{data['call_id']!r}"
+            )
+        if data["call_id"] in seen_call_ids:
+            raise RuntimeError(
+                f"Duplicate call_id in artifacts: {data['call_id']}"
+            )
+        seen_call_ids.add(data["call_id"])
 
         actual_prompt_hash = compute_prompt_hash(data["prompt"])
         if actual_prompt_hash != data["prompt_hash"]:
@@ -147,12 +161,46 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
                 f"got {actual_response_hash[:16]}"
             )
 
-        records.append((data, json_path))
+        if data["prompt_length"] != len(data["prompt"]):
+            raise RuntimeError(
+                f"prompt_length mismatch in {json_path}: "
+                f"declared {data['prompt_length']}, actual {len(data['prompt'])}"
+            )
+        if data["response_length"] != len(data["response"]):
+            raise RuntimeError(
+                f"response_length mismatch in {json_path}: "
+                f"declared {data['response_length']}, actual {len(data['response'])}"
+            )
 
-    records.sort(key=lambda pair: pair[0]["call_id"])
+        if not isinstance(data["trial"], int) or data["trial"] < 0:
+            raise RuntimeError(f"Invalid trial in {json_path}: {data['trial']!r}")
+        if not isinstance(data["path"], int) or data["path"] < 0:
+            raise RuntimeError(f"Invalid path in {json_path}: {data['path']!r}")
+        if not isinstance(data["latency_ms"], int) or data["latency_ms"] < 0:
+            raise RuntimeError(f"Invalid latency_ms in {json_path}: {data['latency_ms']!r}")
 
-    for data, json_path in records:
-        data["phase"] = CallPhase(data["phase"])
-        data["status"] = CallStatus(data["status"])
+        for field_name in NON_EMPTY_STRING_FIELDS:
+            if not isinstance(data[field_name], str) or not data[field_name]:
+                raise RuntimeError(
+                    f"Field {field_name!r} must be non-empty string in {json_path}"
+                )
+
+        validated.append(data)
+
+    validated.sort(key=lambda d: d["call_id"])
+
+    for data in validated:
+        try:
+            data["phase"] = CallPhase(data["phase"])
+        except Exception as exc:
+            raise RuntimeError(
+                f"Invalid phase in call artifact: {data['phase']!r}"
+            ) from exc
+        try:
+            data["status"] = CallStatus(data["status"])
+        except Exception as exc:
+            raise RuntimeError(
+                f"Invalid status in call artifact: {data['status']!r}"
+            ) from exc
         results.append(CallArtifact(**data))
     return results

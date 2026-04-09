@@ -45,8 +45,10 @@ FILESYSTEM_FORBIDDEN = frozenset({"/", "\\", ":", "..", "\x00"})
 
 
 def validate_call_index(call_index: int) -> None:
-    if not isinstance(call_index, int) or call_index < 1:
-        raise ValueError(f"call_index must be int >= 1, got {call_index}")
+    if not isinstance(call_index, int):
+        raise TypeError(f"call_index must be int, got {type(call_index).__name__}")
+    if call_index < 1:
+        raise ValueError(f"call_index must be >= 1, got {call_index}")
 
 
 def validate_filesystem_safe(value: str, axis: Axis) -> None:
