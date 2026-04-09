@@ -51,6 +51,17 @@ class WALWriter:
                 f"run_id mismatch: event has {event.run_id!r}, "
                 f"writer has {self.run_id!r}"
             )
+
+        from core.logging_v2.event_types import EVENT_TYPE_SPECS
+
+        if event.event_type not in EVENT_TYPE_SPECS:
+            raise RuntimeError(
+                f"Unknown event_type: {event.event_type}"
+            )
+
+        if SCHEMA_VERSION != "2.0":
+            raise RuntimeError("WAL schema version mismatch")
+
         validate_emittable(event)
 
         self.seq += 1

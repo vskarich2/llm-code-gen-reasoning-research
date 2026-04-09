@@ -44,6 +44,11 @@ AXIS_SPECS: dict[Axis, AxisSpec] = {
 FILESYSTEM_FORBIDDEN = frozenset({"/", "\\", ":", "..", "\x00"})
 
 
+def validate_call_index(call_index: int) -> None:
+    if not isinstance(call_index, int) or call_index < 1:
+        raise ValueError(f"call_index must be int >= 1, got {call_index}")
+
+
 def validate_filesystem_safe(value: str, axis: Axis) -> None:
     for char in FILESYSTEM_FORBIDDEN:
         if char in value:

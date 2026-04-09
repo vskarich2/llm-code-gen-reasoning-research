@@ -95,9 +95,17 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
     results: list[CallArtifact] = []
     if not calls_dir.exists():
         return results
-    for json_path in calls_dir.rglob("*.json"):
+    paths = list(calls_dir.rglob("*.json"))
+    records = []
+
+    for json_path in paths:
         with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
+        records.append(data)
+
+    records.sort(key=lambda d: d["call_id"])
+
+    for data in records:
         data["phase"] = CallPhase(data["phase"])
         data["status"] = CallStatus(data["status"])
         results.append(CallArtifact(**data))

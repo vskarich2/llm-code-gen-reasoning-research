@@ -139,6 +139,17 @@ def validate_payload(event: EmittableEvent) -> None:
         raise RuntimeError(
             f"Unexpected payload keys for {event.event_type.value}: {sorted(extra)}"
         )
+    for key, expected_type in schema.items():
+        value = event.payload[key]
+        if value is None:
+            raise RuntimeError(
+                f"Payload key {key!r} for {event.event_type.value} cannot be None"
+            )
+        if type(value) is not expected_type:
+            raise RuntimeError(
+                f"Payload key {key!r} must be exact type {expected_type.__name__}, "
+                f"got {type(value).__name__}"
+            )
 
 
 def validate_axis_consistency(event: EmittableEvent) -> None:
