@@ -27,6 +27,30 @@ from core.pipeline.prompting.compiler import compile as _prompt_compile
 from core.pipeline.prompting.contracts import PromptProgram
 from core.pipeline.prompting.sections import Section
 from core.pipeline.prompting.validator import CompilerMode
+from core.constants.pipeline_constants import (
+    CLASSIFIER_V3_CORRECT,
+    DIM_COMMITMENTS_EXTRACTED,
+    DIM_COMMITMENTS_SATISFIED,
+    DIM_REASONING_CODE_ALIGNMENT,
+    DIM_REASONING_INTERNAL_CONSISTENCY,
+    EXEC_STRUCTURAL_FAILURE,
+    EXEC_SUCCESS,
+    OUTCOME_CLASSIFIER_NOT_RUN,
+    OUTCOME_COHERENT_INCORRECT,
+    OUTCOME_INCOHERENT_INCORRECT,
+    OUTCOME_INTERPRETABLE_SUCCESS,
+    OUTCOME_LEG,
+    OUTCOME_LUCKY_FIX,
+    OUTCOME_ORACLE_NOT_AVAILABLE,
+    OUTCOME_SERIALIZATION_FAILURE,
+    OUTCOME_UNCLASSIFIED,
+    PARSE_MODE_FAILED,
+    RECON_EMPTY_FILE,
+    RECON_INVALID_CODE,
+    RECON_MISSING_FILES,
+    RECON_SENTINEL_MISMATCH,
+    RECON_SUCCESS,
+)
 
 _log = logging.getLogger("t3.execution_v2")
 
@@ -189,6 +213,13 @@ def _assemble_result_from_state(state, case, config=None):
         ev["reconstruction"]["retry_eligible"] = state.retry_eligible
         ev["reconstruction"]["execution_source"] = state.execution_source
         ev["reconstruction"]["retry_triggered"] = state.retry_triggered
+
+    # Invariant telemetry — propagate accumulated violations to result
+    invariants = getattr(state, "_invariant_violations", None)
+    if invariants:
+        ev["invariants"] = list(invariants)
+    else:
+        ev["invariants"] = []
 
     return ev
 
@@ -477,14 +508,14 @@ def _reconstruct(parsed_gen, case, config):
     logical_files = case["logical_file_keys"]
     logical_paths = list(logical_files.keys())
 
-    recon = ReconstructionResult(status="RECON_MISSING_FILES", files={})
+    recon = ReconstructionResult(status=RECON_MISSING_FILES, files={})
     if parsed_gen.files_dict:
         recon = reconstruct_strict(logical_paths, logical_files, parsed_gen.files_dict)
 
     # Build full materialized code for classifier (ALL files, not just changed).
     # This matches what execution sees — the full reconstructed package.
     full_code_parts = []
-    if recon.status == "SUCCESS" and recon.files:
+    if recon.status == RECON_SUCCESS and recon.files:
         for path in logical_paths:
             if path in recon.files:
                 is_modified = path in recon.changed_files
@@ -512,7 +543,7 @@ def _execute(case, parsed_gen, recon, config, logger, attempt=0):
         return {
             "pass": False, "score": 0.0,
             "reasons": ["Generation contract violation"],
-            "execution_category": "STRUCTURAL_FAILURE",
+            "execution_category": EXEC_STRUCTURAL_FAILURE,
             "failure_type": "GENERATION_CONTRACT_VIOLATION",
             "execution": {"status": "not_executed", "ran": False},
         }
@@ -569,7 +600,7 @@ def _derive_metrics(classifier_result, artifact, exec_result, parsed_gen):
 def _compute_artifact_id(recon) -> str:
     """Deterministic hash of reconstructed code. Uses json.dumps for stability."""
     import hashlib, json as _json
-    if recon.status != "SUCCESS" or not recon.files:
+    if recon.status != RECON_SUCCESS or not recon.files:
         return "no_artifact"
     content = _json.dumps(dict(recon.files), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(content.encode()).hexdigest()[:16]
@@ -610,10 +641,10 @@ def _compute_evaluation(
     # E = execution success (ground truth, from test harness)
     execution_category = exec_result.get("execution_category")
     assert execution_category is not None, "execution_category must be set"
-    execution_pass = (execution_category == "EXECUTION_SUCCESS")
+    execution_pass = (execution_category == EXEC_SUCCESS)
 
     # R_recon = reconstruction success (serialization validity)
-    reconstruction_success = (recon.status == "SUCCESS")
+    reconstruction_success = (recon.status == RECON_SUCCESS)
 
     # U = routing validity (source selection)
     routing_valid = (routing.selected_source != "none")
@@ -654,13 +685,13 @@ def _compute_evaluation(
 
     if classifier_ran:
         canonical = _extract_canonical_dims(classification)
-        RIC = canonical.get("reasoning_internal_consistency")
-        CIC = canonical.get("commitments_extracted")
-        CCC = canonical.get("commitments_satisfied")
-        RCA = canonical.get("reasoning_code_alignment")
+        RIC = canonical.get(DIM_REASONING_INTERNAL_CONSISTENCY)
+        CIC = canonical.get(DIM_COMMITMENTS_EXTRACTED)
+        CCC = canonical.get(DIM_COMMITMENTS_SATISFIED)
+        RCA = canonical.get(DIM_REASONING_CODE_ALIGNMENT)
 
         classifier_dims = {"RIC": RIC, "CIC": CIC, "CCC": CCC, "RCA": RCA}
-        T_bool = (RIC == "CORRECT") and (CCC == "CORRECT")
+        T_bool = (RIC == CLASSIFIER_V3_CORRECT) and (CCC == CLASSIFIER_V3_CORRECT)
     else:
         classifier_dims = {"RIC": None, "CIC": None, "CCC": None, "RCA": None}
         T_bool = None
@@ -672,39 +703,39 @@ def _compute_evaluation(
     # ==================================================
 
     if not routing_valid or not reconstruction_success:
-        outcome = "serialization_failure"
+        outcome = OUTCOME_SERIALIZATION_FAILURE
 
     elif oracle_label is None:
-        outcome = "oracle_not_available"
+        outcome = OUTCOME_ORACLE_NOT_AVAILABLE
 
     elif not classifier_ran:
-        outcome = "classifier_not_run"
+        outcome = OUTCOME_CLASSIFIER_NOT_RUN
 
     elif R_bool is True and execution_pass is True:
-        outcome = "interpretable_success"
+        outcome = OUTCOME_INTERPRETABLE_SUCCESS
 
     elif R_bool is False and execution_pass is True:
-        outcome = "lucky_fix"
+        outcome = OUTCOME_LUCKY_FIX
 
     elif R_bool is True and execution_pass is False:
-        outcome = "LEG"
+        outcome = OUTCOME_LEG
 
     elif R_bool is False and execution_pass is False:
         if T_bool is True:
-            outcome = "coherent_incorrect"
+            outcome = OUTCOME_COHERENT_INCORRECT
         elif T_bool is False:
-            outcome = "incoherent_incorrect"
+            outcome = OUTCOME_INCOHERENT_INCORRECT
         else:
             outcome = "reasoning_failure_unknown"
 
     else:
-        outcome = "unclassified"
+        outcome = OUTCOME_UNCLASSIFIED
 
     # ==================================================
     # LEG subtyping
     # ==================================================
     leg_subtype = None
-    if outcome == "LEG":
+    if outcome == OUTCOME_LEG:
         if T_bool is True:
             leg_subtype = "execution_failure"
         elif T_bool is False:
@@ -771,7 +802,7 @@ def _compute_evaluation(
 
         # --- Outcomes (reasoning × execution layer) ---
         "outcome_class": outcome,
-        "LEG": (outcome == "LEG"),
+        "LEG": (outcome == OUTCOME_LEG),
         "LEG_subtype": leg_subtype,
 
         # --- Quadrants ---
@@ -803,13 +834,13 @@ def _derive_serialization_failure_type(routing, recon):
         return "unknown"
     # Artifact was selected but recon failed
     status = recon.status
-    if status == "RECON_INVALID_CODE":
+    if status == RECON_INVALID_CODE:
         return "syntax_error"
-    if status == "RECON_MISSING_FILES":
+    if status == RECON_MISSING_FILES:
         return "missing_file"
-    if status == "RECON_EMPTY_FILE":
+    if status == RECON_EMPTY_FILE:
         return "empty_file"
-    if status == "RECON_SENTINEL_MISMATCH":
+    if status == RECON_SENTINEL_MISMATCH:
         return "invalid_structure"
     return "recon_failure"
 
@@ -827,7 +858,7 @@ def _run_ast_verification(recon, case, artifact_id):
     """
     from core.evaluation.ast_eval import check_ast_patterns
 
-    if recon.status == "SUCCESS" and recon.files:
+    if recon.status == RECON_SUCCESS and recon.files:
         return check_ast_patterns(
             reconstructed_files=dict(recon.files),
             case_id=case["id"],
@@ -860,7 +891,7 @@ def _build_reconstruction_section(routing, recon, exec_result):
         "structural_errors": routing.structural_errors,
         "recovery_used": routing.recovery_used,
         "divergence_detected": routing.divergence_detected,
-        "execution_eligible": routing.selected_source != "none" and recon.status == "SUCCESS",
+        "execution_eligible": routing.selected_source != "none" and recon.status == RECON_SUCCESS,
         "executed": executed,
         # Reconstruction result (ALL fields from ReconstructionResult)
         "recon_status": recon.status,
@@ -920,10 +951,10 @@ def _assemble_result(exec_result, artifact, classifier_result, signals,
     _cls_canonical = _extract_canonical_dims(classifier_result)
     ev["classification"] = {
         # Canonical dimension signals (via mapping layer)
-        "reasoning_internal_consistency": _cls_canonical["reasoning_internal_consistency"],
-        "commitments_extracted": _cls_canonical["commitments_extracted"],
-        "commitments_satisfied": _cls_canonical["commitments_satisfied"],
-        "reasoning_code_alignment": _cls_canonical["reasoning_code_alignment"],
+        "reasoning_internal_consistency": _cls_canonical[DIM_REASONING_INTERNAL_CONSISTENCY],
+        "commitments_extracted": _cls_canonical[DIM_COMMITMENTS_EXTRACTED],
+        "commitments_satisfied": _cls_canonical[DIM_COMMITMENTS_SATISFIED],
+        "reasoning_code_alignment": _cls_canonical[DIM_REASONING_CODE_ALIGNMENT],
         # V3 raw dimensions (None if v2 parser used)
         "reasoning_internal_consistency": classifier_result.reasoning_internal_consistency,
         "commitments_internal_consistency": classifier_result.commitments_internal_consistency,

@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from core.constants.pipeline_constants import PARSE_MODE_FAILED
+
 
 @dataclass
 class AttemptState:
@@ -36,7 +38,7 @@ class AttemptState:
     # Canonical parsing semantics (set explicitly in stage_parse)
     strict_parse_valid: bool = False
     recovery_parse_valid: bool = False
-    parse_mode: str = "failed"     # "strict" | "recovered" | "failed"
+    parse_mode: str = PARSE_MODE_FAILED  # "strict" | "recovered" | "failed"
     recovery_used: bool = False
     # retry_eligible = at least one executable artifact exists.
     # If neither parser produced a structurally valid, schema-valid
