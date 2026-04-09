@@ -308,6 +308,21 @@ WARNING_STATE_KEY_OVERWRITE: Final[str] = (
 
 
 # ============================================================
+# SINGLE-ATTEMPT BACKEND — execution backend selection
+# ============================================================
+
+BACKEND_LEGACY_V2: Final[str] = "legacy_v2"
+BACKEND_GRAPH_V1: Final[str] = "graph_v1"
+BACKEND_SHADOW: Final[str] = "shadow"
+
+VALID_BACKENDS: Final[FrozenSet[str]] = frozenset({
+    BACKEND_LEGACY_V2,
+    BACKEND_GRAPH_V1,
+    BACKEND_SHADOW,
+})
+
+
+# ============================================================
 # INVARIANT VIOLATION TYPES — telemetry for pipeline validation
 # ============================================================
 

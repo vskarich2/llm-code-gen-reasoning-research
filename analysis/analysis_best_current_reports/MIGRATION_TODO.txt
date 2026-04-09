@@ -1,17 +1,582 @@
-What I’d do next (very concrete)
-Define node interface spec (this is step 0, not optional)
-Implement ParseNode + ReconstructNode only
-Run them independently
-THEN add GenerateNode
-THEN wire minimal DAG (no retry)
-THEN diff against V2
+Absolutely. Here’s the revised roadmap with the missing pieces added and ordered correctly.
 
+---
 
-👉 Define Execution Engine Spec
+# 🧭 GRAPH MIGRATION ROADMAP (POST-EQUIVALENCE, REVISED)
 
-Specifically:
+## 🟢 Phase 0 — DONE
 
-scheduling algorithm
-parallel execution model (process vs thread)
-failure semantics
-merge guarantees
+* ✅ constants system
+* ✅ typed state + validation
+* ✅ node contracts
+* ✅ execution engine (sequential)
+* ✅ DAG wiring
+* ✅ equivalence vs V2 on deterministic DDC path
+
+---
+
+# 🔴 Phase 1 — SINGLE-ATTEMPT CUTOVER
+
+### Goal
+
+Replace `run_v2()` with graph-engine-backed single-attempt execution safely.
+
+### Tasks
+
+* Add explicit backend flag:
+
+  * `legacy_v2`
+  * `graph_v1`
+* Add shadow mode:
+
+  * run legacy + graph backends
+  * diff outputs automatically
+* Preserve external output/event schema exactly
+* Validate on:
+
+  * DDC
+  * non-DDC
+  * parse failures
+  * reconstruction failures
+  * execution failures
+  * structural failure cases
+
+### Mandatory Tests
+
+* Shadow diffs on real workloads
+* Regression suite for assembled final payloads
+* Event schema comparison
+
+### Exit Criteria
+
+* Zero meaningful diffs in shadow mode
+* Stable real-run behavior
+* Graph backend safe to enable for single-attempt conditions
+
+---
+
+# 🟠 Phase 2 — RETRY / STATE MACHINE MIGRATION
+
+### Goal
+
+Move retry orchestration out of `retry_v2.py` into a clean controller/state-machine layer above the graph engine.
+
+### Target Architecture
+
+* **Policy layer**: `ConditionPolicy`
+* **Controller layer**: `run_state_machine(...)`
+* **Execution layer**: graph engine per attempt
+
+### Tasks
+
+* Implement `run_state_machine(...)`
+* Integrate:
+
+  * `ConditionPolicy`
+  * critique generation
+  * retry_context construction
+  * attempt trajectory tracking
+  * stopping logic
+  * best-attempt selection
+* Replace duplicated stage orchestration in legacy retry code
+* Ensure strict attempt boundaries:
+
+  * no hidden state
+  * no cross-attempt leakage
+  * no implicit access to prior attempt internals outside `retry_context`
+
+### Mandatory Tests
+
+* Legacy `retry_v2.py` vs state-machine equivalence
+* Attempt-by-attempt trajectory comparison
+* Critique generation equivalence
+* Prompt construction equivalence across retry variants
+* Degenerate retry cases:
+
+  * missing reasoning fields
+  * parse failure
+  * empty critique
+  * no-contract/test-feedback flows
+
+### Critical Risks
+
+* Prompt construction drift
+* Critique semantics mismatch
+* Retry-context under/over-inclusion
+* Hidden cross-attempt state leakage
+
+### Exit Criteria
+
+* Retry behavior matches legacy
+* Trajectories are equivalent
+* State machine becomes canonical retry path
+
+---
+
+# 🟡 Phase 3 — REAL INTEGRATION TESTING WITH MOCKED API CALLS
+
+### Goal
+
+Make end-to-end integration testing a first-class, mandatory capability.
+
+### This is non-negotiable
+
+You explicitly want to be able to:
+
+* use **actual captured LLM responses**
+* while **mocking the API calls**
+* and run the full system deterministically
+
+### Target
+
+A reusable integration-test harness that can:
+
+* replay real raw LLM outputs
+* stub model/API layers
+* run graph engine / state machine / templating / logging end-to-end
+* assert on final outputs and logs
+
+### Tasks
+
+* Create fixture format for captured LLM interactions:
+
+  * prompt
+  * model
+  * raw response
+  * optional metadata
+* Add mockable LLM adapter boundary
+* Build replay harness that injects recorded responses instead of calling APIs
+* Support:
+
+  * single-attempt graph runs
+  * retry/state-machine runs
+  * oracle/classifier calls
+* Add golden integration suites using real captured outputs
+* Ensure replay is config-driven
+
+### Required Coverage
+
+* baseline single-attempt path
+* retry path
+* oracle path
+* classifier path
+* prompt-build path
+* logging/event emission path
+
+### Exit Criteria
+
+* You can run deterministic full-stack tests from recorded LLM responses
+* API calls are fully mocked/replayed
+* This becomes a permanent required test mode
+
+---
+
+# 🟣 Phase 4 — LOGGING / WAL REWRITE
+
+### Goal
+
+Make logging coherent, structured, and log-derived.
+
+### Current Problems
+
+* scattered logging
+* global state
+* mixed ownership
+* hard to audit
+* current dashboard assumptions no longer fit graph/state-machine architecture
+
+### Target
+
+* WAL is the single source of truth
+* engine emits lifecycle events
+* controller emits attempt/trajectory events
+* nodes emit structured results only
+* downstream scripts/dashboard read logs only
+
+### Tasks
+
+* Remove global logger usage
+* Standardize event schema for:
+
+  * graph lifecycle
+  * node lifecycle
+  * controller/state-machine lifecycle
+  * retry transitions
+  * critique generation
+  * final result emission
+* Add explicit trace linkage:
+
+  * run_id
+  * case_id
+  * attempt_index
+  * node
+  * phase
+  * parent/child relationships where relevant
+* Ensure deterministic event ordering
+
+### Mandatory Tests
+
+* Log schema validation
+* Log replay / parsing tests
+* Event completeness tests
+
+### Exit Criteria
+
+* All core observability comes from WAL
+* No duplicated logging paths
+* Logs are sufficient to recompute metrics
+
+---
+
+# 🔵 Phase 5 — METRICS SCRIPT REWRITE (LOG-DERIVED)
+
+### Goal
+
+Create a new metrics pipeline that works directly from logs/WAL, not ad hoc intermediate structures.
+
+### Target
+
+A canonical script you can run on demand to compute metrics directly from run logs.
+
+### Tasks
+
+* Build log reader that loads WAL/events into normalized attempt-level records
+* Derive:
+
+  * pass rates
+  * LEG / Lucky Fix / True Failure / interpretable success
+  * retry conversion metrics
+  * attempt counts
+  * parse / recon / execution failure breakdowns
+  * invariant violations
+  * state-machine retry diagnostics
+* Support filtering by:
+
+  * run_id
+  * model
+  * condition
+  * case family
+  * benchmark subset
+* Make outputs machine-readable:
+
+  * json/jsonl/csv
+* Make it easy to regenerate paper tables from logs only
+
+### Mandatory Capability
+
+You must be able to recompute your core analysis directly from logs without trusting any secondary artifact.
+
+### Exit Criteria
+
+* Metrics script is canonical
+* No dependency on legacy ad hoc metrics paths
+* Core results reproducible from logs alone
+
+---
+
+# 🟤 Phase 6 — DASHBOARD REDESIGN
+
+### Goal
+
+Redo the dashboard so it actually reflects the new architecture.
+
+### Current Problem
+
+The old dashboard no longer matches:
+
+* graph execution
+* state machine attempts
+* node-level lifecycle
+* replay / mocked-LLM test mode
+* log-derived metrics
+
+### Target
+
+Dashboard reads WAL-derived tables only and exposes the new system clearly.
+
+### Required Views
+
+* run overview
+* case overview
+* attempt trajectory view
+* node lifecycle view
+* failure breakdowns
+* retry conversion view
+* invariant violations
+* graph vs legacy diff view during cutover
+* replay / mocked-response test results
+
+### Tasks
+
+* Define canonical derived tables from WAL
+* Rebuild dashboard around those tables
+* Remove assumptions tied to legacy single-path execution
+* Improve readability and drill-down
+
+### Exit Criteria
+
+* Dashboard is log-driven
+* Supports graph + state-machine architecture cleanly
+* Useful for debugging and analysis, not just presentation
+
+---
+
+# ⚫ Phase 7 — CONFIG SYSTEM CONSOLIDATION
+
+### Goal
+
+Make config the single control surface for the entire system.
+
+### Target
+
+Everything important controlled declaratively via config.
+
+```yaml
+config:
+  execution:
+  graph:
+  retry:
+  prompts:
+  models:
+  logging:
+  replay:
+  metrics:
+  dashboard:
+```
+
+### Tasks
+
+* Remove global `get_config()` usage
+* Inject config via context everywhere
+* Normalize config naming
+* Add config validation
+* Add config support for:
+
+  * backend selection
+  * shadow mode
+  * replay/mocked LLM mode
+  * metrics generation options
+  * dashboard data sources
+
+### Exit Criteria
+
+* Zero global config access
+* Full behavior reproducible from config
+* Replay/testing/logging modes all config-controlled
+
+---
+
+# ⚪ Phase 8 — PROMPT / TEMPLATING SYSTEM HARDENING
+
+### Goal
+
+Make prompt construction fully modular, auditable, and reproducible.
+
+### Tasks
+
+* Remove remaining inline prompts
+* Enforce registry/component-only composition
+* Preserve composition hashing
+* Log:
+
+  * prompt hash
+  * component stack
+  * variables used
+* Ensure retry/state-machine prompts use the same disciplined system
+
+### Mandatory Tests
+
+* Prompt compilation regression tests
+* Replay tests using captured prompts/responses
+* Hash stability tests
+
+### Exit Criteria
+
+* Every prompt reproducible from registry + variables
+* No hidden prompt logic
+* No drift between retry/controller prompts and single-attempt prompts
+
+---
+
+# 🧩 Phase 9 — PARALLEL EXECUTION (WAVE-BASED)
+
+### Goal
+
+Speed up execution without sacrificing determinism.
+
+### Model
+
+* wave-based scheduler
+* process-based execution only
+* snapshot isolation
+* deterministic merge
+
+### Tasks
+
+* Implement wave execution
+* Enforce immutable pre-wave state snapshot
+* Stage outputs independently
+* Merge in canonical order
+* Add sequential vs parallel equivalence tests
+
+### Mandatory Tests
+
+* Same graph + same inputs:
+
+  * sequential output == parallel output
+* producer tracking equivalence
+* event ordering guarantees
+* failure semantics equivalence
+
+### Exit Criteria
+
+* Identical outputs vs sequential
+* No race conditions
+* Real speedup achieved
+
+---
+
+# 🟫 Phase 10 — ADVANCED VALIDATION & INVARIANTS
+
+### Goal
+
+Expand correctness checks now that the core architecture is stable.
+
+### Tasks
+
+* Add more cross-node invariants
+* Add controller/state-machine invariants
+* Add optional strict mode
+* Add richer structural checks
+* Potentially add AST-based or semantic validation where useful
+
+### Exit Criteria
+
+* Invariants catch real bugs
+* False positives are controlled
+* Strict mode available for hard debug runs
+
+---
+
+# 🟪 Phase 11 — ORACLE / CLASSIFIER REFACTOR
+
+### Goal
+
+Fully modularize evaluation components.
+
+### Tasks
+
+* Make oracle/classifier true pluggable nodes/slots
+* Decouple prompts/parsing/results cleanly
+* Guarantee blindness constraints structurally
+* Make replay testing work cleanly for oracle/classifier paths too
+
+### Exit Criteria
+
+* Evaluation system modular and independently testable
+* Easy to swap or add evaluators/oracles
+
+---
+
+# 🟨 Phase 12 — EXTENSIBILITY LAYER
+
+### Goal
+
+Make the system easy to extend without touching core execution code.
+
+### Tasks
+
+* Stabilize node registry
+* Build graph factory abstraction
+* Add config-driven graph construction
+* Support new policies / nodes / evaluators cleanly
+
+### Exit Criteria
+
+* Adding a new node or policy does not require core engine changes
+* New experiments mostly config + node registration
+
+---
+
+# ⚙️ Phase 13 — PERFORMANCE + SCALE
+
+### Goal
+
+Make the system practical for large experiments.
+
+### Tasks
+
+* process orchestration improvements
+* queueing / tail-latency reduction
+* careful batching where safe
+* caching only where it does not break determinism
+* scaling metrics/dashboard pipeline
+
+### Exit Criteria
+
+* Large runs are stable and efficient
+* No correctness regressions from performance work
+
+---
+
+# 🧨 Common Failure Modes to Watch
+
+## 1. Hidden state reintroduction
+
+* global config
+* global logger
+* mutable module state
+
+## 2. Retry / state-machine leakage
+
+* passing too much across attempts
+* implicit access to prior attempt state
+
+## 3. Schema drift
+
+* graph output differs from legacy output
+* breaks logs, metrics, or dashboard silently
+
+## 4. Replay harness drift
+
+* mocked replay path behaves differently from real execution path
+
+## 5. Parallel nondeterminism
+
+* merge-order bugs
+* event-order instability
+* hidden shared state
+
+## 6. Prompt drift
+
+* retry/state-machine prompt paths diverge from canonical templating system
+
+## 7. Log schema entropy
+
+* ad hoc event payloads
+* metrics/dashboard become brittle
+
+---
+
+# 🧭 Final Clean Order
+
+1. ✅ Engine + deterministic equivalence
+2. 🔴 Single-attempt cutover
+3. 🟠 Retry / state machine migration
+4. 🟣 Real integration testing with mocked API calls and recorded LLM responses
+5. 🟡 Logging / WAL rewrite
+6. 🔵 Metrics script rewrite (log-derived)
+7. 🟤 Dashboard redesign
+8. ⚫ Config consolidation
+9. ⚪ Prompt / templating hardening
+10. 🧩 Parallel execution
+11. 🟫 Advanced invariants
+12. 🟪 Oracle / classifier modularization
+13. 🟨 Extensibility
+14. ⚙️ Performance / scale
+
+---
+
+# 🧠 One-sentence summary
+
+You now have a correct execution core; the remaining work is to migrate control flow, observability, replayable integration testing, metrics, and UI around it without losing semantic equivalence.

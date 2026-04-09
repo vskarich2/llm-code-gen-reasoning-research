@@ -174,6 +174,8 @@ class ExecutionConfig:
     validate_prompts: bool = True  # run AST/metadata/structure checks on prompt templates at load
     worker_graceful_shutdown_seconds: int = 30
     recovery_execution: bool = True
+    single_attempt_backend: str = "legacy_v2"  # "legacy_v2" | "graph_v1" | "shadow"
+    retry_backend: str = "legacy_v2"  # "legacy_v2" | "graph_v1" | "shadow"
     max_orchestrator_attempts: int = 10
     anthropic_client_timeout: float = 120.0
     anthropic_max_output_tokens: int = 8192
