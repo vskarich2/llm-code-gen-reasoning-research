@@ -9,16 +9,19 @@ from __future__ import annotations
 from typing import Any, Type
 
 from side_projects.graph_runner.constants import (
+    NODE_ID_ASSEMBLE,
     NODE_ID_AST_VERIFY,
     NODE_ID_CLASSIFIER_AGGREGATION,
     NODE_ID_CLASSIFIER_REASONING,
     NODE_ID_EXECUTE,
     NODE_ID_GENERATE,
     NODE_ID_LOG,
+    NODE_ID_METRICS,
     NODE_ID_NORMALIZE,
     NODE_ID_ORACLE_AGGREGATION,
     NODE_ID_ORACLE_INLINE,
     NODE_ID_PARSE,
+    NODE_ID_PROMPT_BUILD,
     NODE_ID_RECONSTRUCT,
     NODE_ID_ROUTE,
     NODE_ID_SPEC_ORACLE,
@@ -123,7 +126,19 @@ def register_phase3_nodes() -> None:
     REGISTRY.register(NODE_ID_CLASSIFIER_AGGREGATION, ClassifierAggregationNode)
 
 
+def register_phase4_nodes() -> None:
+    """Register Phase 4 nodes (PromptBuild, Metrics, Assemble)."""
+    from side_projects.graph_runner.nodes.prompt_build import PromptBuildNode
+    from side_projects.graph_runner.nodes.metrics import MetricsNode
+    from side_projects.graph_runner.nodes.assemble import AssembleNode
+
+    REGISTRY.register(NODE_ID_PROMPT_BUILD, PromptBuildNode)
+    REGISTRY.register(NODE_ID_METRICS, MetricsNode)
+    REGISTRY.register(NODE_ID_ASSEMBLE, AssembleNode)
+
+
 # Auto-register on import
 register_phase1_nodes()
 register_phase2_nodes()
 register_phase3_nodes()
+register_phase4_nodes()

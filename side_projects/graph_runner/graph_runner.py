@@ -1,14 +1,23 @@
+"""GraphRunner — sequential DAG executor with invariant validation.
+
+Executes nodes in order. After each node:
+  1. Validates pipeline invariants (core/graph/invariants.py — per-node checks)
+  2. Validates full state invariants (state_invariants.py — cross-field checks)
+Both validators log warnings and record violations in state[KEY_INVARIANTS].
+Neither raises exceptions.
+"""
+
 from __future__ import annotations
 
 import logging
 from typing import Any, List
 
-from side_projects.graph_runner.state import ExecutionState
+from side_projects.graph_runner.state import Artifact, ExecutionState
 from side_projects.graph_runner.stage_spec import StageSpec
-from core.graph.invariants import validate_pipeline_state
-from core.constants.pipeline_constants import KEY_INVARIANTS
+from side_projects.graph_runner.state_invariants import validate_full_state
+from side_projects.graph_runner.constants import KEY_INVARIANTS
 
-_log = logging.getLogger("t3.graph_runner")
+log = logging.getLogger("t3.graph_runner")
 
 
 class GraphRunner:
@@ -28,15 +37,11 @@ class GraphRunner:
             result = stage.executor(state)
             state = result.state
 
-            # Build a view dict for the validator: index + invariants
             view = dict(state.index)
             view[KEY_INVARIANTS] = invariants
-            validate_pipeline_state(state=view, stage=stage.name)
-            # Collect any violations appended by the validator
+            validate_full_state(state=view, stage=stage.name)
             invariants = view[KEY_INVARIANTS]
 
-        # Store accumulated invariants in final state
-        from side_projects.graph_runner.state import Artifact
         if invariants:
             state.add_artifact(
                 KEY_INVARIANTS,
