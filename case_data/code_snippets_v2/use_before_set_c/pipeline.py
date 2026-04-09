@@ -1,5 +1,3 @@
-"""Multi-stage pipeline with search and fallback."""
-
 from loader import load_and_validate, get_status
 
 _pipeline_result = "not_run"
@@ -15,10 +13,6 @@ def reset():
 
 
 def find_best(records, rules):
-    """Find the first record matching all CLAUDE_RULES with value > threshold.
-
-    Contract: must return the matching record or None if none qualifies.
-    """
     global _pipeline_result, _last_best
 
     valid, status = load_and_validate(records, rules)

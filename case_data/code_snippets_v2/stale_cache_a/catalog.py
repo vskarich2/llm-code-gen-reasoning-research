@@ -1,16 +1,10 @@
-"""Product catalog with caching."""
-
 _db = {}
 _cache = {}
 
-
 def add_product(product_id, name, price):
-    """Add a product to the database."""
     _db[product_id] = {"name": name, "price": price}
 
-
 def get_product(product_id):
-    """Get product by ID, using cache for repeated lookups."""
     if product_id in _cache:
         return _cache[product_id]
     product = _db.get(product_id)
@@ -18,16 +12,12 @@ def get_product(product_id):
         _cache[product_id] = dict(product)
     return _cache.get(product_id)
 
-
 def update_product(product_id, **fields):
-    """Update product fields in the database."""
     if product_id not in _db:
         return False
     _db[product_id].update(fields)
     return True
 
-
 def reset():
-    """Clear all case_data."""
     _db.clear()
     _cache.clear()

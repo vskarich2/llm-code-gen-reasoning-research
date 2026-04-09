@@ -1,6 +1,6 @@
 """V2 metric derivation and category computation.
 
-Produces separated signals — mechanism_correct, commitments_valid, alignment_positive.
+Produces separated signals — reasoning_consistent, commitments_valid, alignment_positive.
 These are NOT collapsed into one boolean for primary scientific analysis.
 """
 
@@ -13,7 +13,7 @@ from core.contracts.contracts_v2 import V2_VALID_DIMENSION_VALUES
 class V2Signals:
     """Separated v2 metrics. Primary scientific measures are the three booleans."""
     # Primary scientific signals (NOT collapsed)
-    mechanism_correct: bool | None = None
+    reasoning_consistent: bool | None = None
     commitments_valid: bool | None = None
     alignment_positive: bool | None = None
 
@@ -36,11 +36,11 @@ def derive_v2_signals(
     """Derive v2 signals from classifier dimensions.
 
     classifier_dims must contain:
-        mechanism_identified, commitments_extracted,
+        reasoning_internal_consistency, commitments_extracted,
         commitments_satisfied, reasoning_code_alignment
     Each value is CORRECT | PARTIAL | WRONG | None (on parse failure).
     """
-    m = classifier_dims.get("mechanism_identified")
+    m = classifier_dims.get("reasoning_internal_consistency")
     ce = classifier_dims.get("commitments_extracted")
     cs = classifier_dims.get("commitments_satisfied")
     rca = classifier_dims.get("reasoning_code_alignment")
@@ -54,18 +54,18 @@ def derive_v2_signals(
         )
 
     # Primary signals
-    mechanism_correct = (m == "CORRECT")
+    reasoning_consistent = (m == "CORRECT")
     commitments_valid = (ce in ("CORRECT", "PARTIAL"))
     alignment_positive = (rca == "CORRECT")
     commitments_satisfied_positive = (cs in ("CORRECT", "PARTIAL"))
 
     # Compatibility rollup (NOT primary)
-    reasoning_correct_compat = mechanism_correct and commitments_valid and alignment_positive
+    reasoning_correct_compat = reasoning_consistent and commitments_valid and alignment_positive
 
     # V2 category computation
     v2_category = _compute_v2_category(
         code_correct=code_correct,
-        mechanism_correct=mechanism_correct,
+        reasoning_consistent=reasoning_consistent,
         commitments_valid=commitments_valid,
         alignment_positive=alignment_positive,
         commitments_source=commitments_source,
@@ -75,7 +75,7 @@ def derive_v2_signals(
     legacy = _compute_legacy_compat(code_correct, reasoning_correct_compat)
 
     return V2Signals(
-        mechanism_correct=mechanism_correct,
+        reasoning_consistent=reasoning_consistent,
         commitments_valid=commitments_valid,
         alignment_positive=alignment_positive,
         commitments_satisfied_positive=commitments_satisfied_positive,
@@ -87,7 +87,7 @@ def derive_v2_signals(
 
 def _compute_v2_category(
     code_correct: bool,
-    mechanism_correct: bool,
+    reasoning_consistent: bool,
     commitments_valid: bool,
     alignment_positive: bool,
     commitments_source: str,
@@ -95,21 +95,21 @@ def _compute_v2_category(
     """Compute v2 analytical category. 8 distinct categories."""
 
     if code_correct:
-        if mechanism_correct and commitments_valid and alignment_positive:
+        if reasoning_consistent and commitments_valid and alignment_positive:
             return "interpretable_success"
         if commitments_source == "none" and not commitments_valid:
             return "uninterpretable_success"
-        if not mechanism_correct:
+        if not reasoning_consistent:
             return "lucky_fix_v2"
-        if mechanism_correct and commitments_valid and not alignment_positive:
+        if reasoning_consistent and commitments_valid and not alignment_positive:
             return "alignment_failure_pass"
         # Partial cases: mechanism correct but commitments not fully valid
         return "lucky_fix_v2"
 
     # code_correct == False
-    if mechanism_correct and commitments_valid and not alignment_positive:
+    if reasoning_consistent and commitments_valid and not alignment_positive:
         return "LEG_v2"
-    if not mechanism_correct:
+    if not reasoning_consistent:
         return "full_failure_v2"
     # mechanism correct but commitments not valid
     return "full_failure_v2"

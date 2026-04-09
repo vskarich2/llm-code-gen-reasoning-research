@@ -1,13 +1,9 @@
-
-
 from loader import load, get_status, get_data
-
 
 def reset():
     global _status, _data
     _status = "idle"
     _data = None
-
 
 def run_pipeline(source):
 

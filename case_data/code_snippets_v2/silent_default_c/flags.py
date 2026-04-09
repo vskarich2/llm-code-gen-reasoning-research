@@ -1,10 +1,3 @@
-"""Feature flag system with env -> config -> hardcoded fallback chain.
-
-Lookup order:
-  1. Environment variable (via env.get_env_bool)
-  2. Config file (via config.get_config_bool)
-  3. Hardcoded defaults
-"""
 
 from env import get_env_bool
 from config import get_config_bool
@@ -16,7 +9,7 @@ HARDCODED_DEFAULTS = {
     "analytics": False,
 }
 
-# Maps flag names to their env var keys
+
 _ENV_KEY_MAP = {
     "dark_mode": "FEATURE_DARKMODE",
     "beta": "FEATURE_BETA",
@@ -25,10 +18,6 @@ _ENV_KEY_MAP = {
 
 
 def is_enabled(flag_name):
-    """Check if a feature flag is enabled.
-
-    Checks env first, then config, then hardcoded defaults.
-    """
     env_key = _ENV_KEY_MAP.get(flag_name)
     if env_key:
         env_val = get_env_bool(env_key)
@@ -43,7 +32,6 @@ def is_enabled(flag_name):
 
 
 def get_flag_source(flag_name):
-    """Return which layer provides the flag value (for debugging)."""
     env_key = _ENV_KEY_MAP.get(flag_name)
     if env_key:
         from env import get_env

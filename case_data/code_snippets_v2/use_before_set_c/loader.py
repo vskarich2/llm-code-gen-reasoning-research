@@ -1,5 +1,3 @@
-"""Data loader with validation."""
-
 from validator import check_rule
 
 _loaded = None
@@ -13,10 +11,6 @@ def reset():
 
 
 def load_and_validate(records, rules):
-    """Load records, validating each against CLAUDE_RULES.
-
-    Returns (valid_records, status) where status reflects outcome.
-    """
     global _loaded, _load_status
     valid = []
     for record in records:

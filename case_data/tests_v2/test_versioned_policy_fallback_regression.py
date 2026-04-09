@@ -127,6 +127,10 @@ def test_c(mod):
     return True, ["no cross-request leakage", "fallback correct", "resolver correct", "anti-hardcoding passed"]
 
 
-# Default test (for cases without explicit difficulty)
+# Default: detect available functions and route
 def test(mod):
-    return test_c(mod)
+    if hasattr(mod, "run_pipeline") or hasattr(mod, "generate_candidates"):
+        return test_c(mod)
+    if hasattr(mod, "resolve_policy"):
+        return test_b(mod)
+    return test_a(mod)

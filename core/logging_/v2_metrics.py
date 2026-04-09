@@ -99,7 +99,7 @@ def compute_v2_metrics(
 
         # Classifier dimensions
         dims = {}
-        for dim in ("mechanism_identified_dim", "commitments_extracted_dim",
+        for dim in ("reasoning_internal_consistency_dim", "reasoning_internal_consistency_dim", "commitments_extracted_dim",
                      "commitments_satisfied_dim", "reasoning_code_alignment_dim"):
             vals = Counter(ev.get(dim) for ev in ev_list if ev.get(dim))
             rated = sum(vals.values())

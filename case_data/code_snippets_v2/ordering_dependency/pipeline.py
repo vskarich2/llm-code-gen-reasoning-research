@@ -1,4 +1,4 @@
-"""Pipeline with ordering dependency: process must run after init."""
+
 
 _log = []
 _initialized = False
@@ -43,7 +43,6 @@ def run_steps(steps):
 
 
 def correct_order():
-    """init -> process(a) -> process(b) -> shutdown. Correct."""
     reset()
     run_steps([
         (init, ()),

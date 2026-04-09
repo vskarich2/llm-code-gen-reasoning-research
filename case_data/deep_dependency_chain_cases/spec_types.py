@@ -1,5 +1,7 @@
 """Type definitions for deep_dependency_chain_cases case specs per v7 spec."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Callable
 

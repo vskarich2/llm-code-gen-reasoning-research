@@ -26,16 +26,15 @@ _DEBUG_DELIMITER = "---DEBUG---"
 @dataclass
 class ClassifierResultV2:
     """Parsed classifier output (v2 and v3 schemas)."""
-    # V2 dimensions (populated by v2 parser, None when v3 parser used)
-    mechanism_identified: str | None = None
+    # Shared dimension (both v2 and v3 populate this)
+    reasoning_internal_consistency: str | None = None
+    reasoning_code_alignment: str | None = None
+
+    # V2-only dimensions (populated by v2 parser, None when v3 parser used)
     commitments_extracted: str | None = None
     commitments_satisfied: str | None = None
 
-    # Shared dimension (same name in v2 and v3)
-    reasoning_code_alignment: str | None = None
-
-    # V3 dimensions (populated by v3 parser, None when v2 parser used)
-    reasoning_internal_consistency: str | None = None
+    # V3-only dimensions (populated by v3 parser, None when v2 parser used)
     commitments_internal_consistency: str | None = None
     commitments_code_consistency: str | None = None
 
@@ -66,22 +65,22 @@ def _extract_canonical_dims(result: ClassifierResultV2) -> dict:
     Maps v3 or v2 classifier fields to canonical signal names.
     No other code may read dimension fields directly from the result.
 
-    Returns dict with keys: mechanism_identified, commitments_extracted,
+    Returns dict with keys: reasoning_internal_consistency, commitments_extracted,
     commitments_satisfied, reasoning_code_alignment.
     """
-    v3_fields = (
-        result.reasoning_internal_consistency,
+    # Detect v3 by v3-only fields (commitments_internal_consistency, commitments_code_consistency)
+    v3_only_fields = (
         result.commitments_internal_consistency,
         result.commitments_code_consistency,
     )
-    v2_fields = (
-        result.mechanism_identified,
+    # Detect v2 by v2-only fields (commitments_extracted, commitments_satisfied)
+    v2_only_fields = (
         result.commitments_extracted,
         result.commitments_satisfied,
     )
 
-    v3_populated = any(f is not None for f in v3_fields)
-    v2_populated = any(f is not None for f in v2_fields)
+    v3_populated = any(f is not None for f in v3_only_fields)
+    v2_populated = any(f is not None for f in v2_only_fields)
 
     if v3_populated and v2_populated:
         raise RuntimeError(
@@ -90,7 +89,7 @@ def _extract_canonical_dims(result: ClassifierResultV2) -> dict:
         )
 
     if v3_populated:
-        if not all(f is not None for f in v3_fields):
+        if not all(f is not None for f in v3_only_fields) or result.reasoning_internal_consistency is None:
             raise RuntimeError(
                 "Partial v3 classifier state: some v3 fields are None. "
                 f"ric={result.reasoning_internal_consistency}, "
@@ -98,14 +97,14 @@ def _extract_canonical_dims(result: ClassifierResultV2) -> dict:
                 f"ccc={result.commitments_code_consistency}"
             )
         return {
-            "mechanism_identified": result.reasoning_internal_consistency,
+            "reasoning_internal_consistency": result.reasoning_internal_consistency,
             "commitments_extracted": result.commitments_internal_consistency,
             "commitments_satisfied": result.commitments_code_consistency,
             "reasoning_code_alignment": result.reasoning_code_alignment,
         }
 
     return {
-        "mechanism_identified": result.mechanism_identified,
+        "reasoning_internal_consistency": result.reasoning_internal_consistency,
         "commitments_extracted": result.commitments_extracted,
         "commitments_satisfied": result.commitments_satisfied,
         "reasoning_code_alignment": result.reasoning_code_alignment,
@@ -283,7 +282,7 @@ def parse_classifier_v2_output(raw: str) -> ClassifierResultV2:
             return result
         dims[name] = val
 
-    result.mechanism_identified = dims["mechanism_identified"]
+    result.reasoning_internal_consistency = dims.get("reasoning_internal_consistency") or dims.get("reasoning_internal_consistency")
     result.commitments_extracted = dims["commitments_extracted"]
     result.commitments_satisfied = dims["commitments_satisfied"]
     result.reasoning_code_alignment = dims["reasoning_code_alignment"]
@@ -503,14 +502,14 @@ def assemble_v2_result(
     }
 
     # V2 primary signals
-    ev["mechanism_correct"] = signals.mechanism_correct
+    ev["reasoning_consistent"] = signals.reasoning_consistent
     ev["commitments_valid"] = signals.commitments_valid
     ev["alignment_positive"] = signals.alignment_positive
     ev["commitments_satisfied_positive"] = signals.commitments_satisfied_positive
 
     # V2 classifier dimensions (raw)
     canonical = _extract_canonical_dims(classifier)
-    ev["mechanism_identified_dim"] = canonical["mechanism_identified"]
+    ev["reasoning_internal_consistency_dim"] = canonical["reasoning_internal_consistency"]
     ev["commitments_extracted_dim"] = canonical["commitments_extracted"]
     ev["commitments_satisfied_dim"] = canonical["commitments_satisfied"]
     ev["reasoning_code_alignment_dim"] = canonical["reasoning_code_alignment"]

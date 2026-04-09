@@ -1,5 +1,4 @@
 def snapshot(candidates):
-    # Snapshot preserves lineage, but not in the original representation.
     return [
         {
             'snapshot_id': i,

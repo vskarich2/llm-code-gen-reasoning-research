@@ -295,11 +295,11 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
             cond_cats[e.get("category", "unknown")] += 1
 
         # Per-condition reasoning quality
-        cond_dims = [e for e in ce if e.get("mechanism_identified") is not None]
+        cond_dims = [e for e in ce if e.get("reasoning_internal_consistency") is not None or e.get("reasoning_internal_consistency") is not None]
         n_cd = len(cond_dims)
         reasoning_quality = {}
         if n_cd > 0:
-            for dim in ("mechanism_identified", "invariant_identified", "causal_chain_complete",
+            for dim in ("reasoning_internal_consistency", "reasoning_internal_consistency", "invariant_identified", "causal_chain_complete",
                          "fix_alignment", "reasoning_code_alignment"):
                 correct = sum(1 for e in cond_dims if e.get(dim) == "CORRECT")
                 partial = sum(1 for e in cond_dims if e.get(dim) == "PARTIAL")
@@ -524,10 +524,10 @@ def compute_metrics(events: list[dict], total_jobs: int) -> dict:
     # ================================================================
     # SECTION 4 — REASONING QUALITY
     # ================================================================
-    dims_events = [e for e in events if e.get("mechanism_identified") is not None]
+    dims_events = [e for e in events if e.get("reasoning_internal_consistency") is not None or e.get("reasoning_internal_consistency") is not None]
     n_dims = len(dims_events)
     if n_dims > 0:
-        for dim in ("mechanism_identified", "invariant_identified", "causal_chain_complete",
+        for dim in ("reasoning_internal_consistency", "reasoning_internal_consistency", "invariant_identified", "causal_chain_complete",
                      "fix_alignment", "reasoning_code_alignment"):
             correct = sum(1 for e in dims_events if e.get(dim) == "CORRECT")
             partial = sum(1 for e in dims_events if e.get(dim) == "PARTIAL")
@@ -854,7 +854,7 @@ def write_dashboard(metrics: dict, dashboard_path: Path) -> None:
         w("")
         w(f"  {'Dimension':<30s} {'CORRECT':>8} {'PARTIAL':>8} {'WRONG':>8}")
         w(f"  {'─' * 56}")
-        for dim in ("mechanism_identified", "invariant_identified", "causal_chain_complete",
+        for dim in ("reasoning_internal_consistency", "reasoning_internal_consistency", "invariant_identified", "causal_chain_complete",
                      "fix_alignment", "reasoning_code_alignment"):
             cr = metrics.get(f"{dim}_correct_rate", 0)
             pr = metrics.get(f"{dim}_partial_rate", 0)

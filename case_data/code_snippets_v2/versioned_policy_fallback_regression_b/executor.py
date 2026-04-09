@@ -1,6 +1,3 @@
-"""Executor — executes policy behavior based on resolved context."""
-
-
 def execute_policy(request, resolved):
     compat = request.get("compat", {})
     flags = compat.get("flags", {})

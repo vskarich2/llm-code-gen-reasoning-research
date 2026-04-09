@@ -1,4 +1,4 @@
-"""Order fulfillment with inventory and wallet."""
+
 
 
 class Inventory:
@@ -29,7 +29,6 @@ class Wallet:
 
 
 def place_order(inventory, wallet, qty, price):
-    """Reserve inventory, then charge wallet. Release on failure."""
     inventory.reserve(qty)
     try:
         wallet.charge(qty * price)

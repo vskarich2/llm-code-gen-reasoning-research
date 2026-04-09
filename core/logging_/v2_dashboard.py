@@ -150,7 +150,8 @@ def write_v2_dashboard(metrics: dict, dashboard_path: Path,
         w("  S5: CLASSIFIER DIMENSIONS (% CORRECT)")
         w("-" * 78)
         dim_labels = {
-            "mechanism_identified_dim": "mechanism",
+            "reasoning_internal_consistency_dim": "ric",
+            "reasoning_internal_consistency_dim": "mechanism(legacy)",
             "commitments_extracted_dim": "extracted",
             "commitments_satisfied_dim": "satisfied",
             "reasoning_code_alignment_dim": "alignment",

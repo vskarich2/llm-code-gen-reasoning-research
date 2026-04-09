@@ -6,16 +6,12 @@ def process_batch(entries):
     st = make_state(entries)
     raw = st["raw"]
 
-    # dedupe
+
     cleaned = normalize(raw)
 
-    # merge values for same id
     merged = collapse(cleaned)
 
-    # stage puts merged into pending + builds view from merged
     stage(st, merged)
-
-    # commit and freeze_view removed as redundant
 
     out = materialize(st)
     return st, out

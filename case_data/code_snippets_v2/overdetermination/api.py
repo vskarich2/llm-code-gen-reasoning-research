@@ -4,12 +4,10 @@ from writer_b import write_cached
 
 
 def update_product(product_id, compute_fn):
-    """Update product case_data."""
     write_fresh(product_id, compute_fn)
     write_cached(product_id, compute_fn)
     return read(product_id)
 
 
 def serve_request(product_id):
-    """Serve product case_data with version."""
     return {"value": read(product_id), "version": get_version(product_id)}

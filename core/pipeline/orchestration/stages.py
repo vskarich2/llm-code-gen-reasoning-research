@@ -117,14 +117,73 @@ def stage_ast(state: AttemptState, case: dict) -> None:
         state.recon, case, state.artifact_id)
 
 
+def _swebench_exec_result(case: dict) -> dict:
+    """Build exec_result from pre-computed SWE-bench Docker results."""
+    swe = case.get("_swebench", {})
+    resolved = swe.get("resolved_v5", False)
+    fail_cat = swe.get("failure_category_v5", "UNKNOWN")
+
+    if resolved:
+        category = "EXECUTION_SUCCESS"
+    elif fail_cat == "EMPTY_PATCH":
+        category = "STRUCTURAL_FAILURE"
+    elif fail_cat in ("SYNTAX_ERROR", "IMPORT_ERROR"):
+        category = "SYNTAX_FAILURE"
+    else:
+        category = "INVARIANT_FAILURE"
+
+    return {
+        "pass": resolved,
+        "score": 1.0 if resolved else 0.0,
+        "reasons": [] if resolved else [f"SWE-bench Docker: {fail_cat}"],
+        "failure_modes": [] if resolved else [fail_cat],
+        "execution": {
+            "status": "passed" if resolved else "failed",
+            "ran": True,
+            "passed_tests": 1 if resolved else 0,
+            "total_tests": 1,
+            "runtime_error": None,
+            "invariant_pass": resolved,
+            "mutation_pass": None,
+        },
+        "execution_category": category,
+        "execution_subtype": None if resolved else fail_cat,
+        "modules_loaded": [],
+        "functions_detected": [],
+        "functions_called": [],
+        "merge_conflicts": [],
+        "execution_trace": [],
+        "reconstruction_status": None,
+        "semantic_diagnostics": {
+            "missing_required_definitions": False,
+            "missing_definition_names": [],
+        },
+        "_extracted_code": "",
+        "_assembled_code": "swebench_docker",
+    }
+
+
 def stage_execute(state: AttemptState, case: dict, config,
                   logger) -> None:
-    """Stage 8: Execute code against test suite."""
-    from core.pipeline.orchestration.execution_v2 import _execute
-    state.exec_result = _execute(
-        case, state.parsed_gen, state.recon, config, logger,
-        attempt=state.attempt_idx)
+    """Stage 8: Execute code against test suite.
+
+    For SWE-bench cases (template == 'swebench_real_world'), injects
+    pre-computed Docker evaluation results instead of running subprocess.
+    """
+    if case.get("template") == "swebench_real_world":
+        state.exec_result = _swebench_exec_result(case)
+    else:
+        from core.pipeline.orchestration.execution_v2 import _execute
+        state.exec_result = _execute(
+            case, state.parsed_gen, state.recon, config, logger,
+            attempt=state.attempt_idx)
     state.passed = state.exec_result.get("pass", False)
+
+
+def stage_spec_oracle(state: AttemptState, case: dict) -> None:
+    """Stage 8b: Spec oracle for DDC cases (after execution)."""
+    from core.evaluation.spec_oracle import run_spec_oracle
+    state.spec_oracle_result = run_spec_oracle(case, state.exec_result)
 
 
 def stage_derive_metrics(state: AttemptState, config) -> None:
@@ -154,4 +213,5 @@ def run_stages_2_through_9(state: AttemptState, case: dict, config,
     stage_classify(state, case, config, logger)
     stage_ast(state, case)
     stage_execute(state, case, config, logger)
+    stage_spec_oracle(state, case)
     stage_derive_metrics(state, config)

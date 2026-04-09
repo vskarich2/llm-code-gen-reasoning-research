@@ -1,5 +1,3 @@
-"""Compatibility handler — attaches compatibility context to requests."""
-
 _COMPAT = {}
 
 

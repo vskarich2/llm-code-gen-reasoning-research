@@ -1,12 +1,4 @@
-"""Executor — executes policy behavior based on resolved context."""
-
-
 def execute_policy(request, resolved):
-    """Execute the policy for a request.
-
-    Uses compatibility context to determine if fallback behavior
-    should override the resolved version.
-    """
     compat = request.get("compat", {})
     policy = resolved["policy"]
     version = resolved["resolved_version"]

@@ -81,8 +81,8 @@ The classifier evaluates the model's reasoning against its generated code. The t
 
 | Template | Dimensions | Description |
 |---|---|---|
-| `classify_reasoning_v2` (default) | mechanism_identified, commitments_extracted, commitments_satisfied, reasoning_code_alignment | Production 4-dimension scorer |
-| `classify_reasoning` | mechanism_identified, invariant_identified, causal_chain_complete, fix_alignment, reasoning_code_alignment | Legacy 5-dimension scorer |
+| `classify_reasoning_v2` (default) | reasoning_internal_consistency, commitments_extracted, commitments_satisfied, reasoning_code_alignment | Production 4-dimension scorer |
+| `classify_reasoning` | reasoning_internal_consistency, invariant_identified, causal_chain_complete, fix_alignment, reasoning_code_alignment | Legacy 5-dimension scorer |
 
 ### Using a classifier in your config
 

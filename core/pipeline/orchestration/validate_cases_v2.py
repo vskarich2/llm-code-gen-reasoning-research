@@ -1,130 +1,176 @@
 """Validation pipeline for T3 v2 benchmark cases.
 
-Runs 6 checks on each case:
-  1. Buggy code loads as a module
-  2. Test FAILS on buggy code
-  3. Test PASSES on reference fix
-  4. Reference fix is minimal
-  5. Test is idempotent
-  6. Cross-case isolation
+Runs checks on each case using the EXACT same execution path as production:
+  _materialize_package → _run_subprocess (harness/run_case.py)
+
+Checks:
+  1. Buggy code loads and test FAILS
+  2. Reference fix loads and test PASSES
+  3. Reference fix is minimal
+  4. Test is idempotent
+  5. Metadata alignment
 
 Usage:
-    .venv/bin/python validate_cases_v2.py
-    .venv/bin/python validate_cases_v2.py --family alias_config
-    .venv/bin/python validate_cases_v2.py --case alias_config_a
+    .venv/bin/python -m core.pipeline.orchestration.validate_cases_v2
+    .venv/bin/python -m core.pipeline.orchestration.validate_cases_v2 --family auth_context_chain
+    .venv/bin/python -m core.pipeline.orchestration.validate_cases_v2 --case auth_context_chain
 """
 
 import argparse
+import ast as _ast
 import importlib
 import importlib.util
 import json
+import os
+import shutil
 import sys
-from types import ModuleType
+import tempfile
+from pathlib import Path
 
-from core.config.paths import PROJECT_ROOT, TESTS_V2_DIR, REFERENCE_FIXES_DIR
-BASE = PROJECT_ROOT
-
-from core.pipeline.code_assembly import assemble_code
-
-
-def load_module(code: str, name: str, case: dict) -> ModuleType:
-    """Load code as a module through canonical assembly path. case is REQUIRED."""
-    asm = assemble_code(code, case)
-    cleaned = asm.code
-    spec = importlib.util.spec_from_loader(name, loader=None)
-    mod = importlib.util.module_from_spec(spec)
-    mod.__dict__["__builtins__"] = __builtins__
-    exec(compile(cleaned, f"<{name}>", "exec"), mod.__dict__)
-    sys.modules[name] = mod
-    return mod
+from core.config.paths import (
+    PROJECT_ROOT, CASE_DATA_DIR, TESTS_V2_DIR, REFERENCE_FIXES_DIR,
+    HARNESS_SCRIPT,
+)
+from core.pipeline.execution.exec_canonical import (
+    _run_subprocess,
+)
 
 
-def load_case_code(case: dict) -> str:
-    parts = []
+def _materialize(case: dict, file_contents: dict[str, str]) -> Path:
+    """Create temp dir with pkg/, harness/, case_meta.json.
+
+    Identical to exec_canonical._materialize_package but takes
+    file_contents dict instead of a recon object.
+    """
+    case_id = case["id"]
+    pkg_dir = Path(tempfile.mkdtemp(prefix=f"t3_val_{case_id}_"))
+
+    pkg = pkg_dir / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+
+    for filename, content in file_contents.items():
+        (pkg / filename).write_text(content)
+
+    harness_dst = pkg_dir / "harness"
+    harness_dst.mkdir()
+    shutil.copy2(str(HARNESS_SCRIPT), str(harness_dst / "run_case.py"))
+
+    meta = {
+        "case_id": case_id,
+        "family": case.get("family", ""),
+        "difficulty": case.get("difficulty", "a").lower(),
+        "project_root": str(PROJECT_ROOT),
+        "code_files": case["code_files"],
+    }
+    (pkg_dir / "case_meta.json").write_text(json.dumps(meta))
+
+    return pkg_dir
+
+
+def _run_case(case: dict, file_contents: dict[str, str], timeout: int = 30) -> dict:
+    """Materialize and run via subprocess. Returns parsed JSON result."""
+    pkg_dir = _materialize(case, file_contents)
+    try:
+        return _run_subprocess(pkg_dir, str(PROJECT_ROOT), timeout)
+    finally:
+        shutil.rmtree(str(pkg_dir), ignore_errors=True)
+
+
+def _read_case_files(case: dict) -> dict[str, str]:
+    """Read case code files into a filename -> content dict."""
+    files = {}
     for rel in case["code_files"]:
-        path = BASE / rel
-        parts.append(path.read_text(encoding="utf-8"))
-    return "\n\n".join(parts)
+        path = CASE_DATA_DIR / rel
+        files[path.name] = path.read_text(encoding="utf-8")
+    return files
 
 
 def load_test_func(case: dict):
-    family = case["family"]
-    level = case["difficulty"].lower()
-    from core.config.paths import TESTS_V2_DIR
+    family = case.get("family", case.get("id", ""))
+    level = case.get("difficulty", "").lower()
     test_path = TESTS_V2_DIR / f"test_{family}.py"
     if not test_path.exists():
         return None
     spec = importlib.util.spec_from_file_location(f"test_{family}", test_path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    fn_name = f"test_{level}"
-    fn = getattr(mod, fn_name, None)
+    fn = getattr(mod, f"test_{level}", None)
     if fn is None:
-        fn = getattr(mod, "test", None)  # fallback for single-test cases
+        fn = getattr(mod, "test", None)
+    if fn is None:
+        fn = getattr(mod, "test_a", None)
     return fn
 
 
-def load_reference_code(case: dict) -> str | None:
-    """Load reference fix, merged with non-bug files from the case.
-
-    The reference fix file contains only the fixed version of the primary
-    bug file. For multi-file cases, we concatenate it with the other
-    (unchanged) files to produce a complete module.
-    """
-    ref_path = REFERENCE_FIXES_DIR / f"{case['id']}.py"
-    if not ref_path.exists():
-        return None
-    ref_code = ref_path.read_text(encoding="utf-8")
-
-    # For multi-file cases, prepend the non-bug files
-    bug_file = case.get("reference_fix", {}).get("file", "")
-    other_parts = []
-    for rel in case["code_files"]:
-        if rel != bug_file:
-            path = BASE / rel
-            if path.exists():
-                other_parts.append(path.read_text(encoding="utf-8"))
-
-    if other_parts:
-        return "\n\n".join(other_parts) + "\n\n" + ref_code
-    return ref_code
+# ── Checks ──────────────────────────────────────────────────
 
 
 def check_loads(case: dict) -> tuple[bool, str]:
     try:
-        code = load_case_code(case)
-        load_module(code, f"check_load_{case['id']}", case=case)
-        return True, "loads"
+        files = _read_case_files(case)
+        result = _run_case(case, files)
+        status = result.get("status", "")
+        if status == "ok":
+            return True, "loads"
+        return False, f"load/run error: {result.get('error_message', status)}"
     except Exception as e:
         return False, f"load error: {e}"
 
 
 def check_fails_buggy(case: dict) -> tuple[bool, str]:
-    test_fn = load_test_func(case)
-    if test_fn is None:
-        return False, "test function not found"
     try:
-        code = load_case_code(case)
-        mod = load_module(code, f"buggy_{case['id']}", case=case)
-        passed, reasons = test_fn(mod)
-        if passed:
+        files = _read_case_files(case)
+        result = _run_case(case, files)
+        if result.get("status") != "ok":
+            return False, f"run error: {result.get('error_message', result.get('status'))}"
+        if result.get("passed", False):
             return False, "test PASSES on buggy code — bug not real"
         return True, "fails_buggy"
     except Exception as e:
         return False, f"test error: {e}"
 
 
+def _read_baseline_files(case: dict) -> dict[str, str] | None:
+    """Read the baseline (non-trap) files for this case's family.
+
+    For trap variants, the baseline is the family's own generated case.
+    For baselines, it's the same as _read_case_files.
+    """
+    import json as _json
+    cases_path = CASE_DATA_DIR / "cases_v2.json"
+    family = case.get("family", case["id"])
+    # If this IS the baseline, just read its files
+    if case["id"] == family:
+        return _read_case_files(case)
+    # Find the baseline case entry
+    all_cases = _json.loads(cases_path.read_text())
+    baseline = next((c for c in all_cases if c["id"] == family), None)
+    if baseline is None:
+        return None
+    return _read_case_files(baseline)
+
+
 def check_passes_fixed(case: dict) -> tuple[bool, str]:
-    test_fn = load_test_func(case)
-    if test_fn is None:
-        return False, "test function not found"
-    ref_code = load_reference_code(case)
-    if ref_code is None:
+    ref_path = REFERENCE_FIXES_DIR / f"{case['id']}.py"
+    if not ref_path.exists():
         return False, "reference fix not found"
     try:
-        mod = load_module(ref_code, f"fixed_{case['id']}", case=case)
-        passed, reasons = test_fn(mod)
-        if not passed:
+        # Always use baseline files (not trap-modified files)
+        files = _read_baseline_files(case)
+        if files is None:
+            return False, "baseline case not found"
+        bug_filename = case.get("reference_fix", {}).get("file", "")
+        ref_code = ref_path.read_text(encoding="utf-8")
+        if bug_filename and bug_filename in files:
+            files[bug_filename] = ref_code
+        else:
+            files[bug_filename or "_reference_fix.py"] = ref_code
+        result = _run_case(case, files)
+        if result.get("status") != "ok":
+            return False, f"run error: {result.get('error_message', result.get('status'))}"
+        if not result.get("passed", False):
+            reasons = result.get("failure_reasons", [])
             return False, f"test FAILS on reference fix: {reasons}"
         return True, "passes_fixed"
     except Exception as e:
@@ -132,11 +178,6 @@ def check_passes_fixed(case: dict) -> tuple[bool, str]:
 
 
 def check_minimal(case: dict) -> tuple[bool, str]:
-    """Check that the bug fix is minimal.
-
-    Compares only the primary bug file against the raw reference fix file
-    (NOT the merged version used for execution).
-    """
     ref_path = REFERENCE_FIXES_DIR / f"{case['id']}.py"
     if not ref_path.exists():
         return False, "reference fix not found"
@@ -144,37 +185,37 @@ def check_minimal(case: dict) -> tuple[bool, str]:
 
     bug_file = case.get("reference_fix", {}).get("file")
     if bug_file:
-        bug_path = BASE / bug_file
+        bug_path = CASE_DATA_DIR / next(
+            (rel for rel in case["code_files"] if rel.endswith("/" + bug_file)),
+            bug_file,
+        )
         if bug_path.exists():
             buggy_code = bug_path.read_text(encoding="utf-8")
         else:
-            buggy_code = load_case_code(case)
+            return False, f"bug file not found: {bug_file}"
     else:
-        buggy_code = load_case_code(case)
+        return False, "reference_fix.file not set"
 
     buggy_lines = buggy_code.strip().splitlines()
     ref_lines = ref_code.strip().splitlines()
-
     diff_count = sum(1 for a, b in zip(buggy_lines, ref_lines) if a != b)
     diff_count += abs(len(buggy_lines) - len(ref_lines))
-    # Difficulty-based threshold: reference fixes may have formatting differences
-    level_max = {"A": 10, "B": 20, "C": 30}.get(case.get("difficulty", "C"), 30)
+    level_max = {"A": 10, "B": 20, "C": 30, "B+": 20, "D": 30}.get(
+        case.get("difficulty", "C"), 30)
     if diff_count > level_max:
         return False, f"diff={diff_count} lines, max={level_max}"
     return True, f"minimal (diff={diff_count})"
 
 
 def check_idempotent(case: dict) -> tuple[bool, str]:
-    test_fn = load_test_func(case)
-    if test_fn is None:
-        return False, "test function not found"
     try:
-        code = load_case_code(case)
+        files = _read_case_files(case)
         results = []
-        for i in range(3):
-            mod = load_module(code, f"idemp_{case['id']}_{i}", case=case)
-            passed, reasons = test_fn(mod)
-            results.append((passed, tuple(reasons)))
+        for _ in range(3):
+            r = _run_case(case, files)
+            passed = r.get("passed", False)
+            reasons = tuple(r.get("failure_reasons", []))
+            results.append((passed, reasons))
         if len(set(results)) != 1:
             return False, f"non-idempotent: {results}"
         return True, "idempotent"
@@ -183,37 +224,27 @@ def check_idempotent(case: dict) -> tuple[bool, str]:
 
 
 def check_metadata_alignment(case: dict) -> tuple[bool, str]:
-    """Check that reference_fix.function exists in the reference fix code.
-
-    Prevents metadata bugs like mutable_default_b where the metadata claimed
-    the fix was in 'enqueue' but the actual fix modified 'process_batch'.
-    """
-    import ast as _ast
-
     ref_path = REFERENCE_FIXES_DIR / f"{case['id']}.py"
     if not ref_path.exists():
         return False, "reference fix file not found"
-
     expected_fn = case.get("reference_fix", {}).get("function", "")
     if not expected_fn:
         return False, "reference_fix.function is empty"
-
     ref_code = ref_path.read_text(encoding="utf-8")
     try:
         tree = _ast.parse(ref_code)
     except SyntaxError as e:
         return False, f"reference fix has syntax error: {e}"
-
     ref_defs = {n.name for n in _ast.walk(tree) if isinstance(n, _ast.FunctionDef)}
-
     if expected_fn not in ref_defs:
         return False, (
-            f"reference_fix.function='{expected_fn}' NOT FOUND in reference fix code. "
-            f"Reference fix defines: {sorted(ref_defs)}. "
-            f"This is a metadata bug that causes false FAILs via rename_error."
+            f"reference_fix.function='{expected_fn}' NOT FOUND in reference fix. "
+            f"Defines: {sorted(ref_defs)}"
         )
-
     return True, "metadata_aligned"
+
+
+# ── Orchestration ────────────────────────────────────────────
 
 
 def validate_case(case: dict) -> dict:
@@ -234,7 +265,7 @@ def main():
     parser.add_argument("--case", default=None)
     args = parser.parse_args()
 
-    cases_path = BASE / "cases_v2.json"
+    cases_path = CASE_DATA_DIR / "cases_v2.json"
     if not cases_path.exists():
         print("cases_v2.json not found")
         return
@@ -243,7 +274,7 @@ def main():
     if args.case:
         cases = [c for c in cases if c["id"] == args.case]
     elif args.family:
-        cases = [c for c in cases if c["family"] == args.family]
+        cases = [c for c in cases if c.get("family") == args.family]
 
     print(f"Validating {len(cases)} cases...\n")
 
@@ -255,12 +286,11 @@ def main():
         for check_name, (ok, msg) in result["checks"].items():
             mark = "ok" if ok else "FAIL"
             status_parts.append(f"{check_name}={mark}")
-        line = f"  {case['id']:<28} {' '.join(status_parts)}"
+        line = f"  {case['id']:<45} {' '.join(status_parts)}"
         if result["all_pass"]:
             passed += 1
         else:
             failed += 1
-            # Show failure details
             for check_name, (ok, msg) in result["checks"].items():
                 if not ok:
                     line += f"\n    -> {check_name}: {msg}"

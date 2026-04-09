@@ -1,147 +1,168 @@
 [
-  {
-  "id": "duplicate_write_retry_hidden_b_plus",
+ {
+  "id": "duplicate_write_retry_hidden_b_plus_adv",
   "family": "duplicate_write_retry_hidden",
   "template": "competing_hypothesis",
   "difficulty": "B+",
   "failure_mode": "DUPLICATION",
-  "bug_pattern_class": "retry_state_accumulation",
-  "bug_pattern_secondary": "identity_drift",
+  "bug_pattern_class": "hidden_dependency",
+  "bug_pattern_secondary": "retry_state_accumulation",
   "boundary_type": "cross_function",
-  "boundary_group": "service_retry_storage_identity",
+  "boundary_group": "service_identity_storage",
   "temporal_depth": "multi_step",
   "statefulness": "stateful",
   "causal_depth": "L2",
 
-  "description": "A request-processing system persists results for incoming requests and guarantees at-least-once execution under transient failures. In most cases, each logical request produces a single stored record. However, under certain execution paths involving retries, multiple persisted records can appear that correspond to what appears to be the same logical request. Each individual component behaves as expected in isolation: storage correctly appends records, retry logic properly re-invokes failed operations, and request handling appears deterministic. The inconsistency emerges only under specific retry sequences and depends on how request identity and execution state are propagated across attempts.",
+  "description": "A service processes requests and persists results. Under most conditions, each request produces a single persisted record. However, under certain execution sequences, multiple records can appear that correspond to what seems to be the same logical operation. The issue is intermittent and depends on execution ordering and prior activity. Individual components appear correct when inspected in isolation: the persistence layer correctly appends records, and request handling produces deterministic results. The inconsistency only emerges under specific multi-step flows.",
 
-  "task": "A service processes requests and persists results. Under certain conditions, multiple records may be stored that appear to correspond to the same logical request, even though retry behavior is functioning as intended and no errors escape to the caller.\n\nThe issue does not consistently reproduce for all requests and appears sensitive to execution order and retry timing. Both the retry mechanism and storage layer appear locally correct when inspected independently.\n\nIdentify the root cause of the duplication and refactor the implementation so that each logical request produces at most one persisted result, while preserving retry behavior and without modifying storage semantics.",
+  "task": "A system processes requests and writes results to persistent storage.\n\nIn most cases, each request results in a single stored record. However, under certain sequences of operations, multiple records may be produced that appear to correspond to the same logical request.\n\nThe issue is not consistently reproducible and seems sensitive to prior operations and execution ordering. The persistence layer appears to behave correctly, and request processing logic appears deterministic when examined independently.\n\nIdentify the root cause of the duplication and refactor the implementation so that each logical request produces at most one persisted result, without removing append-only behavior from storage and without introducing global deduplication mechanisms.",
 
-  "trap": "Several locally plausible fixes exist: (1) modifying storage to deduplicate records by request_id, (2) caching previously seen request_ids at the service entry point, or (3) adjusting retry conditions to suppress repeated execution. Each of these can reduce duplication in simple cases but fails under specific retry sequences because they do not address how identity and write effects interact across retries.",
+  "trap": "Several fixes appear to resolve the issue under limited testing: (1) deduplicating records in storage by request_id, (2) caching processed request_ids at the service entry point, or (3) preventing repeated writes when the same request is observed. These approaches succeed in simple scenarios but fail under specific execution sequences because the identity used for persistence is not stable across all execution paths and the write-producing path can be re-entered in ways that bypass these guards.",
 
   "code_files": [
-    "code_snippets_v2/duplicate_write_retry_hidden_b_plus/service.py",
-    "code_snippets_v2/duplicate_write_retry_hidden_b_plus/storage.py"
+    {
+      "path": "code_snippets_v2/duplicate_write_retry_hidden_b_plus_adv/storage.py",
+      "content": "from typing import Any, Dict, List\n\n\nclass Storage:\n    def __init__(self) -> None:\n        self._records: List[Dict[str, Any]] = []\n\n    def append(self, record: Dict[str, Any]) -> None:\n        self._records.append(dict(record))\n\n    def all_records(self) -> List[Dict[str, Any]]:\n        return [dict(r) for r in self._records]\n\n    def records_for_request(self, request_id: str) -> List[Dict[str, Any]]:\n        return [dict(r) for r in self._records if r.get(\"request_id\") == request_id]\n"
+    },
+    {
+      "path": "code_snippets_v2/duplicate_write_retry_hidden_b_plus_adv/service.py",
+      "content": "from typing import Any, Dict, Optional\n\nfrom storage import Storage\n\n\nclass TransientError(Exception):\n    pass\n\n\nclass Service:\n    def __init__(self, storage: Storage) -> None:\n        self.storage = storage\n        self._should_fail_after_write: Dict[str, bool] = {}\n\n    def enable_post_write_failure_once(self, request_id: str) -> None:\n        self._should_fail_after_write[request_id] = True\n\n    def process(self, request: Dict[str, Any]) -> Dict[str, Any]:\n        attempts = 0\n        last_error: Optional[Exception] = None\n\n        while attempts < 2:\n            try:\n                return self._handle(dict(request))\n            except TransientError as exc:\n                attempts += 1\n                last_error = exc\n\n        if last_error is not None:\n            raise last_error\n        raise RuntimeError(\"unreachable\")\n\n    def _handle(self, request: Dict[str, Any]) -> Dict[str, Any]:\n        logical_id = request[\"request_id\"]\n        payload = request[\"payload\"]\n\n        record = {\n            \"request_id\": self._persistence_request_id(request),\n            \"logical_request_id\": logical_id,\n            \"result\": self._compute_result(payload),\n        }\n        self.storage.append(record)\n\n        if self._should_fail_after_write.pop(logical_id, False):\n            retry_request = self._prepare_retry_request(request)\n            request.clear()\n            request.update(retry_request)\n            raise TransientError(\"temporary failure after write\")\n\n        return {\"status\": \"ok\", \"logical_request_id\": logical_id}\n\n    def _compute_result(self, payload: Dict[str, Any]) -> str:\n        amount = payload.get(\"amount\", 0)\n        return f\"processed:{amount}\"\n\n    def _prepare_retry_request(self, request: Dict[str, Any]) -> Dict[str, Any]:\n        retry_request = dict(request)\n        retry_request[\"attempt\"] = request.get(\"attempt\", 0) + 1\n        return retry_request\n\n    def _persistence_request_id(self, request: Dict[str, Any]) -> str:\n        base = request[\"request_id\"]\n        attempt = request.get(\"attempt\", 0)\n        return f\"{base}:attempt-{attempt}\"\n\n\ndef build_request(request_id: str, amount: int) -> Dict[str, Any]:\n    return {\n        \"request_id\": request_id,\n        \"payload\": {\"amount\": amount},\n    }\n\n\ndef build_service() -> Service:\n    return Service(Storage())\n"
+    }
   ],
 
   "ground_truth_bug": {
-    "type": "hidden_retry_double_execution_with_identity_instability",
+    "type": "hidden_retry_double_execution_with_identity_drift",
     "location": "service.py::Service._handle",
-    "invariant": "Each logical request must produce at most one persisted result regardless of retry behavior",
-    "fix_pattern": "Make the write-producing path idempotent per logical request by stabilizing identity across retries and preventing repeated side effects"
+    "invariant": "Each logical request must produce at most one persisted result regardless of execution ordering",
+    "fix_pattern": "Ensure the write-producing path is idempotent per logical request by stabilizing identity and preventing duplicate side effects across re-entry"
   },
 
   "oracle_ground_truth": {
-    "bug_type": "hidden_retry_double_execution_with_identity_instability",
+    "bug_type": "hidden retry-induced double execution with identity drift",
     "bug_location": "service.py::Service._handle",
-    "mechanism_source": "A transient failure is raised after the result has already been written, and the retry wrapper re-invokes the handler with a logically equivalent request whose identity is not strictly stable across attempts",
-    "mechanism_property": "Repeated execution of the write-producing path occurs across retries, and identity used for persistence is insufficiently stable to prevent duplicate writes",
+    "mechanism_source": "The write-producing path can be re-entered under certain execution sequences after the result has already been persisted, and the identity used for persistence is recomputed or transformed such that repeated executions are not recognized as duplicates",
+    "mechanism_property": "Multiple executions of the same logical operation can produce distinct persistence identities, allowing duplicate records to accumulate",
     "mechanism_steps": [
-      "process() delegates execution to a retry wrapper that may re-invoke the handler after transient failures",
-      "_handle() computes the result and writes it to storage before a transient failure is raised",
-      "the retry wrapper re-invokes _handle() for what is logically the same request",
-      "request identity used at write time is recomputed or inconsistently propagated across attempts",
-      "the second execution produces another write because the system does not recognize it as the same logical request",
-      "storage accumulates multiple records corresponding to the same logical request"
+      "A request is processed and produces a result that is written to storage",
+      "An execution path re-enters the same processing logic for what is logically the same request",
+      "The identity used for persistence is recomputed or transformed across executions",
+      "The system does not recognize the second execution as equivalent to the first",
+      "A second write occurs, producing another persisted record",
+      "Duplicate records accumulate for what is logically the same request"
     ],
-    "mechanism_outcome": "duplicate records are persisted for a single logical request under retry conditions",
-    "trap_description": "Storage-level deduplication or retry suppression appears to fix the issue but fails because the underlying problem is repeated execution of a non-idempotent write path combined with unstable identity across retries"
+    "mechanism_outcome": "Multiple persisted records correspond to a single logical request under certain execution sequences",
+    "trap_description": "Local deduplication or caching fixes appear to work but fail because identity is not stable across executions and the write path can be re-entered after side effects have already occurred"
   }
 },
-  {
-  "id": "derived_field_stale_a_plus",
+ {
+  "id": "derived_field_stale_b_plus",
   "family": "misleading_local_fix",
   "template": "misleading_local_fix",
-  "difficulty": "A+",
+  "difficulty": "B+",
   "failure_mode": "PARTIAL_UPDATE",
   "bug_pattern_class": "partial_state_update",
-  "bug_pattern_secondary": "representation_inconsistency",
-  "boundary_type": "local",
-  "boundary_group": "user_model_fields",
-  "temporal_depth": "single_step",
+  "bug_pattern_secondary": "cache_invalidation_mismatch",
+  "boundary_type": "cross_function",
+  "boundary_group": "user_model_formatter_serializer",
+  "temporal_depth": "multi_step",
   "statefulness": "stateful",
-  "causal_depth": "L1",
+  "causal_depth": "L2",
 
-  "description": "A user profile object exposes both base fields and derived presentation fields. After certain updates, reads appear to reflect the updated base values, yet some user-facing representations remain inconsistent. The inconsistency is subtle: some access paths produce correct values while others expose outdated formatted state. All logic resides within a single module, and helper functions behave correctly in isolation.",
+  "description": "A user profile object maintains raw identity fields together with multiple presentation-oriented representations used by different access paths. Most reads appear correct, and formatting helpers behave correctly in isolation. However, after certain update sequences, different consumers of the same profile can observe different display values even though the underlying base fields were updated successfully. The failure is subtle because some read paths compute from current base fields while others consume cached or serialized presentation state.",
 
-  "task": "A user model maintains both raw fields (e.g., first, last) and derived presentation fields used for display. After updating a user's name, some read paths reflect the updated values while others return outdated formatted representations.\n\nThe issue does not raise errors and only appears when accessing specific fields or methods. The formatting helper and read methods appear locally correct.\n\nRefactor the implementation so that all user-facing representations remain consistent after updates, without removing or duplicating existing fields and without changing external method signatures.",
+  "task": "A user model stores core identity fields and also supports several user-facing representations used by different methods.\n\nAfter updating a user's name, some reads reflect the new values while other reads continue to expose an older presentation of the same user. The issue is intermittent in the sense that it depends on which read path was exercised before and after the update. No exceptions are raised, and the formatting logic appears correct when tested directly.\n\nIdentify the root cause of the inconsistency and refactor the implementation so that all externally visible representations of a user remain consistent after updates, without removing caching entirely, without changing external method signatures, and without moving formatting logic out of the module.",
 
-  "trap": "Several plausible fixes exist: (1) modifying the formatting helper to compute values dynamically, (2) updating only the read method to recompute display output on access, or (3) partially updating cached fields in some code paths. These approaches appear to resolve the issue for certain access patterns but fail because they do not enforce a single consistent source of truth between base and derived state.",
+  "trap": "Several locally plausible fixes exist: (1) recomputing only the top-level display field inside update_name, (2) changing a read method to always call the formatter dynamically, (3) clearing one cached presentation value but leaving others intact, or (4) modifying the formatter itself. Each of these appears to fix one observation path, but they fail because multiple externally visible representations are derived from shared base state through different code paths, and only part of that derived state is refreshed after mutation.",
 
   "code_files": [
-    "code_snippets_v2/derived_field_stale_a_plus/user.py"
+    {
+      "path": "code_snippets_v2/derived_field_stale_b_plus/user.py",
+      "content": "from typing import Dict, Any\n\n\nclass User:\n    def __init__(self, first: str, last: str) -> None:\n        self.first = first\n        self.last = last\n\n        # Derived representations (multiple!)\n        self.display_name = self._format_display()\n        self._cached_profile = self._build_profile_cache()\n\n    # --- Public read APIs ---\n\n    def get_display_name(self) -> str:\n        return self.display_name\n\n    def get_profile(self) -> Dict[str, Any]:\n        # Returns cached representation\n        return dict(self._cached_profile)\n\n    def serialize(self) -> Dict[str, Any]:\n        # Mixed source: partly dynamic, partly cached\n        return {\n            \"display\": self.display_name,\n            \"profile\": dict(self._cached_profile),\n            \"full\": f\"{self.first} {self.last}\",\n        }\n\n    # --- Mutation ---\n\n    def update_name(self, first: str, last: str) -> None:\n        self.first = first\n        self.last = last\n\n        # BUG: only partially refresh derived state\n        self.display_name = self._format_display()\n        # self._cached_profile is NOT updated\n\n    # --- Internal helpers ---\n\n    def _format_display(self) -> str:\n        return f\"{self.first.capitalize()} {self.last.upper()}\"\n\n    def _build_profile_cache(self) -> Dict[str, Any]:\n        return {\n            \"first\": self.first,\n            \"last\": self.last,\n            \"display\": self._format_display(),\n        }\n\n\ndef build_user(first: str, last: str) -> User:\n    return User(first, last)\n"
+    }
   ],
 
   "ground_truth_bug": {
-    "type": "missing_derived_field_update",
+    "type": "partial_derived_state_refresh",
     "location": "user.py::User.update_name",
-    "invariant": "All derived fields must remain consistent with their base fields immediately after any mutation",
-    "fix_pattern": "Ensure derived fields are recomputed or invalidated consistently whenever base fields are updated"
+    "invariant": "All externally observable representations derived from a user's identity fields must stay mutually consistent after any successful mutation",
+    "fix_pattern": "Centralize derived-state refresh or invalidation so every identity-dependent cached or serialized representation is updated consistently whenever base identity fields change"
   },
 
   "oracle_ground_truth": {
-    "bug_type": "missing_derived_field_update",
+    "bug_type": "partial derived state refresh",
     "bug_location": "user.py::User.update_name",
-    "mechanism_source": "Derived display state is initialized from base fields but not consistently updated or invalidated when those base fields change",
-    "mechanism_property": "Multiple representations of the same underlying data diverge after mutation due to incomplete state synchronization",
+    "mechanism_source": "The object maintains more than one identity-derived representation, and update_name refreshes base fields plus only a subset of those derived representations",
+    "mechanism_property": "Different read paths observe different representations of the same user because some values are recomputed from current state while others continue to serve stale cached or serialized identity data",
     "mechanism_steps": [
-      "User is initialized with derived display fields computed from base fields",
-      "update_name mutates base fields (first, last)",
-      "some derived fields or cached representations are not updated",
-      "different access paths (direct field vs method) read from different representations",
-      "inconsistent values are observed depending on how the data is accessed"
+      "The user object is initialized with base identity fields and multiple derived presentation representations",
+      "At least one read path returns data derived dynamically from current base fields",
+      "At least one other read path returns cached or precomputed presentation state",
+      "update_name mutates the base identity fields successfully",
+      "update_name refreshes only part of the identity-derived state, leaving another representation stale",
+      "Subsequent reads diverge depending on which accessor or serialization path is used"
     ],
-    "mechanism_outcome": "user-facing state becomes internally inconsistent across representations",
-    "trap_description": "Fixing formatting or read logic appears to work for certain access paths but fails to resolve the underlying issue of unsynchronized derived state"
+    "mechanism_outcome": "The same logical user is exposed with inconsistent outward-facing identity data across access paths after mutation",
+    "trap_description": "A shallow fix that updates one display field or one accessor appears correct under narrow testing, but the real issue is incomplete synchronization of multiple derived identity representations"
   }
 },
-  {
-  "id": "versioned_policy_fallback_regression_b_plus",
+ {
+  "id": "versioned_policy_fallback_regression_b_plus_adv",
   "family": "versioned_policy_fallback_regression",
   "template": "competing_hypothesis",
   "difficulty": "B+",
   "failure_mode": "STATE_LEAK",
   "bug_pattern_class": "hidden_dependency",
-  "bug_pattern_secondary": "nested_mutable_aliasing",
+  "bug_pattern_secondary": "identity_drift",
   "boundary_type": "cross_function",
-  "boundary_group": "resolver_compat_executor",
+  "boundary_group": "resolver_compat_normalizer_executor",
   "temporal_depth": "multi_step",
   "statefulness": "stateful",
   "causal_depth": "L2",
 
-  "description": "A request pipeline resolves a policy version and prepares an execution context that may include compatibility adjustments. Execution then proceeds based on the resolved version and context. In most cases, execution behavior aligns with the resolved policy. However, under certain request sequences, execution unexpectedly follows fallback behavior even though resolution is correct. Each stage appears locally correct: resolution returns the expected version, compatibility logic conditionally adjusts context, and execution branches correctly based on the provided inputs. The discrepancy only emerges across multiple requests and depends on how context is constructed and propagated.",
+  "description": "A request pipeline resolves a policy version, prepares a compatibility-adjusted execution context, and executes behavior based on both. In isolation, each stage appears correct: resolution returns the expected version, compatibility logic conditionally modifies context, and execution branches on the provided version and flags. However, under certain multi-request sequences, execution follows fallback behavior even though resolution reports a valid non-fallback version. The discrepancy is intermittent and depends on prior requests and how context evolves across stages.",
 
-  "task": "A system processes requests by resolving a policy version and then executing behavior based on that resolution and a compatibility-adjusted context.\n\nIn some cases, execution follows fallback behavior even though the resolved version is correct. The issue is intermittent and appears dependent on prior requests rather than the current input alone. Individual components (resolution, compatibility adjustment, execution) appear correct when inspected in isolation.\n\nIdentify the root cause of the inconsistency and refactor the implementation so that execution behavior is always consistent with the resolved policy version for each request, while preserving intended fallback behavior and without removing compatibility logic.",
+  "task": "A system processes requests through three stages: version resolution, compatibility adjustment, and execution.\n\nIn most cases, execution behavior matches the resolved version. However, under certain sequences of requests, execution follows fallback behavior even when resolution reports a valid version.\n\nThe issue is not tied to a single input and appears only after specific prior requests have been processed. Each stage appears locally correct when inspected independently.\n\nIdentify the root cause of the inconsistency and refactor the implementation so that execution behavior always reflects the resolved version for each request, while preserving compatibility behavior and without introducing global resets or disabling fallback logic.",
 
-  "trap": "Several plausible fixes exist: (1) modifying execution logic to trust the resolved version more aggressively, (2) adjusting fallback conditions to be stricter, or (3) rebuilding the top-level context object per request. These approaches may appear to fix the issue in simple cases but fail because they do not address how nested state is shared and mutated across requests.",
+  "trap": "Multiple plausible fixes exist and each appears correct under partial testing: (1) forcing executor to rely only on the resolved version, (2) tightening fallback conditions, (3) reconstructing the top-level context per request, or (4) normalizing version fields earlier. These fixes can eliminate the issue for simple cases but fail under specific request sequences because they do not address how identity and compatibility state drift across stages.",
 
   "code_files": [
-    "code_snippets_v2/versioned_policy_fallback_regression_b_plus/compat.py",
-    "code_snippets_v2/versioned_policy_fallback_regression_b_plus/executor.py"
+    {
+      "path": "code_snippets_v2/versioned_policy_fallback_regression_b_plus_adv/compat.py",
+      "content": "from typing import Dict, Any\n\n# Shared nested mutable structure (BUG)\n_SHARED_COMPAT: Dict[str, Any] = {\n    \"flags\": {\n        \"force_fallback\": False,\n        \"compat_mode\": False,\n    }\n}\n\n\ndef attach_compatibility_context(ctx: Dict[str, Any]) -> Dict[str, Any]:\n    # Reuses shared nested structure (aliasing across requests)\n    ctx[\"compat\"] = _SHARED_COMPAT\n\n    # Mutate based on version\n    version = ctx[\"resolved_version\"]\n    if version.startswith(\"legacy\"):\n        ctx[\"compat\"][\"flags\"][\"force_fallback\"] = True\n        ctx[\"compat\"][\"flags\"][\"compat_mode\"] = True\n    else:\n        # Partial reset (BUG: not fully isolating state)\n        ctx[\"compat\"][\"flags\"][\"compat_mode\"] = False\n\n    return ctx\n"
+    },
+    {
+      "path": "code_snippets_v2/versioned_policy_fallback_regression_b_plus_adv/normalizer.py",
+      "content": "from typing import Dict, Any\n\n\ndef normalize_context(ctx: Dict[str, Any]) -> Dict[str, Any]:\n    compat = ctx.get(\"compat\", {})\n    flags = compat.get(\"flags\", {})\n\n    # Derive normalized execution view\n    normalized = {\n        \"version\": ctx[\"resolved_version\"],\n        \"use_fallback\": flags.get(\"force_fallback\", False),\n        \"mode\": \"compat\" if flags.get(\"compat_mode\") else \"strict\",\n    }\n\n    return normalized\n"
+    },
+    {
+      "path": "code_snippets_v2/versioned_policy_fallback_regression_b_plus_adv/executor.py",
+      "content": "from typing import Dict, Any\n\nfrom compat import attach_compatibility_context\nfrom normalizer import normalize_context\n\n\ndef resolve_version(request: Dict[str, Any]) -> str:\n    # Deterministic resolution (correct)\n    if request.get(\"use_legacy\"):\n        return \"legacy_v1\"\n    return \"v2\"\n\n\ndef execute(request: Dict[str, Any]) -> str:\n    ctx: Dict[str, Any] = {}\n\n    # Stage 1: resolve\n    ctx[\"resolved_version\"] = resolve_version(request)\n\n    # Stage 2: attach compatibility\n    ctx = attach_compatibility_context(ctx)\n\n    # Stage 3: normalize for execution\n    norm = normalize_context(ctx)\n\n    # Stage 4: execute\n    if norm[\"use_fallback\"]:\n        return f\"fallback:{norm['version']}\"\n    return f\"primary:{norm['version']}\"\n"
+    }
   ],
 
   "ground_truth_bug": {
-    "type": "nested_mutable_aliasing",
+    "type": "cross_stage_identity_drift_with_shared_mutation",
     "location": "compat.py::attach_compatibility_context",
-    "invariant": "Execution context must be fully isolated per request, including all nested mutable structures",
-    "fix_pattern": "Ensure deep isolation of context by avoiding reuse of nested mutable objects across requests"
+    "invariant": "The execution decision must be derived from a stable, per-request representation of version and compatibility state",
+    "fix_pattern": "Ensure per-request isolation and stable identity by eliminating shared mutable nested structures and preventing cross-stage mutation of identity-relevant fields"
   },
 
   "oracle_ground_truth": {
-    "bug_type": "nested mutable aliasing in context construction",
+    "bug_type": "cross-stage identity drift with shared mutation",
     "bug_location": "compat.py::attach_compatibility_context",
-    "mechanism_source": "A nested mutable structure used in compatibility context is reused across requests instead of being recreated or copied",
-    "mechanism_property": "Mutations to nested state during one request persist and influence subsequent requests",
+    "mechanism_source": "A nested compatibility structure is reused across requests and is further transformed by a normalization step, causing identity-relevant fields to drift across stages and across requests",
+    "mechanism_property": "Execution reads a representation of version/compatibility that has been mutated by prior requests and altered by intermediate normalization, leading to divergence from the originally resolved version",
     "mechanism_steps": [
-      "A compatibility context is constructed using a shared nested mutable structure",
-      "A request that triggers fallback mutates part of this nested structure",
-      "The mutated structure persists because it is reused across requests",
-      "A later request receives a context referencing the same mutated nested object",
-      "Execution logic reads this mutated state despite correct resolution",
-      "Execution incorrectly follows fallback behavior"
+      "Resolver produces a correct version identifier for the current request",
+      "Compatibility layer attaches a context that reuses a nested mutable structure shared across requests",
+      "A prior request mutates compatibility-related flags in this shared structure (e.g., enabling fallback conditions)",
+      "Normalizer transforms or reorders fields in the context, creating a derived representation used by executor",
+      "The current request inherits mutated compatibility state through the shared structure",
+      "Executor reads the normalized context and evaluates fallback conditions based on mutated state rather than the current request's resolution",
+      "Execution follows fallback behavior even though the resolver returned a valid version"
     ],
-    "mechanism_outcome": "Execution diverges from resolved policy due to hidden cross-request state leakage",
-    "trap_description": "Execution and resolution appear inconsistent, leading to fixes in branching logic, but the true issue is hidden mutation of shared nested state in context construction"
+    "mechanism_outcome": "Execution behavior diverges from resolved policy due to cross-request state leakage combined with representation drift across stages",
+    "trap_description": "Local fixes in executor or resolver appear to correct the issue but fail because the root cause spans compatibility state reuse and transformation across stages"
   }
 }
 ]

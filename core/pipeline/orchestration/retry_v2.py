@@ -434,7 +434,7 @@ def _compute_evaluation_from_trajectory(best, classifier_result):
     classifier_ran = best_cls.get("classifier_ran", False)
     canonical = _extract_canonical_dims(classifier_result)
     if classifier_ran:
-        RIC = canonical.get("mechanism_identified")
+        RIC = canonical.get("reasoning_internal_consistency")
         CCC = canonical.get("commitments_satisfied")
         cls_dims = {"RIC": RIC, "CIC": canonical.get("commitments_extracted"),
                     "CCC": CCC, "RCA": canonical.get("reasoning_code_alignment")}
@@ -475,7 +475,7 @@ def _trajectory_entry_from_state(state, critique_info, test_feedback,
         },
         "oracle": state.oracle_result,
         "classifier": {
-            "mechanism_identified": _cls_canon["mechanism_identified"],
+            "reasoning_internal_consistency": _cls_canon["reasoning_internal_consistency"],
             "commitments_extracted": _cls_canon["commitments_extracted"],
             "commitments_satisfied": _cls_canon["commitments_satisfied"],
             "reasoning_code_alignment": _cls_canon["reasoning_code_alignment"],
@@ -503,6 +503,8 @@ def _trajectory_entry_from_state(state, critique_info, test_feedback,
         "had_classifier_hint": bool(classifier_hint),
         "mismatch_critique": critique_info.get("critique") or None,
         "mismatch_variant": critique_info.get("variant"),
+        "depth_hint_level": critique_info.get("depth_hint_level"),
+        "spec_oracle": state.spec_oracle_result,
     }
 
 
@@ -515,7 +517,7 @@ def _make_incomplete_entry(k, error_msg):
                     "error": "attempt_incomplete", "latency_ms": 0, "version": "inline_v1",
                     "partial_mode": "lenient", "sampling_strategy": "ALWAYS",
                     "sampling_reason": None, "prompt_template_hash": None, "prompt_instance_hash": None},
-        "classifier": {"mechanism_identified": None, "commitments_satisfied": None,
+        "classifier": {"reasoning_internal_consistency": None, "commitments_satisfied": None,
                        "reasoning_code_alignment": None, "classifier_ran": False, "error": "attempt_incomplete"},
         "ast": {"status": "not_measurable", "ast_correct": None, "ast_score": None,
                 "reason": "attempt_incomplete"},
@@ -586,7 +588,7 @@ def run_retry_v2(
     from core.pipeline.orchestration.stages import (
         stage_parse, stage_oracle, stage_normalize,
         stage_reconstruct, stage_classify, stage_ast,
-        stage_execute, stage_derive_metrics,
+        stage_execute, stage_spec_oracle, stage_derive_metrics,
     )
 
     states: list[AttemptState] = []
@@ -636,6 +638,7 @@ def run_retry_v2(
                 last_parent_eid = state.classify_event_id
             stage_ast(state, case)
             stage_execute(state, case, config, logger)
+            stage_spec_oracle(state, case)
             stage_derive_metrics(state, config)
 
             # Build backward-compat trajectory entry from state
@@ -699,6 +702,18 @@ def run_retry_v2(
                     config, logger, cid, condition, last_parent_eid,
                     code_commitments=commitments_str)
 
+            # Depth hint override: if spec oracle detected wrong-depth fix,
+            # replace or augment the critique with a depth-direction hint.
+            depth_hint_level = getattr(
+                config.evaluation, "depth_hint_level", None
+            ) if hasattr(config, "evaluation") else None
+            if depth_hint_level and state.spec_oracle_result:
+                from core.evaluation.depth_hints import generate_depth_hint
+                hint = generate_depth_hint(case, state.spec_oracle_result, depth_hint_level)
+                if hint:
+                    critique_info["critique"] = hint
+                    critique_info["depth_hint_level"] = depth_hint_level
+
         prev_code = state.code
         prev_raw = state.raw_response
 
@@ -720,7 +735,7 @@ def run_retry_v2(
         classifier_result.commitments_internal_consistency = best_cls.get("commitments_internal_consistency")
         classifier_result.commitments_code_consistency = best_cls.get("commitments_code_consistency")
     else:
-        classifier_result.mechanism_identified = best_cls.get("mechanism_identified")
+        classifier_result.reasoning_internal_consistency = best_cls.get("reasoning_internal_consistency")
         classifier_result.commitments_extracted = best_cls.get("commitments_extracted")
         classifier_result.commitments_satisfied = best_cls.get("commitments_satisfied")
     classifier_result.reasoning_code_alignment = best_cls.get("reasoning_code_alignment")
@@ -773,6 +788,11 @@ def run_retry_v2(
         recon_section["execution_source"] = final_state.execution_source
         recon_section["retry_triggered"] = final_state.retry_triggered
         ev["reconstruction"] = recon_section
+
+    # Spec oracle (DDC cases only) — from best attempt in trajectory
+    best_spec_oracle = best.get("spec_oracle")
+    if best_spec_oracle is not None:
+        ev["spec_oracle"] = copy.deepcopy(best_spec_oracle)
 
     ev["num_attempts"] = len(trajectory)
     ev["best_attempt_idx"] = best_idx

@@ -43,7 +43,7 @@ V2_CONDITIONS = frozenset(CONDITION_TO_SCHEMA.keys())
 # ============================================================
 
 V2_CLASSIFIER_DIMENSIONS = (
-    "mechanism_identified",
+    "reasoning_internal_consistency",
     "commitments_extracted",
     "commitments_satisfied",
     "reasoning_code_alignment",

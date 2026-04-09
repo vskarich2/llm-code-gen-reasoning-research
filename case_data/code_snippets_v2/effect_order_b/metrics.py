@@ -1,4 +1,4 @@
-"""Metrics tracking: counters and events."""
+
 
 _counter = 0
 _events = []
@@ -16,7 +16,7 @@ def increment(value):
 
 
 def emit_event(item_id, value):
-    """Emit a processing event for the given item."""
+
     _events.append({"item_id": item_id, "value": value, "counter": _counter})
 
 

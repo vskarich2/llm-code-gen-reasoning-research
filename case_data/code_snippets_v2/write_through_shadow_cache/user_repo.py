@@ -1,5 +1,3 @@
-"""Repository — authoritative source of user profiles."""
-
 _repo = {}
 _repo_versions = {}
 
@@ -22,7 +20,6 @@ def update_display_name(user_id, new_name):
     _repo[user_id]["display_name"] = new_name
     _repo_versions[user_id] = _repo_versions.get(user_id, 0) + 1
     return get_profile(user_id)
-
 
 def get_profile(user_id):
     if user_id not in _repo:

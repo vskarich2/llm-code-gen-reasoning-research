@@ -4430,5 +4430,1744 @@
       "mechanism_outcome": "Execution diverges from resolved policy due to hidden cross-request state leakage",
       "trap_description": "Execution and resolution appear inconsistent, leading to fixes in branching logic, but the true issue is hidden mutation of shared nested state in context construction"
     }
+  },
+  {
+    "id": "duplicate_write_retry_hidden_b_plus_adv",
+    "family": "duplicate_write_retry_hidden",
+    "template": "competing_hypothesis",
+    "difficulty": "B+",
+    "failure_mode": "DUPLICATION",
+    "bug_pattern_class": "hidden_dependency",
+    "bug_pattern_secondary": "retry_state_accumulation",
+    "boundary_type": "cross_function",
+    "boundary_group": "service_identity_storage",
+    "temporal_depth": "multi_step",
+    "statefulness": "stateful",
+    "causal_depth": "L2",
+    "description": "A service processes requests and persists results. Under most conditions, each request produces a single persisted record. However, under certain execution sequences, multiple records can appear that correspond to what seems to be the same logical operation. The issue is intermittent and depends on execution ordering and prior activity. Individual components appear correct when inspected in isolation: the persistence layer correctly appends records, and request handling produces deterministic results. The inconsistency only emerges under specific multi-step flows.",
+    "task": "A system processes requests and writes results to persistent storage.\n\nIn most cases, each request results in a single stored record. However, under certain sequences of operations, multiple records may be produced that appear to correspond to the same logical request.\n\nThe issue is not consistently reproducible and seems sensitive to prior operations and execution ordering. The persistence layer appears to behave correctly, and request processing logic appears deterministic when examined independently.\n\nIdentify the root cause of the duplication and refactor the implementation so that each logical request produces at most one persisted result, without removing append-only behavior from storage and without introducing global deduplication mechanisms.",
+    "trap": "Several fixes appear to resolve the issue under limited testing: (1) deduplicating records in storage by request_id, (2) caching processed request_ids at the service entry point, or (3) preventing repeated writes when the same request is observed. These approaches succeed in simple scenarios but fail under specific execution sequences because the identity used for persistence is not stable across all execution paths and the write-producing path can be re-entered in ways that bypass these guards.",
+    "code_files": [
+      "code_snippets_v2/duplicate_write_retry_hidden_b_plus_adv/service.py",
+      "code_snippets_v2/duplicate_write_retry_hidden_b_plus_adv/storage.py"
+    ],
+    "ground_truth_bug": {
+      "type": "hidden_retry_double_execution_with_identity_drift",
+      "location": "service.py::Service._handle",
+      "invariant": "Each logical request must produce at most one persisted result regardless of execution ordering",
+      "fix_pattern": "Ensure the write-producing path is idempotent per logical request by stabilizing identity and preventing duplicate side effects across re-entry"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "hidden retry-induced double execution with identity drift",
+      "bug_location": "service.py::Service._handle",
+      "mechanism_source": "The write-producing path can be re-entered under certain execution sequences after the result has already been persisted, and the identity used for persistence is recomputed or transformed such that repeated executions are not recognized as duplicates",
+      "mechanism_property": "Multiple executions of the same logical operation can produce distinct persistence identities, allowing duplicate records to accumulate",
+      "mechanism_steps": [
+        "A request is processed and produces a result that is written to storage",
+        "An execution path re-enters the same processing logic for what is logically the same request",
+        "The identity used for persistence is recomputed or transformed across executions",
+        "The system does not recognize the second execution as equivalent to the first",
+        "A second write occurs, producing another persisted record",
+        "Duplicate records accumulate for what is logically the same request"
+      ],
+      "mechanism_outcome": "Multiple persisted records correspond to a single logical request under certain execution sequences",
+      "trap_description": "Local deduplication or caching fixes appear to work but fail because identity is not stable across executions and the write path can be re-entered after side effects have already occurred"
+    }
+  },
+  {
+    "id": "derived_field_stale_b_plus",
+    "family": "misleading_local_fix",
+    "template": "misleading_local_fix",
+    "difficulty": "B+",
+    "failure_mode": "PARTIAL_UPDATE",
+    "bug_pattern_class": "partial_state_update",
+    "bug_pattern_secondary": "cache_invalidation_mismatch",
+    "boundary_type": "cross_function",
+    "boundary_group": "user_model_formatter_serializer",
+    "temporal_depth": "multi_step",
+    "statefulness": "stateful",
+    "causal_depth": "L2",
+    "description": "A user profile object maintains raw identity fields together with multiple presentation-oriented representations used by different access paths. Most reads appear correct, and formatting helpers behave correctly in isolation. However, after certain update sequences, different consumers of the same profile can observe different display values even though the underlying base fields were updated successfully. The failure is subtle because some read paths compute from current base fields while others consume cached or serialized presentation state.",
+    "task": "A user model stores core identity fields and also supports several user-facing representations used by different methods.\n\nAfter updating a user's name, some reads reflect the new values while other reads continue to expose an older presentation of the same user. The issue is intermittent in the sense that it depends on which read path was exercised before and after the update. No exceptions are raised, and the formatting logic appears correct when tested directly.\n\nIdentify the root cause of the inconsistency and refactor the implementation so that all externally visible representations of a user remain consistent after updates, without removing caching entirely, without changing external method signatures, and without moving formatting logic out of the module.",
+    "trap": "Several locally plausible fixes exist: (1) recomputing only the top-level display field inside update_name, (2) changing a read method to always call the formatter dynamically, (3) clearing one cached presentation value but leaving others intact, or (4) modifying the formatter itself. Each of these appears to fix one observation path, but they fail because multiple externally visible representations are derived from shared base state through different code paths, and only part of that derived state is refreshed after mutation.",
+    "code_files": [
+      "code_snippets_v2/derived_field_stale_b_plus/user.py"
+    ],
+    "ground_truth_bug": {
+      "type": "partial_derived_state_refresh",
+      "location": "user.py::User.update_name",
+      "invariant": "All externally observable representations derived from a user's identity fields must stay mutually consistent after any successful mutation",
+      "fix_pattern": "Centralize derived-state refresh or invalidation so every identity-dependent cached or serialized representation is updated consistently whenever base identity fields change"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "partial derived state refresh",
+      "bug_location": "user.py::User.update_name",
+      "mechanism_source": "The object maintains more than one identity-derived representation, and update_name refreshes base fields plus only a subset of those derived representations",
+      "mechanism_property": "Different read paths observe different representations of the same user because some values are recomputed from current state while others continue to serve stale cached or serialized identity data",
+      "mechanism_steps": [
+        "The user object is initialized with base identity fields and multiple derived presentation representations",
+        "At least one read path returns data derived dynamically from current base fields",
+        "At least one other read path returns cached or precomputed presentation state",
+        "update_name mutates the base identity fields successfully",
+        "update_name refreshes only part of the identity-derived state, leaving another representation stale",
+        "Subsequent reads diverge depending on which accessor or serialization path is used"
+      ],
+      "mechanism_outcome": "The same logical user is exposed with inconsistent outward-facing identity data across access paths after mutation",
+      "trap_description": "A shallow fix that updates one display field or one accessor appears correct under narrow testing, but the real issue is incomplete synchronization of multiple derived identity representations"
+    }
+  },
+  {
+    "id": "versioned_policy_fallback_regression_b_plus_adv",
+    "family": "versioned_policy_fallback_regression",
+    "template": "competing_hypothesis",
+    "difficulty": "B+",
+    "failure_mode": "STATE_LEAK",
+    "bug_pattern_class": "hidden_dependency",
+    "bug_pattern_secondary": "identity_drift",
+    "boundary_type": "cross_function",
+    "boundary_group": "resolver_compat_normalizer_executor",
+    "temporal_depth": "multi_step",
+    "statefulness": "stateful",
+    "causal_depth": "L2",
+    "description": "A request pipeline resolves a policy version, prepares a compatibility-adjusted execution context, and executes behavior based on both. In isolation, each stage appears correct: resolution returns the expected version, compatibility logic conditionally modifies context, and execution branches on the provided version and flags. However, under certain multi-request sequences, execution follows fallback behavior even though resolution reports a valid non-fallback version. The discrepancy is intermittent and depends on prior requests and how context evolves across stages.",
+    "task": "A system processes requests through three stages: version resolution, compatibility adjustment, and execution.\n\nIn most cases, execution behavior matches the resolved version. However, under certain sequences of requests, execution follows fallback behavior even when resolution reports a valid version.\n\nThe issue is not tied to a single input and appears only after specific prior requests have been processed. Each stage appears locally correct when inspected independently.\n\nIdentify the root cause of the inconsistency and refactor the implementation so that execution behavior always reflects the resolved version for each request, while preserving compatibility behavior and without introducing global resets or disabling fallback logic.",
+    "trap": "Multiple plausible fixes exist and each appears correct under partial testing: (1) forcing executor to rely only on the resolved version, (2) tightening fallback conditions, (3) reconstructing the top-level context per request, or (4) normalizing version fields earlier. These fixes can eliminate the issue for simple cases but fail under specific request sequences because they do not address how identity and compatibility state drift across stages.",
+    "code_files": [
+      "code_snippets_v2/versioned_policy_fallback_regression_b_plus_adv/compat.py",
+      "code_snippets_v2/versioned_policy_fallback_regression_b_plus_adv/normalizer.py",
+      "code_snippets_v2/versioned_policy_fallback_regression_b_plus_adv/executor.py"
+    ],
+    "ground_truth_bug": {
+      "type": "cross_stage_identity_drift_with_shared_mutation",
+      "location": "compat.py::attach_compatibility_context",
+      "invariant": "The execution decision must be derived from a stable, per-request representation of version and compatibility state",
+      "fix_pattern": "Ensure per-request isolation and stable identity by eliminating shared mutable nested structures and preventing cross-stage mutation of identity-relevant fields"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "cross-stage identity drift with shared mutation",
+      "bug_location": "compat.py::attach_compatibility_context",
+      "mechanism_source": "A nested compatibility structure is reused across requests and is further transformed by a normalization step, causing identity-relevant fields to drift across stages and across requests",
+      "mechanism_property": "Execution reads a representation of version/compatibility that has been mutated by prior requests and altered by intermediate normalization, leading to divergence from the originally resolved version",
+      "mechanism_steps": [
+        "Resolver produces a correct version identifier for the current request",
+        "Compatibility layer attaches a context that reuses a nested mutable structure shared across requests",
+        "A prior request mutates compatibility-related flags in this shared structure (e.g., enabling fallback conditions)",
+        "Normalizer transforms or reorders fields in the context, creating a derived representation used by executor",
+        "The current request inherits mutated compatibility state through the shared structure",
+        "Executor reads the normalized context and evaluates fallback conditions based on mutated state rather than the current request's resolution",
+        "Execution follows fallback behavior even though the resolver returned a valid version"
+      ],
+      "mechanism_outcome": "Execution behavior diverges from resolved policy due to cross-request state leakage combined with representation drift across stages",
+      "trap_description": "Local fixes in executor or resolver appear to correct the issue but fail because the root cause spans compatibility state reuse and transformation across stages"
+    }
+  },
+  {
+    "id": "auth_context_chain",
+    "family": "auth_context_chain",
+    "difficulty": "B",
+    "task": "The auth middleware is denying write access to users who should have it. Users with org IDs like ORG-100 and DEPT-50 are all getting assigned the default tier with restricted permissions. Investigate and fix the issue.",
+    "failure_mode": "LOGIC",
+    "trap": "The permission denial appears to be a resolver or gate issue \u2014 it looks like the resolver is not finding the correct permissions, or the gate is applying wrong defaults. The actual bug is upstream in the normalizer.",
+    "code_files": [
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context/data.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context/token_parser.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context/normalizer.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context/resolver.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context/gate.py"
+    ],
+    "ground_truth_bug": {
+      "type": "field_corruption_on_normalization",
+      "location": "normalizer.py::normalize_context",
+      "invariant": "org_id must preserve its prefix (ORG-100, DEPT-50) through the normalization step",
+      "fix_pattern": "Remove the prefix-stripping logic: result[\"org_id\"] = parsed[\"org_id\"]"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "field_corruption_on_normalization",
+      "bug_location": "normalizer.py::normalize_context -> resolver.py::resolve_permissions",
+      "mechanism_source": "normalize_context strips the prefix from org_id by splitting on '-' and keeping only the numeric suffix",
+      "canonical_field": "org_id",
+      "fix_location": "normalizer.py",
+      "mechanism_property": "org_id must preserve its full prefix (e.g., 'ORG-100') through normalization for downstream DB lookups to succeed",
+      "mechanism_steps": [
+        "normalize_context receives parsed token with org_id='ORG-100'",
+        "it splits on '-' and replaces org_id with '100' (the suffix only)",
+        "resolve_permissions_node looks up 'ORG-100:alice' in USER_DB but the key is now '100:alice'",
+        "lookup fails, user gets default tier with restricted permissions",
+        "check_gate_node denies write access because default tier lacks write permission"
+      ],
+      "mechanism_outcome": "all users with prefixed org IDs (ORG-, DEPT-) are denied access they should have",
+      "trap_description": "No trap"
+    },
+    "reference_fix": {
+      "file": "normalizer.py",
+      "function": "normalize_context"
+    }
+  },
+  {
+    "id": "billing_aggregation_chain",
+    "family": "billing_aggregation_chain",
+    "difficulty": "C",
+    "task": "A billing system is generating incorrect invoices. Some customers are being assigned to the wrong tier and charged at the wrong rate. The issue appears related to customers near timezone boundaries. Investigate and fix.",
+    "failure_mode": "LOGIC",
+    "trap": "The wrong invoice total suggests a pricing calculation error in the rate engine or invoice builder. The actual bug is in the event collector which groups by local date instead of UTC.",
+    "code_files": [
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation/data.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation/collector.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation/plan_resolver.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation/rate_engine.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation/invoice_builder.py"
+    ],
+    "ground_truth_bug": {
+      "type": "timezone_boundary_misattribution",
+      "location": "collector.py::aggregate_usage",
+      "invariant": "events must be grouped by UTC date, not local timestamp date",
+      "fix_pattern": "Convert ts to UTC using tz_offset before extracting billing period date"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "timezone_boundary_misattribution",
+      "bug_location": "collector.py::aggregate_usage -> plan_resolver.py::resolve_plan",
+      "mechanism_source": "aggregate_usage groups events by local date (ts[:10]) instead of converting to UTC first",
+      "canonical_field": "units",
+      "fix_location": "collector.py",
+      "mechanism_property": "billing period assignment must use UTC timestamps, not local timestamps, to correctly count units across timezone boundaries",
+      "mechanism_steps": [
+        "aggregate_usage receives events with local timestamps and a tz_offset field",
+        "it extracts the billing period by slicing ts[:10] (local date), ignoring tz_offset",
+        "boundary events (e.g., local 00:30 Apr 2 with tz=+1 = UTC 23:30 Apr 1) get assigned to the wrong period",
+        "aggregate_usage returns April 1 = 85 units instead of 100 because 15 boundary events land in April 2",
+        "resolve_plan maps 85 units to growth tier (threshold < 100) instead of enterprise tier",
+        "compute_charges applies TIER_TABLE[\"growth\"] rate of $0.10 instead of enterprise rate $0.05"
+      ],
+      "mechanism_outcome": "customer is overcharged at $8.50 (growth) instead of correct $5.00 (enterprise) due to timezone misattribution of boundary events",
+      "trap_description": "No trap"
+    },
+    "reference_fix": {
+      "file": "collector.py",
+      "function": "aggregate_usage"
+    }
+  },
+  {
+    "id": "config_derivation_chain",
+    "family": "config_derivation_chain",
+    "difficulty": "B",
+    "task": "A service initialization pipeline is failing with an invalid pool_size error. The service cannot start. Investigate and fix the configuration pipeline so the service initializes correctly.",
+    "failure_mode": "TYPE_ERROR",
+    "trap": "The error message mentions invalid pool_size which points to the service initializer or settings deriver. The actual bug is in the config parser which leaves PORT as a string.",
+    "code_files": [
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation/data.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation/env.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation/parser.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation/deriver.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation/service.py"
+    ],
+    "ground_truth_bug": {
+      "type": "missing_type_conversion",
+      "location": "parser.py::parse_config",
+      "invariant": "PORT must be converted to int; pool_size = PORT * 2 must be integer multiplication",
+      "fix_pattern": "Change port: env[\"PORT\"] to port: int(env[\"PORT\"])"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "missing_type_conversion",
+      "bug_location": "parser.py::parse_config -> deriver.py::derive_settings",
+      "mechanism_source": "parse_config reads PORT from env as a string and does not convert it to int",
+      "canonical_field": "port",
+      "fix_location": "parser.py",
+      "mechanism_property": "parsed config port must be an integer so that downstream arithmetic (port * 2) produces a numeric pool_size, not string repetition",
+      "mechanism_steps": [
+        "parse_config reads env['PORT'] ('8080') and stores it as a string in parsed['port']",
+        "derive_settings_node computes pool_size = port * 2, which for string '8080' yields '80808080' (string repetition)",
+        "derive_settings_node computes listen_address as 'host:8080' (happens to look correct as a string)",
+        "init_service_node receives pool_size='80808080' (a string), detects invalid type, returns status='error'"
+      ],
+      "mechanism_outcome": "service fails to initialize with invalid pool_size error because string multiplication produced '80808080' instead of integer 16160",
+      "trap_description": "No trap"
+    },
+    "reference_fix": {
+      "file": "parser.py",
+      "function": "parse_config"
+    }
+  },
+  {
+    "id": "event_etl_chain",
+    "family": "event_etl_chain",
+    "difficulty": "C",
+    "task": "An event processing pipeline is enriching all events with tier=unknown, meaning no user profiles are being resolved. The system processes purchase and audit events from multiple users. Investigate and fix.",
+    "failure_mode": "LOGIC",
+    "trap": "The unknown tier suggests the enricher lookup is failing. It looks like a profile database issue or enricher logic error. The actual bug is in the normalizer which lowercases user_id, breaking the case-sensitive lookup.",
+    "code_files": [
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl/data.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl/source.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl/normalizer.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl/enricher.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl/writer.py"
+    ],
+    "ground_truth_bug": {
+      "type": "case_sensitive_key_corruption",
+      "location": "normalizer.py::normalize",
+      "invariant": "user_id must preserve its original case through normalization",
+      "fix_pattern": "Only lowercase event_type and currency; preserve user_id: normalized[\"user_id\"] = event[\"user_id\"]"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "case_sensitive_key_corruption",
+      "bug_location": "normalizer.py::normalize -> enricher.py::enrich",
+      "mechanism_source": "normalize lowercases all string field values including user_id using v.lower()",
+      "canonical_field": "user_id",
+      "fix_location": "normalizer.py",
+      "mechanism_property": "user_id must preserve its original case because USER_PROFILES keys are case-sensitive (e.g., 'Alice_Smith', not 'alice_smith')",
+      "mechanism_steps": [
+        "normalize iterates all key-value pairs and applies v.lower() to every string value",
+        "user_id 'Alice_Smith' becomes 'alice_smith'",
+        "enrich_node looks up 'alice_smith' in USER_PROFILES which has key 'Alice_Smith'",
+        "case-sensitive lookup fails, user gets tier='unknown' and region='unknown'",
+        "write_events outputs events with tier='unknown' for all users"
+      ],
+      "mechanism_outcome": "all events are written with tier='unknown' because the normalizer corrupts user_id case, breaking the enricher's profile lookup",
+      "trap_description": "No trap"
+    },
+    "reference_fix": {
+      "file": "normalizer.py",
+      "function": "normalize"
+    }
+  },
+  {
+    "id": "search_index_chain",
+    "family": "search_index_chain",
+    "difficulty": "B",
+    "task": "A document search pipeline is returning false positive results. Searching for author names like \"alice\" returns documents, which it should not. The search index appears to contain tokens that do not belong. Investigate and fix.",
+    "failure_mode": "LOGIC",
+    "trap": "The false positive results suggest the tokenizer or index builder is including wrong tokens. The actual bug is in the field extractor which includes metadata fields (id, author, created_at) alongside content fields.",
+    "code_files": [
+      "deep_dependency_chain_cases/search_index/generated_cases/search_index/data.py",
+      "deep_dependency_chain_cases/search_index/generated_cases/search_index/loader.py",
+      "deep_dependency_chain_cases/search_index/generated_cases/search_index/extractor.py",
+      "deep_dependency_chain_cases/search_index/generated_cases/search_index/tokenizer.py",
+      "deep_dependency_chain_cases/search_index/generated_cases/search_index/indexer.py"
+    ],
+    "ground_truth_bug": {
+      "type": "missing_field_filter",
+      "location": "extractor.py::extract_fields",
+      "invariant": "content_fields must contain only keys from CONTENT_KEYS (title, body, tags)",
+      "fix_pattern": "Skip keys not in CONTENT_KEYS: if key not in CONTENT_KEYS: continue"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "missing_field_filter",
+      "bug_location": "extractor.py::extract_fields -> tokenizer.py::tokenize",
+      "mechanism_source": "extract_fields includes all string-valued fields from the document in content_fields, not just content keys",
+      "canonical_field": "content_fields",
+      "fix_location": "extractor.py",
+      "mechanism_property": "content_fields must contain only CONTENT_KEYS (title, body, tags), excluding metadata fields (id, author, created_at)",
+      "mechanism_steps": [
+        "extract_fields iterates all key-value pairs in each document",
+        "it adds every string value to content_fields without checking against CONTENT_KEYS",
+        "metadata fields id, author, created_at are included alongside title, body, tags",
+        "tokenize_node splits all content_fields values into tokens, including metadata values",
+        "build_index_node indexes tokens like 'alice', 'bob', 'doc1', '20260115' alongside content tokens"
+      ],
+      "mechanism_outcome": "search index is polluted with metadata tokens, causing false positive matches when searching for author names or document IDs",
+      "trap_description": "No trap"
+    },
+    "reference_fix": {
+      "file": "extractor.py",
+      "function": "extract_fields"
+    }
+  },
+  {
+    "id": "serialization_pipeline_chain",
+    "family": "serialization_pipeline_chain",
+    "difficulty": "C",
+    "task": "A record serialization pipeline is producing wrong output formats. Downstream consumers are failing to parse timestamp fields. The transport layer reports unexpected value types. Investigate and fix.",
+    "failure_mode": "TYPE_ERROR",
+    "trap": "The wrong timestamp format in the transport output suggests the transport or compressor is converting timestamps incorrectly. The actual bug is in the serializer which converts created_at to epoch int from the start.",
+    "code_files": [
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline/data.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline/builder.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline/serializer.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline/compressor.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline/transport.py"
+    ],
+    "ground_truth_bug": {
+      "type": "type_conversion_in_serializer",
+      "location": "serializer.py::serialize",
+      "invariant": "created_at must remain an ISO string throughout the pipeline",
+      "fix_pattern": "Use created_at: record[\"created_at\"] instead of looking up EPOCH_TABLE"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "type_conversion_in_serializer",
+      "bug_location": "serializer.py::serialize -> transport.py::transport",
+      "mechanism_source": "serialize converts created_at from ISO string to epoch integer via EPOCH_TABLE lookup",
+      "canonical_field": "created_at",
+      "fix_location": "serializer.py",
+      "mechanism_property": "created_at must remain an ISO 8601 string ('YYYY-MM-DDTHH:MM:SS') throughout the pipeline for downstream string-based operations to work",
+      "mechanism_steps": [
+        "serialize receives records with created_at as ISO string (e.g., '2026-04-01T10:00:00')",
+        "it looks up the epoch equivalent via EPOCH_TABLE and stores the integer (e.g., 1743501600)",
+        "compress_node builds dedup keys using str(created_at): '1743501600' for integers",
+        "transport_node outputs timestamp_types=['int'] and raw epoch integers in the timestamps array"
+      ],
+      "mechanism_outcome": "transport output contains epoch integers instead of ISO strings, and downstream consumers expecting ISO format cannot parse the timestamps",
+      "trap_description": "No trap"
+    },
+    "reference_fix": {
+      "file": "serializer.py",
+      "function": "serialize"
+    }
+  },
+  {
+    "id": "logging_pipeline_chain",
+    "family": "logging_pipeline_chain",
+    "difficulty": "B",
+    "task": "An event logging pipeline is reporting zero critical alerts even though critical events are present. The dashboard shows most events categorized as UNKNOWN severity. Investigate and fix.",
+    "failure_mode": "LOGIC",
+    "trap": "The zero critical count suggests the aggregator or dashboard is miscounting. The actual bug is in the event collector which truncates severity to 4 characters (CRITICAL\u2192CRIT, WARNING\u2192WARN), breaking the aggregator's exact-match counting.",
+    "code_files": [
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline/data.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline/collector.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline/formatter.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline/aggregator.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline/dashboard.py"
+    ],
+    "ground_truth_bug": {
+      "type": "string_truncation",
+      "location": "collector.py::collect_events_node",
+      "invariant": "severity must be preserved as the full string (INFO/WARNING/ERROR/CRITICAL)",
+      "fix_pattern": "Remove [:4] truncation: use e[\"severity\"] directly"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "string_truncation",
+      "bug_location": "collector.py::collect_events_node -> aggregator.py::aggregate_metrics_node",
+      "mechanism_source": "collect_events_node truncates severity to 4 characters using severity[:4]",
+      "canonical_field": "severity",
+      "fix_location": "collector.py",
+      "mechanism_property": "severity field must be the full string ('CRITICAL', 'WARNING', 'ERROR', 'INFO') for exact-match counting in the metric aggregator to work",
+      "mechanism_steps": [
+        "collect_events_node slices each event's severity to 4 chars: 'CRITICAL'\u2192'CRIT', 'WARNING'\u2192'WARN', 'ERROR'\u2192'ERRO', 'INFO'\u2192'INFO'",
+        "format_logs_node renders log lines with truncated severity: '[CRIT]' instead of '[CRITICAL]'",
+        "aggregate_metrics_node counts by exact severity match against SEVERITY_LEVELS keys",
+        "truncated strings 'CRIT', 'WARN', 'ERRO' don't match any key \u2192 counted as UNKNOWN",
+        "only 'INFO' (already 4 chars) matches; all other events become UNKNOWN",
+        "render_dashboard_node shows critical_count=0 and UNKNOWN=4"
+      ],
+      "mechanism_outcome": "dashboard reports zero critical alerts and 4 unknown events because truncated severity strings don't match the aggregator's exact-match keys",
+      "trap_description": "No trap"
+    },
+    "reference_fix": {
+      "file": "collector.py",
+      "function": "collect_events_node"
+    }
+  },
+  {
+    "id": "ml_feature_chain",
+    "family": "ml_feature_chain",
+    "difficulty": "C",
+    "task": "An ML scoring pipeline is producing predictions outside the expected range. The primary dataset scores are consistently higher than expected. The issue appears to be in the feature computation. Investigate and fix.",
+    "failure_mode": "LOGIC",
+    "trap": "The wrong score suggests the scaler or scorer has a bug. The actual bug is in the feature engineer which uses window_size - 1 instead of window_size, computing a rolling mean over fewer values than intended.",
+    "code_files": [
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature/data.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature/data_source.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature/features.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature/scaler.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature/scorer.py"
+    ],
+    "ground_truth_bug": {
+      "type": "off_by_one",
+      "location": "features.py::feature_engineer_node",
+      "invariant": "rolling mean must use window_size (not window_size - 1) values",
+      "fix_pattern": "Use actual_window = min(window, len(values)) instead of min(window - 1, len(values))"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "off_by_one",
+      "bug_location": "features.py::feature_engineer_node -> scaler.py::scaler_node",
+      "mechanism_source": "feature_engineer_node computes rolling mean with window_size - 1 instead of window_size",
+      "canonical_field": "rolling_mean",
+      "fix_location": "features.py",
+      "mechanism_property": "rolling mean must average the last window_size values (e.g., window=3 means average of last 3), not window_size - 1 values",
+      "mechanism_steps": [
+        "feature_engineer_node sets actual_window = min(window - 1, len(values)) instead of min(window, len(values))",
+        "for primary data [10,20,30,40,50] with window=3: actual_window=2 instead of 3",
+        "rolling_mean = (40+50)/2 = 45.0 instead of correct (30+40+50)/3 = 40.0",
+        "scaler_node standardizes: (45-30)/15 = 1.0 instead of correct (40-30)/15 = 0.667",
+        "model_scorer_node computes: 0.5 + 0.3\u00d71.0 = 0.8 instead of correct 0.5 + 0.3\u00d70.667 = 0.7"
+      ],
+      "mechanism_outcome": "prediction score is 0.8 instead of 0.7 due to the off-by-one window making rolling mean 45 instead of 40",
+      "trap_description": "No trap"
+    },
+    "reference_fix": {
+      "file": "features.py",
+      "function": "feature_engineer_node"
+    }
+  },
+  {
+    "id": "auth_context_chain_trap_1",
+    "family": "auth_context_chain",
+    "difficulty": "D",
+    "task": "The auth system was recently patched. Write operations now succeed for some users, but users are being assigned the wrong tier. For example, a user who should have enterprise-level access is getting through with default-tier permissions. Investigate.",
+    "failure_mode": "LOGIC",
+    "trap": "The endpoint/final node has been patched to compensate for the upstream bug. The symptom is masked but the root cause remains. The fix is superficial \u2014 it breaks on edge cases or alternate consumers.",
+    "code_files": [
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_1/data.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_1/gate.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_1/normalizer.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_1/resolver.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_1/token_parser.py"
+    ],
+    "ground_truth_bug": {
+      "type": "field_corruption_on_normalization",
+      "location": "normalizer.py::normalize_context",
+      "invariant": "org_id must preserve its prefix (ORG-100, DEPT-50) through the normalization step",
+      "fix_pattern": "Remove the prefix-stripping logic: result[\"org_id\"] = parsed[\"org_id\"]"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "field_corruption_on_normalization",
+      "bug_location": "normalizer.py::normalize_context -> resolver.py::resolve_permissions",
+      "mechanism_source": "normalize_context strips the prefix from org_id by splitting on '-' and keeping only the numeric suffix",
+      "canonical_field": "org_id",
+      "fix_location": "normalizer.py",
+      "mechanism_property": "org_id must preserve its full prefix (e.g., 'ORG-100') through normalization for downstream DB lookups to succeed",
+      "mechanism_steps": [
+        "normalize_context strips org_id prefix: 'ORG-100' becomes '100'",
+        "resolve_permissions_node fails to find '100:alice' in USER_DB, assigns default tier",
+        "check_gate_node has been patched to grant access for default-tier users",
+        "access is granted but with wrong tier \u2014 default instead of enterprise",
+        "the stripped org_id '100' propagates to audit logs and bypass consumers"
+      ],
+      "mechanism_outcome": "writes succeed but under the wrong tier (default instead of enterprise), and org_id is corrupted in all downstream consumers",
+      "trap_description": "check_gate_node defaults to granted=True for default tier users, masking the denied-access symptom without fixing the org_id corruption in normalize_context"
+    },
+    "reference_fix": {
+      "file": "normalizer.py",
+      "function": "normalize_context"
+    }
+  },
+  {
+    "id": "auth_context_chain_trap_3",
+    "family": "auth_context_chain",
+    "difficulty": "C",
+    "task": "The permission system was recently updated. Most users with ORG- prefixed IDs now resolve correctly, but users with DEPT- prefixes or numeric-only org IDs still fail permission lookups. Investigate.",
+    "failure_mode": "LOGIC",
+    "trap": "A middle node applies a heuristic or hardcoded correction that works for the primary test case but fails on alternate datasets or edge cases.",
+    "code_files": [
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_3/data.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_3/gate.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_3/normalizer.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_3/resolver.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_3/token_parser.py"
+    ],
+    "ground_truth_bug": {
+      "type": "field_corruption_on_normalization",
+      "location": "normalizer.py::normalize_context",
+      "invariant": "org_id must preserve its prefix (ORG-100, DEPT-50) through the normalization step",
+      "fix_pattern": "Remove the prefix-stripping logic: result[\"org_id\"] = parsed[\"org_id\"]"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "field_corruption_on_normalization",
+      "bug_location": "normalizer.py::normalize_context -> resolver.py::resolve_permissions",
+      "mechanism_source": "normalize_context strips the prefix from org_id by splitting on '-' and keeping only the numeric suffix",
+      "canonical_field": "org_id",
+      "fix_location": "normalizer.py",
+      "mechanism_property": "org_id must preserve its full prefix (e.g., 'ORG-100') through normalization for downstream DB lookups to succeed",
+      "mechanism_steps": [
+        "normalize_context strips org_id prefix: \"ORG-100\" becomes \"100\"",
+        "resolve_permissions_node fails lookup for \"100:alice\", retries with \"ORG-\" prefix prepended \u2192 \"ORG-100:alice\" found in USER_DB",
+        "resolve_permissions_node returns correct tier for ORG-prefixed users",
+        "for DEPT-50 user carol, resolve_permissions_node prepends \"ORG-\" \u2192 \"ORG-50:carol\" not found in USER_DB",
+        "resolve_permissions_node falls back to default tier for DEPT- users because it only guesses the ORG- prefix"
+      ],
+      "mechanism_outcome": "ORG-prefixed users work but DEPT-prefixed and other non-ORG users still fail because the resolver guesses 'ORG-' as the prefix",
+      "trap_description": "resolve_permissions_node retries lookup with 'ORG-' prefix prepended, which works for ORG-prefixed orgs but fails for DEPT- or other prefixes because the real prefix was stripped by normalize_context"
+    },
+    "reference_fix": {
+      "file": "normalizer.py",
+      "function": "normalize_context"
+    }
+  },
+  {
+    "id": "auth_context_chain_trap_4",
+    "family": "auth_context_chain",
+    "difficulty": "B+",
+    "task": "Permission resolution was recently enhanced and now works correctly for most users. However, audit logs show incorrect org IDs, and replay consumers are reading wrong values. Investigate the inconsistency.",
+    "failure_mode": "LOGIC",
+    "trap": "A downstream node re-derives or compensates for the corrupted data, producing correct output through the main path. But a bypass consumer still reads the corrupted upstream data.",
+    "code_files": [
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_4/data.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_4/gate.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_4/normalizer.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_4/resolver.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_4/token_parser.py"
+    ],
+    "ground_truth_bug": {
+      "type": "field_corruption_on_normalization",
+      "location": "normalizer.py::normalize_context",
+      "invariant": "org_id must preserve its prefix (ORG-100, DEPT-50) through the normalization step",
+      "fix_pattern": "Remove the prefix-stripping logic: result[\"org_id\"] = parsed[\"org_id\"]"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "field_corruption_on_normalization",
+      "bug_location": "normalizer.py::normalize_context -> resolver.py::resolve_permissions",
+      "mechanism_source": "normalize_context strips the prefix from org_id by splitting on '-' and keeping only the numeric suffix",
+      "canonical_field": "org_id",
+      "fix_location": "normalizer.py",
+      "mechanism_property": "org_id must preserve its full prefix (e.g., 'ORG-100') through normalization for downstream DB lookups to succeed",
+      "mechanism_steps": [
+        "normalize_context strips org_id prefix: \"ORG-100\" becomes \"100\"",
+        "resolve_permissions_node tries all known prefixes (ORG-, DEPT-) to reconstruct USER_DB key",
+        "resolve_permissions_node finds \"ORG-100:alice\" in USER_DB \u2192 returns enterprise tier and PERMISSIONS[\"enterprise\"]",
+        "check_gate_node receives correct permissions and grants access through the main path",
+        "but the normalized context dict still contains org_id=\"100\" (stripped), which bypass consumers read directly"
+      ],
+      "mechanism_outcome": "permission checks pass but audit logs and replay consumers see the corrupted org_id '100' instead of 'ORG-100'",
+      "trap_description": "resolve_permissions_node tries all known prefixes to find a match, succeeding for the main path but leaving the corrupted org_id in the normalized context for bypass consumers that read it directly"
+    },
+    "reference_fix": {
+      "file": "normalizer.py",
+      "function": "normalize_context"
+    }
+  },
+  {
+    "id": "auth_context_chain_trap_5",
+    "family": "auth_context_chain",
+    "difficulty": "B+",
+    "task": "The auth pipeline was recently updated and permission checks now pass for all users. However, some downstream consumers are reading a different org_id value than what the permission resolver used. Investigate the inconsistency.",
+    "failure_mode": "LOGIC",
+    "trap": "The buggy node adds a corrected field alongside the corrupted one. Downstream nodes use the new field, but bypass consumers and other readers still access the original corrupted field.",
+    "code_files": [
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_5/data.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_5/gate.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_5/normalizer.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_5/resolver.py",
+      "deep_dependency_chain_cases/auth_context/generated_cases/auth_context_trap_5/token_parser.py"
+    ],
+    "ground_truth_bug": {
+      "type": "field_corruption_on_normalization",
+      "location": "normalizer.py::normalize_context",
+      "invariant": "org_id must preserve its prefix (ORG-100, DEPT-50) through the normalization step",
+      "fix_pattern": "Remove the prefix-stripping logic: result[\"org_id\"] = parsed[\"org_id\"]"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "field_corruption_on_normalization",
+      "bug_location": "normalizer.py::normalize_context -> resolver.py::resolve_permissions",
+      "mechanism_source": "normalize_context strips the prefix from org_id by splitting on '-' and keeping only the numeric suffix",
+      "canonical_field": "org_id",
+      "fix_location": "normalizer.py",
+      "mechanism_property": "org_id must preserve its full prefix (e.g., 'ORG-100') through normalization for downstream DB lookups to succeed",
+      "mechanism_steps": [
+        "normalize_context strips org_id prefix: 'ORG-100' becomes '100'",
+        "normalize_context also stores the original value in canonical_org_id='ORG-100'",
+        "resolve_permissions_node reads canonical_org_id for lookup, finds 'ORG-100:alice' in USER_DB",
+        "permissions resolve correctly using the alternate field",
+        "but org_id in the normalized context is still '100', and bypass consumers read org_id, not canonical_org_id"
+      ],
+      "mechanism_outcome": "permission resolution works via canonical_org_id but org_id remains corrupted; any consumer reading org_id directly sees '100' instead of 'ORG-100'",
+      "trap_description": "normalize_context adds a canonical_org_id field with the original value while still stripping org_id, so resolve_permissions_node succeeds using the alternate field but bypass consumers reading org_id see the stripped value"
+    },
+    "reference_fix": {
+      "file": "normalizer.py",
+      "function": "normalize_context"
+    }
+  },
+  {
+    "id": "billing_aggregation_chain_trap_1",
+    "family": "billing_aggregation_chain",
+    "difficulty": "D",
+    "task": "The billing system was recently patched. The primary customer's invoice now shows the correct total, but a legitimate customer with 85 units of usage is being charged at the wrong rate. Investigate why the fix is producing side effects.",
+    "failure_mode": "LOGIC",
+    "trap": "The endpoint/final node has been patched to compensate for the upstream bug. The symptom is masked but the root cause remains. The fix is superficial \u2014 it breaks on edge cases or alternate consumers.",
+    "code_files": [
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_1/collector.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_1/data.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_1/invoice_builder.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_1/plan_resolver.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_1/rate_engine.py"
+    ],
+    "ground_truth_bug": {
+      "type": "timezone_boundary_misattribution",
+      "location": "collector.py::aggregate_usage",
+      "invariant": "events must be grouped by UTC date, not local timestamp date",
+      "fix_pattern": "Convert ts to UTC using tz_offset before extracting billing period date"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "timezone_boundary_misattribution",
+      "bug_location": "collector.py::aggregate_usage -> plan_resolver.py::resolve_plan",
+      "mechanism_source": "aggregate_usage groups events by local date (ts[:10]) instead of converting to UTC first",
+      "canonical_field": "units",
+      "fix_location": "collector.py",
+      "mechanism_property": "billing period assignment must use UTC timestamps, not local timestamps, to correctly count units across timezone boundaries",
+      "mechanism_steps": [
+        "aggregate_usage groups by local date, misassigning 15 boundary events \u2192 April 1 = 85 units",
+        "resolve_plan maps 85 units to growth tier",
+        "compute_charges computes 85 \u00d7 $0.10 = $8.50",
+        "build_invoice detects growth tier with total > $8 and overrides to enterprise pricing",
+        "primary customer's invoice shows correct enterprise rate",
+        "but a legitimate 85-unit customer (no timezone issue) also gets overridden to enterprise, paying $4.25 instead of correct $8.50"
+      ],
+      "mechanism_outcome": "primary customer's bill looks correct but legitimate growth-tier customers are incorrectly downgraded to enterprise pricing by the hardcoded override",
+      "trap_description": "build_invoice overrides growth-tier invoices exceeding $8 to enterprise pricing, fixing the primary customer's bill but incorrectly downgrading legitimate 85-unit growth customers"
+    },
+    "reference_fix": {
+      "file": "collector.py",
+      "function": "aggregate_usage"
+    }
+  },
+  {
+    "id": "billing_aggregation_chain_trap_3",
+    "family": "billing_aggregation_chain",
+    "difficulty": "C",
+    "task": "The usage collector was recently updated with a timezone adjustment. The primary customer (UTC+1) is billed correctly, but customers in other timezones are seeing incorrect unit counts. Investigate.",
+    "failure_mode": "LOGIC",
+    "trap": "A middle node applies a heuristic or hardcoded correction that works for the primary test case but fails on alternate datasets or edge cases.",
+    "code_files": [
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_3/collector.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_3/data.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_3/invoice_builder.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_3/plan_resolver.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_3/rate_engine.py"
+    ],
+    "ground_truth_bug": {
+      "type": "timezone_boundary_misattribution",
+      "location": "collector.py::aggregate_usage",
+      "invariant": "events must be grouped by UTC date, not local timestamp date",
+      "fix_pattern": "Convert ts to UTC using tz_offset before extracting billing period date"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "timezone_boundary_misattribution",
+      "bug_location": "collector.py::aggregate_usage -> plan_resolver.py::resolve_plan",
+      "mechanism_source": "aggregate_usage groups events by local date (ts[:10]) instead of converting to UTC first",
+      "canonical_field": "units",
+      "fix_location": "collector.py",
+      "mechanism_property": "billing period assignment must use UTC timestamps, not local timestamps, to correctly count units across timezone boundaries",
+      "mechanism_steps": [
+        "aggregate_usage applies a hardcoded -1 hour shift to all timestamps before extracting the date",
+        "for tz=+1 customers, this correctly converts local to UTC: boundary events at local 00:30 Apr 2 \u2192 23:30 Apr 1",
+        "April 1 correctly shows 100 units for the primary customer",
+        "for tz=-5 customers, the -1 hour shift is wrong: local 23:00 Apr 1 should be UTC 04:00 Apr 2, but shift gives 22:00 Apr 1",
+        "tz=-5 April 1 shows 100 units instead of correct 80 because boundary events aren't shifted far enough"
+      ],
+      "mechanism_outcome": "primary customer (tz=+1) is billed correctly by coincidence, but any other timezone produces wrong unit counts because the shift is hardcoded to -1 hour instead of using actual tz_offset",
+      "trap_description": "aggregate_usage applies a hardcoded -1 hour UTC shift, which works for the primary customer (tz=+1) but produces wrong results for any other timezone (e.g., tz=-5 needs a +5 hour shift)"
+    },
+    "reference_fix": {
+      "file": "collector.py",
+      "function": "aggregate_usage"
+    }
+  },
+  {
+    "id": "billing_aggregation_chain_trap_4",
+    "family": "billing_aggregation_chain",
+    "difficulty": "B+",
+    "task": "The plan resolver was recently enhanced to re-aggregate usage from raw event data. The invoice now shows the correct tier and total for the primary customer. However, audit dashboards that read the collector output directly show different unit counts than the invoice. Investigate the inconsistency.",
+    "failure_mode": "LOGIC",
+    "trap": "A downstream node re-derives or compensates for the corrupted data, producing correct output through the main path. But a bypass consumer still reads the corrupted upstream data.",
+    "code_files": [
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_4/collector.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_4/data.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_4/invoice_builder.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_4/plan_resolver.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_4/rate_engine.py"
+    ],
+    "ground_truth_bug": {
+      "type": "timezone_boundary_misattribution",
+      "location": "collector.py::aggregate_usage",
+      "invariant": "events must be grouped by UTC date, not local timestamp date",
+      "fix_pattern": "Convert ts to UTC using tz_offset before extracting billing period date"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "timezone_boundary_misattribution",
+      "bug_location": "collector.py::aggregate_usage -> plan_resolver.py::resolve_plan",
+      "mechanism_source": "aggregate_usage groups events by local date (ts[:10]) instead of converting to UTC first",
+      "canonical_field": "units",
+      "fix_location": "collector.py",
+      "mechanism_property": "billing period assignment must use UTC timestamps, not local timestamps, to correctly count units across timezone boundaries",
+      "mechanism_steps": [
+        "aggregate_usage groups events by local date ts[:10] (buggy), producing records with units=85 for April 1",
+        "aggregate_usage also passes raw_events and tz_offset through to the plan resolver",
+        "resolve_plan re-aggregates from raw_events using _to_utc with the correct tz_offset",
+        "resolve_plan computes April 1 = 100 units (correct UTC grouping) and assigns enterprise tier",
+        "compute_charges and build_invoice produce the correct $5.00 invoice",
+        "but audit dashboards (bypass) read collector_output[\"records\"] directly and see units=85 (local date grouping)"
+      ],
+      "mechanism_outcome": "invoice is correct because resolve_plan re-aggregates from raw events, but audit dashboards read the collector's buggy records field and display 85 units instead of 100",
+      "trap_description": "resolve_plan re-aggregates usage from raw events passed through by the collector, producing correct tier and invoice, but audit dashboards (bypass) read the collector's records field which still contains the buggy local-date grouping of 85 units"
+    },
+    "reference_fix": {
+      "file": "collector.py",
+      "function": "aggregate_usage"
+    }
+  },
+  {
+    "id": "billing_aggregation_chain_trap_5",
+    "family": "billing_aggregation_chain",
+    "difficulty": "B+",
+    "task": "The collector was recently updated and the plan resolver now assigns correct tiers. However, audit dashboards show different unit counts than what the invoice reflects. Investigate the inconsistency.",
+    "failure_mode": "LOGIC",
+    "trap": "The buggy node adds a corrected field alongside the corrupted one. Downstream nodes use the new field, but bypass consumers and other readers still access the original corrupted field.",
+    "code_files": [
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_5/collector.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_5/data.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_5/invoice_builder.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_5/plan_resolver.py",
+      "deep_dependency_chain_cases/billing_aggregation/generated_cases/billing_aggregation_trap_5/rate_engine.py"
+    ],
+    "ground_truth_bug": {
+      "type": "timezone_boundary_misattribution",
+      "location": "collector.py::aggregate_usage",
+      "invariant": "events must be grouped by UTC date, not local timestamp date",
+      "fix_pattern": "Convert ts to UTC using tz_offset before extracting billing period date"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "timezone_boundary_misattribution",
+      "bug_location": "collector.py::aggregate_usage -> plan_resolver.py::resolve_plan",
+      "mechanism_source": "aggregate_usage groups events by local date (ts[:10]) instead of converting to UTC first",
+      "canonical_field": "units",
+      "fix_location": "collector.py",
+      "mechanism_property": "billing period assignment must use UTC timestamps, not local timestamps, to correctly count units across timezone boundaries",
+      "mechanism_steps": [
+        "aggregate_usage groups by local date ts[:10] (buggy), producing period=\"2026-04-01\" with units=85",
+        "aggregate_usage also calls _to_utc with dataset_dict[\"tz_offset\"] and stores corrected_units=100",
+        "the usage record contains both units=85 and corrected_units=100",
+        "resolve_plan reads corrected_units (100) and maps to enterprise tier via TIER_TABLE",
+        "build_invoice computes total from TIER_TABLE[\"enterprise\"] rate \u2192 $5.00 (correct)",
+        "but audit dashboards read the units field (85) and display wrong count; resolve_plan used corrected_units"
+      ],
+      "mechanism_outcome": "invoice is correct via corrected_units but audit and monitoring consumers read the original units field and show the wrong count of 85",
+      "trap_description": "aggregate_usage adds a corrected_units field using proper UTC conversion alongside the buggy units field; resolve_plan reads corrected_units but audit consumers still read the original wrong units"
+    },
+    "reference_fix": {
+      "file": "collector.py",
+      "function": "aggregate_usage"
+    }
+  },
+  {
+    "id": "config_derivation_chain_trap_1",
+    "family": "config_derivation_chain",
+    "difficulty": "D",
+    "task": "The service initializer was recently patched and the service now starts on the primary port (8080). However, when deployed with PORT=443, pool_size is 16160 instead of the expected 886. Investigate why different ports produce wrong values.",
+    "failure_mode": "TYPE_ERROR",
+    "trap": "The endpoint/final node has been patched to compensate for the upstream bug. The symptom is masked but the root cause remains. The fix is superficial \u2014 it breaks on edge cases or alternate consumers.",
+    "code_files": [
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_1/data.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_1/deriver.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_1/env.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_1/parser.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_1/service.py"
+    ],
+    "ground_truth_bug": {
+      "type": "missing_type_conversion",
+      "location": "parser.py::parse_config",
+      "invariant": "PORT must be converted to int; pool_size = PORT * 2 must be integer multiplication",
+      "fix_pattern": "Change port: env[\"PORT\"] to port: int(env[\"PORT\"])"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "missing_type_conversion",
+      "bug_location": "parser.py::parse_config -> deriver.py::derive_settings",
+      "mechanism_source": "parse_config reads PORT from env as a string and does not convert it to int",
+      "canonical_field": "port",
+      "fix_location": "parser.py",
+      "mechanism_property": "parsed config port must be an integer so that downstream arithmetic (port * 2) produces a numeric pool_size, not string repetition",
+      "mechanism_steps": [
+        "parse_config stores PORT as string '8080'",
+        "derive_settings_node computes pool_size = '8080' * 2 = '80808080' (string repeat)",
+        "init_service_node detects the invalid pool_size and falls back to hardcoded 16160",
+        "service starts successfully on PORT=8080 with pool_size=16160 (happens to be correct)",
+        "on PORT=443, correct pool_size should be 886 but the fallback still gives 16160"
+      ],
+      "mechanism_outcome": "service starts but with a hardcoded fallback pool_size that is only correct for PORT=8080; other ports get the wrong pool_size",
+      "trap_description": "init_service_node caps pool_size to 16160 when it's a string or exceeds 20000, fixing the primary port but producing the wrong fallback value for other ports (e.g., PORT=443 should give 886, not 16160)"
+    },
+    "reference_fix": {
+      "file": "parser.py",
+      "function": "parse_config"
+    }
+  },
+  {
+    "id": "config_derivation_chain_trap_3",
+    "family": "config_derivation_chain",
+    "difficulty": "C",
+    "task": "The settings derivation was recently fixed and the service starts correctly. Pool sizes are computed correctly for all ports. However, when inspecting the parsed configuration, the port value is still stored as a string instead of an integer. Investigate why the configuration is inconsistent with the service behavior.",
+    "failure_mode": "TYPE_ERROR",
+    "trap": "A middle node applies a heuristic or hardcoded correction that works for the primary test case but fails on alternate datasets or edge cases.",
+    "code_files": [
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_3/data.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_3/deriver.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_3/env.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_3/parser.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_3/service.py"
+    ],
+    "ground_truth_bug": {
+      "type": "missing_type_conversion",
+      "location": "parser.py::parse_config",
+      "invariant": "PORT must be converted to int; pool_size = PORT * 2 must be integer multiplication",
+      "fix_pattern": "Change port: env[\"PORT\"] to port: int(env[\"PORT\"])"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "missing_type_conversion",
+      "bug_location": "parser.py::parse_config -> deriver.py::derive_settings",
+      "mechanism_source": "parse_config reads PORT from env as a string and does not convert it to int",
+      "canonical_field": "port",
+      "fix_location": "parser.py",
+      "mechanism_property": "parsed config port must be an integer so that downstream arithmetic (port * 2) produces a numeric pool_size, not string repetition",
+      "mechanism_steps": [
+        "parse_config stores PORT as string '8080'",
+        "derive_settings_node casts port to int before computing: pool_size = int('8080') * 2 = 16160",
+        "derived settings (pool_size, listen_address) are correct",
+        "init_service_node starts successfully",
+        "but parsed config still has port='8080' (string), and the config audit endpoint reads parsed config directly",
+        "audit reports port_type='str' instead of 'int'"
+      ],
+      "mechanism_outcome": "service runs correctly but config audit reports port as string type because the parser never converted it \u2014 the deriver worked around it locally",
+      "trap_description": "derive_settings_node casts port to int before computing pool_size, producing correct derived settings, but the parsed config still has port as a string \u2014 the config audit endpoint reports port_type='str'"
+    },
+    "reference_fix": {
+      "file": "parser.py",
+      "function": "parse_config"
+    }
+  },
+  {
+    "id": "config_derivation_chain_trap_4",
+    "family": "config_derivation_chain",
+    "difficulty": "B+",
+    "task": "Derived settings (pool_size, listen_address) are now correct and the service runs. However, the config audit still reports the port as type \"str\". Investigate why the audit disagrees with the service's actual behavior.",
+    "failure_mode": "TYPE_ERROR",
+    "trap": "A downstream node re-derives or compensates for the corrupted data, producing correct output through the main path. But a bypass consumer still reads the corrupted upstream data.",
+    "code_files": [
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_4/data.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_4/deriver.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_4/env.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_4/parser.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_4/service.py"
+    ],
+    "ground_truth_bug": {
+      "type": "missing_type_conversion",
+      "location": "parser.py::parse_config",
+      "invariant": "PORT must be converted to int; pool_size = PORT * 2 must be integer multiplication",
+      "fix_pattern": "Change port: env[\"PORT\"] to port: int(env[\"PORT\"])"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "missing_type_conversion",
+      "bug_location": "parser.py::parse_config -> deriver.py::derive_settings",
+      "mechanism_source": "parse_config reads PORT from env as a string and does not convert it to int",
+      "canonical_field": "port",
+      "fix_location": "parser.py",
+      "mechanism_property": "parsed config port must be an integer so that downstream arithmetic (port * 2) produces a numeric pool_size, not string repetition",
+      "mechanism_steps": [
+        "parse_config stores PORT as string '8080'",
+        "derive_settings_node re-reads and converts port from parsed config: int(parsed['port']) = 8080",
+        "pool_size = 8080 * 2 = 16160, listen_address = 'host:8080' \u2014 both correct",
+        "init_service_node starts successfully",
+        "but parsed config port is still string '8080', and config audit reads it directly"
+      ],
+      "mechanism_outcome": "service runs correctly but config audit shows port_type='str' because the parser stores it as string and the deriver's local conversion doesn't propagate back",
+      "trap_description": "derive_settings_node re-reads and converts the port value from parsed config before math, producing correct settings, but the parsed config object still contains the string port for bypass consumers"
+    },
+    "reference_fix": {
+      "file": "parser.py",
+      "function": "parse_config"
+    }
+  },
+  {
+    "id": "config_derivation_chain_trap_5",
+    "family": "config_derivation_chain",
+    "difficulty": "B+",
+    "task": "The config parser was recently updated and the service initializes correctly. However, the config audit endpoint reports the port field as type \"str\" while the service uses the correct integer value. Investigate the inconsistency.",
+    "failure_mode": "TYPE_ERROR",
+    "trap": "The buggy node adds a corrected field alongside the corrupted one. Downstream nodes use the new field, but bypass consumers and other readers still access the original corrupted field.",
+    "code_files": [
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_5/data.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_5/deriver.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_5/env.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_5/parser.py",
+      "deep_dependency_chain_cases/config_derivation/generated_cases/config_derivation_trap_5/service.py"
+    ],
+    "ground_truth_bug": {
+      "type": "missing_type_conversion",
+      "location": "parser.py::parse_config",
+      "invariant": "PORT must be converted to int; pool_size = PORT * 2 must be integer multiplication",
+      "fix_pattern": "Change port: env[\"PORT\"] to port: int(env[\"PORT\"])"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "missing_type_conversion",
+      "bug_location": "parser.py::parse_config -> deriver.py::derive_settings",
+      "mechanism_source": "parse_config reads PORT from env as a string and does not convert it to int",
+      "canonical_field": "port",
+      "fix_location": "parser.py",
+      "mechanism_property": "parsed config port must be an integer so that downstream arithmetic (port * 2) produces a numeric pool_size, not string repetition",
+      "mechanism_steps": [
+        "parse_config stores PORT as string '8080' in port, and also stores int 8080 in port_int",
+        "derive_settings_node reads port_int (8080) and computes pool_size = 8080 * 2 = 16160",
+        "derived settings are correct",
+        "init_service_node starts successfully",
+        "but config audit reads the port field (not port_int) and reports type 'str'"
+      ],
+      "mechanism_outcome": "service works via port_int but config audit reads the original port field and reports it as string type, creating an inconsistency between the service's actual port and the audit report",
+      "trap_description": "parse_config adds a port_int field alongside the string port; derive_settings_node reads port_int and computes correctly, but the config audit reads the original port field and reports it as type 'str'"
+    },
+    "reference_fix": {
+      "file": "parser.py",
+      "function": "parse_config"
+    }
+  },
+  {
+    "id": "event_etl_chain_trap_1",
+    "family": "event_etl_chain",
+    "difficulty": "D",
+    "task": "The event writer was recently patched. Alice's events now show a tier, but it is \"standard\" instead of the expected \"premium\". Other users also appear to have incorrect tier assignments. Investigate.",
+    "failure_mode": "LOGIC",
+    "trap": "The endpoint/final node has been patched to compensate for the upstream bug. The symptom is masked but the root cause remains. The fix is superficial \u2014 it breaks on edge cases or alternate consumers.",
+    "code_files": [
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_1/data.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_1/enricher.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_1/normalizer.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_1/source.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_1/writer.py"
+    ],
+    "ground_truth_bug": {
+      "type": "case_sensitive_key_corruption",
+      "location": "normalizer.py::normalize",
+      "invariant": "user_id must preserve its original case through normalization",
+      "fix_pattern": "Only lowercase event_type and currency; preserve user_id: normalized[\"user_id\"] = event[\"user_id\"]"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "case_sensitive_key_corruption",
+      "bug_location": "normalizer.py::normalize -> enricher.py::enrich",
+      "mechanism_source": "normalize lowercases all string field values including user_id using v.lower()",
+      "canonical_field": "user_id",
+      "fix_location": "normalizer.py",
+      "mechanism_property": "user_id must preserve its original case because USER_PROFILES keys are case-sensitive (e.g., 'Alice_Smith', not 'alice_smith')",
+      "mechanism_steps": [
+        "normalize lowercases user_id: 'Alice_Smith' \u2192 'alice_smith'",
+        "enrich_node lookup fails \u2192 tier='unknown'",
+        "write_events detects unknown tier on a purchase event and defaults to 'standard'",
+        "Alice shows tier='standard' instead of correct 'premium'",
+        "replay queue (bypass) still contains lowercased user_id 'alice_smith'"
+      ],
+      "mechanism_outcome": "purchase events get tier='standard' (wrong \u2014 Alice is premium) and the replay queue routes events using lowercased user_ids",
+      "trap_description": "write_events defaults unknown-tier purchase events to 'standard', which masks the symptom but assigns the wrong tier (Alice should be 'premium', not 'standard') and leaves the replay queue with lowercased user_ids"
+    },
+    "reference_fix": {
+      "file": "normalizer.py",
+      "function": "normalize"
+    }
+  },
+  {
+    "id": "event_etl_chain_trap_3",
+    "family": "event_etl_chain",
+    "difficulty": "C",
+    "task": "The event processing pipeline was recently updated. Alice_Smith and Carol-Wu now resolve to the correct tiers, but the user SYSADMIN fails profile lookup and gets tier=unknown. Investigate why some users still fail.",
+    "failure_mode": "LOGIC",
+    "trap": "A middle node applies a heuristic or hardcoded correction that works for the primary test case but fails on alternate datasets or edge cases.",
+    "code_files": [
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_3/data.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_3/enricher.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_3/normalizer.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_3/source.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_3/writer.py"
+    ],
+    "ground_truth_bug": {
+      "type": "case_sensitive_key_corruption",
+      "location": "normalizer.py::normalize",
+      "invariant": "user_id must preserve its original case through normalization",
+      "fix_pattern": "Only lowercase event_type and currency; preserve user_id: normalized[\"user_id\"] = event[\"user_id\"]"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "case_sensitive_key_corruption",
+      "bug_location": "normalizer.py::normalize -> enricher.py::enrich",
+      "mechanism_source": "normalize lowercases all string field values including user_id using v.lower()",
+      "canonical_field": "user_id",
+      "fix_location": "normalizer.py",
+      "mechanism_property": "user_id must preserve its original case because USER_PROFILES keys are case-sensitive (e.g., 'Alice_Smith', not 'alice_smith')",
+      "mechanism_steps": [
+        "normalize uses a heuristic: values with '_' or '-' are preserved, others are lowercased",
+        "Alice_Smith (has '_') \u2192 preserved \u2192 enrich_node finds her \u2192 tier='premium'",
+        "Carol-Wu (has '-') \u2192 preserved \u2192 enrich_node finds her \u2192 tier='premium'",
+        "SYSADMIN (no separator) \u2192 lowercased to 'sysadmin' \u2192 not found in USER_PROFILES",
+        "SYSADMIN gets tier='unknown' instead of 'admin'"
+      ],
+      "mechanism_outcome": "users with separators in their names resolve correctly, but users without separators (like SYSADMIN) are still lowercased and fail lookup",
+      "trap_description": "normalize uses a heuristic that preserves case for values containing '_' or '-' (working for Alice_Smith and Carol-Wu) but lowercases values without separators (SYSADMIN becomes 'sysadmin', failing lookup)"
+    },
+    "reference_fix": {
+      "file": "normalizer.py",
+      "function": "normalize"
+    }
+  },
+  {
+    "id": "event_etl_chain_trap_4",
+    "family": "event_etl_chain",
+    "difficulty": "B+",
+    "task": "The enricher was recently updated and all users now resolve to the correct tier. However, the replay queue contains user IDs that don't match the original event data, causing incorrect downstream routing. Investigate.",
+    "failure_mode": "LOGIC",
+    "trap": "A downstream node re-derives or compensates for the corrupted data, producing correct output through the main path. But a bypass consumer still reads the corrupted upstream data.",
+    "code_files": [
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_4/data.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_4/enricher.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_4/normalizer.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_4/source.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_4/writer.py"
+    ],
+    "ground_truth_bug": {
+      "type": "case_sensitive_key_corruption",
+      "location": "normalizer.py::normalize",
+      "invariant": "user_id must preserve its original case through normalization",
+      "fix_pattern": "Only lowercase event_type and currency; preserve user_id: normalized[\"user_id\"] = event[\"user_id\"]"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "case_sensitive_key_corruption",
+      "bug_location": "normalizer.py::normalize -> enricher.py::enrich",
+      "mechanism_source": "normalize lowercases all string field values including user_id using v.lower()",
+      "canonical_field": "user_id",
+      "fix_location": "normalizer.py",
+      "mechanism_property": "user_id must preserve its original case because USER_PROFILES keys are case-sensitive (e.g., 'Alice_Smith', not 'alice_smith')",
+      "mechanism_steps": [
+        "normalize lowercases user_id: \"Alice_Smith\" \u2192 \"alice_smith\"",
+        "enrich_node builds lower_map = {k.lower(): v for k, v in USER_PROFILES.items()}",
+        "enrich_node looks up \"alice_smith\" in lower_map \u2192 finds Alice_Smith's profile \u2192 tier=\"premium\"",
+        "write_events outputs events with correct tier from enrich_node",
+        "but replay queue reads user_id from normalized events \u2192 \"alice_smith\" (lowercased)",
+        "event routing uses \"alice_smith\" instead of original \"Alice_Smith\" from RAW_EVENTS"
+      ],
+      "mechanism_outcome": "enrichment works correctly via case-insensitive lookup but the replay queue (bypass) routes events using lowercased user_ids, causing incorrect downstream routing",
+      "trap_description": "enrich_node builds a case-insensitive lookup map {k.lower(): v}, finding all users correctly, but the replay queue (bypass consumer) still contains lowercased user_ids from normalize, causing wrong event routing"
+    },
+    "reference_fix": {
+      "file": "normalizer.py",
+      "function": "normalize"
+    }
+  },
+  {
+    "id": "event_etl_chain_trap_5",
+    "family": "event_etl_chain",
+    "difficulty": "B+",
+    "task": "The event pipeline was recently updated and all tiers now resolve correctly. However, the replay queue is routing events using different user IDs than what the enricher used for profile lookup. Investigate the inconsistency.",
+    "failure_mode": "LOGIC",
+    "trap": "The buggy node adds a corrected field alongside the corrupted one. Downstream nodes use the new field, but bypass consumers and other readers still access the original corrupted field.",
+    "code_files": [
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_5/data.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_5/enricher.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_5/normalizer.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_5/source.py",
+      "deep_dependency_chain_cases/event_etl/generated_cases/event_etl_trap_5/writer.py"
+    ],
+    "ground_truth_bug": {
+      "type": "case_sensitive_key_corruption",
+      "location": "normalizer.py::normalize",
+      "invariant": "user_id must preserve its original case through normalization",
+      "fix_pattern": "Only lowercase event_type and currency; preserve user_id: normalized[\"user_id\"] = event[\"user_id\"]"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "case_sensitive_key_corruption",
+      "bug_location": "normalizer.py::normalize -> enricher.py::enrich",
+      "mechanism_source": "normalize lowercases all string field values including user_id using v.lower()",
+      "canonical_field": "user_id",
+      "fix_location": "normalizer.py",
+      "mechanism_property": "user_id must preserve its original case because USER_PROFILES keys are case-sensitive (e.g., 'Alice_Smith', not 'alice_smith')",
+      "mechanism_steps": [
+        "normalize lowercases user_id: 'Alice_Smith' \u2192 'alice_smith'",
+        "normalize also stores original value in original_user_id='Alice_Smith'",
+        "enrich_node reads original_user_id for lookup \u2192 finds Alice \u2192 tier='premium'",
+        "write_events outputs correct tier",
+        "but replay queue reads user_id (not original_user_id) \u2192 routes using 'alice_smith'"
+      ],
+      "mechanism_outcome": "enrichment works via original_user_id but the replay queue reads the lowercased user_id field, routing events to the wrong destination",
+      "trap_description": "normalize adds an original_user_id field with the preserved case while still lowercasing user_id; enrich_node reads original_user_id and resolves correctly, but the replay queue reads user_id and routes with the lowercased value"
+    },
+    "reference_fix": {
+      "file": "normalizer.py",
+      "function": "normalize"
+    }
+  },
+  {
+    "id": "logging_pipeline_chain_trap_1",
+    "family": "logging_pipeline_chain",
+    "difficulty": "D",
+    "task": "The dashboard was recently patched and now shows critical alerts for the primary dataset. However, on a dataset containing only INFO and WARNING events, the dashboard falsely reports critical alerts. Investigate.",
+    "failure_mode": "LOGIC",
+    "trap": "The endpoint/final node has been patched to compensate for the upstream bug. The symptom is masked but the root cause remains. The fix is superficial \u2014 it breaks on edge cases or alternate consumers.",
+    "code_files": [
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_1/aggregator.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_1/collector.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_1/dashboard.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_1/data.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_1/formatter.py"
+    ],
+    "ground_truth_bug": {
+      "type": "string_truncation",
+      "location": "collector.py::collect_events_node",
+      "invariant": "severity must be preserved as the full string (INFO/WARNING/ERROR/CRITICAL)",
+      "fix_pattern": "Remove [:4] truncation: use e[\"severity\"] directly"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "string_truncation",
+      "bug_location": "collector.py::collect_events_node -> aggregator.py::aggregate_metrics_node",
+      "mechanism_source": "collect_events_node truncates severity to 4 characters using severity[:4]",
+      "canonical_field": "severity",
+      "fix_location": "collector.py",
+      "mechanism_property": "severity field must be the full string ('CRITICAL', 'WARNING', 'ERROR', 'INFO') for exact-match counting in the metric aggregator to work",
+      "mechanism_steps": [
+        "collect_events_node truncates severity: 'CRITICAL'\u2192'CRIT', 'WARNING'\u2192'WARN'",
+        "aggregate_metrics_node counts 'CRIT' and 'WARN' as UNKNOWN (no exact match)",
+        "render_dashboard_node adds UNKNOWN count to critical_count",
+        "primary dataset: 2 CRITICAL + 2 WARNING \u2192 4 UNKNOWN \u2192 critical_count=4 (shows alert)",
+        "INFO-only dataset: 'WARN' from truncated WARNING \u2192 UNKNOWN=1 \u2192 critical_count=1 (false alert)"
+      ],
+      "mechanism_outcome": "dashboard shows alerts on the primary dataset but creates false alerts on datasets without any critical events because truncated WARNING events get promoted to CRITICAL",
+      "trap_description": "render_dashboard_node adds UNKNOWN count to critical_count, which shows correct alerts for CRITICAL-containing datasets but creates false alerts on INFO/WARNING-only datasets where truncated 'WARN' becomes UNKNOWN and gets promoted"
+    },
+    "reference_fix": {
+      "file": "collector.py",
+      "function": "collect_events_node"
+    }
+  },
+  {
+    "id": "logging_pipeline_chain_trap_3",
+    "family": "logging_pipeline_chain",
+    "difficulty": "C",
+    "task": "The metric aggregator was recently updated and severity counts are now correct on the dashboard. However, log lines still display abbreviated severity names like \"[CRIT]\" and \"[WARN]\" instead of the full names. The fix did not address all consumers. Investigate.",
+    "failure_mode": "LOGIC",
+    "trap": "A middle node applies a heuristic or hardcoded correction that works for the primary test case but fails on alternate datasets or edge cases.",
+    "code_files": [
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_3/aggregator.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_3/collector.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_3/dashboard.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_3/data.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_3/formatter.py"
+    ],
+    "ground_truth_bug": {
+      "type": "string_truncation",
+      "location": "collector.py::collect_events_node",
+      "invariant": "severity must be preserved as the full string (INFO/WARNING/ERROR/CRITICAL)",
+      "fix_pattern": "Remove [:4] truncation: use e[\"severity\"] directly"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "string_truncation",
+      "bug_location": "collector.py::collect_events_node -> aggregator.py::aggregate_metrics_node",
+      "mechanism_source": "collect_events_node truncates severity to 4 characters using severity[:4]",
+      "canonical_field": "severity",
+      "fix_location": "collector.py",
+      "mechanism_property": "severity field must be the full string ('CRITICAL', 'WARNING', 'ERROR', 'INFO') for exact-match counting in the metric aggregator to work",
+      "mechanism_steps": [
+        "collect_events_node truncates severity: 'CRITICAL'\u2192'CRIT', 'WARNING'\u2192'WARN'",
+        "format_logs_node renders log lines with truncated severity: '[CRIT]', '[WARN]'",
+        "aggregate_metrics_node uses fuzzy prefix matching: 'CRITICAL'.startswith('CRIT') \u2192 counts as CRITICAL",
+        "metric counts on the dashboard are correct: CRITICAL=2, WARNING=2, INFO=1",
+        "but format_logs_node already consumed the truncated severity \u2014 log lines display '[CRIT]' not '[CRITICAL]'",
+        "the fuzzy fix in the aggregator does not reach back to correct the formatter output"
+      ],
+      "mechanism_outcome": "dashboard metrics are correct via fuzzy matching but log lines still display truncated severity names because the formatter reads the collected events before the aggregator remaps them",
+      "trap_description": "aggregate_metrics_node uses fuzzy prefix matching, correctly mapping CRIT\u2192CRITICAL for counting, but the compliance export and log lines still contain truncated severity strings from the collector"
+    },
+    "reference_fix": {
+      "file": "collector.py",
+      "function": "collect_events_node"
+    }
+  },
+  {
+    "id": "logging_pipeline_chain_trap_4",
+    "family": "logging_pipeline_chain",
+    "difficulty": "B+",
+    "task": "The metric aggregator was recently updated and dashboard metrics are correct. However, the compliance export reports different severity values than what the dashboard shows. Investigate the disagreement.",
+    "failure_mode": "LOGIC",
+    "trap": "A downstream node re-derives or compensates for the corrupted data, producing correct output through the main path. But a bypass consumer still reads the corrupted upstream data.",
+    "code_files": [
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_4/aggregator.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_4/collector.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_4/dashboard.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_4/data.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_4/formatter.py"
+    ],
+    "ground_truth_bug": {
+      "type": "string_truncation",
+      "location": "collector.py::collect_events_node",
+      "invariant": "severity must be preserved as the full string (INFO/WARNING/ERROR/CRITICAL)",
+      "fix_pattern": "Remove [:4] truncation: use e[\"severity\"] directly"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "string_truncation",
+      "bug_location": "collector.py::collect_events_node -> aggregator.py::aggregate_metrics_node",
+      "mechanism_source": "collect_events_node truncates severity to 4 characters using severity[:4]",
+      "canonical_field": "severity",
+      "fix_location": "collector.py",
+      "mechanism_property": "severity field must be the full string ('CRITICAL', 'WARNING', 'ERROR', 'INFO') for exact-match counting in the metric aggregator to work",
+      "mechanism_steps": [
+        "collect_events_node truncates severity: 'CRITICAL'\u2192'CRIT', 'WARNING'\u2192'WARN'",
+        "aggregate_metrics_node maps truncated strings back via lookup dict: CRIT\u2192CRITICAL, WARN\u2192WARNING",
+        "remapped metric counts are correct: CRITICAL=2, WARNING=2, INFO=1",
+        "render_dashboard_node shows correct critical_count=2",
+        "but the compliance export (bypass consumer) reads severity directly from collected events \u2192 'CRIT', 'WARN'",
+        "dashboard reports CRITICAL=2 while compliance export has zero entries with severity CRITICAL"
+      ],
+      "mechanism_outcome": "dashboard metrics are correct via remapping but the compliance export reads raw truncated severity from collected events, creating a disagreement: dashboard says 2 CRITICAL, export shows 0",
+      "trap_description": "aggregate_metrics_node maps truncated strings back to full names via a lookup dict before counting, producing correct metrics, but the compliance export (bypass) reads severity directly from collected events and shows truncated values"
+    },
+    "reference_fix": {
+      "file": "collector.py",
+      "function": "collect_events_node"
+    }
+  },
+  {
+    "id": "logging_pipeline_chain_trap_5",
+    "family": "logging_pipeline_chain",
+    "difficulty": "B+",
+    "task": "The event collector was recently updated and metric counts are now correct. However, the compliance export and log lines show different severity values than the dashboard. Investigate the inconsistency.",
+    "failure_mode": "LOGIC",
+    "trap": "The buggy node adds a corrected field alongside the corrupted one. Downstream nodes use the new field, but bypass consumers and other readers still access the original corrupted field.",
+    "code_files": [
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_5/aggregator.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_5/collector.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_5/dashboard.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_5/data.py",
+      "deep_dependency_chain_cases/logging_pipeline/generated_cases/logging_pipeline_trap_5/formatter.py"
+    ],
+    "ground_truth_bug": {
+      "type": "string_truncation",
+      "location": "collector.py::collect_events_node",
+      "invariant": "severity must be preserved as the full string (INFO/WARNING/ERROR/CRITICAL)",
+      "fix_pattern": "Remove [:4] truncation: use e[\"severity\"] directly"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "string_truncation",
+      "bug_location": "collector.py::collect_events_node -> aggregator.py::aggregate_metrics_node",
+      "mechanism_source": "collect_events_node truncates severity to 4 characters using severity[:4]",
+      "canonical_field": "severity",
+      "fix_location": "collector.py",
+      "mechanism_property": "severity field must be the full string ('CRITICAL', 'WARNING', 'ERROR', 'INFO') for exact-match counting in the metric aggregator to work",
+      "mechanism_steps": [
+        "collect_events_node truncates severity to 4 chars but also stores original_severity",
+        "format_logs_node renders log lines using truncated severity: '[CRIT]', '[WARN]'",
+        "aggregate_metrics_node reads original_severity for counting \u2192 correct metrics",
+        "render_dashboard_node shows correct critical_count=2",
+        "but compliance export (bypass) reads severity field (not original_severity) \u2192 reports 'CRIT', 'WARN' instead of full names"
+      ],
+      "mechanism_outcome": "metrics are correct via original_severity but compliance export and log lines use the truncated severity field, showing 'CRIT' and 'WARN' instead of full names",
+      "trap_description": "collect_events_node adds original_severity alongside the truncated severity field; aggregate_metrics_node uses original_severity for counting, but the compliance export reads severity (truncated) and log lines display '[CRIT]' not '[CRITICAL]'"
+    },
+    "reference_fix": {
+      "file": "collector.py",
+      "function": "collect_events_node"
+    }
+  },
+  {
+    "id": "ml_feature_chain_trap_1",
+    "family": "ml_feature_chain",
+    "difficulty": "D",
+    "task": "The model scorer was recently calibrated and primary predictions now fall in the expected range. However, on a short dataset [5, 15], the score is 0.0 when it should be approximately 0.1. The calibration does not generalize. Investigate.",
+    "failure_mode": "LOGIC",
+    "trap": "The endpoint/final node has been patched to compensate for the upstream bug. The symptom is masked but the root cause remains. The fix is superficial \u2014 it breaks on edge cases or alternate consumers.",
+    "code_files": [
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_1/data.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_1/data_source.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_1/features.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_1/scaler.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_1/scorer.py"
+    ],
+    "ground_truth_bug": {
+      "type": "off_by_one",
+      "location": "features.py::feature_engineer_node",
+      "invariant": "rolling mean must use window_size (not window_size - 1) values",
+      "fix_pattern": "Use actual_window = min(window, len(values)) instead of min(window - 1, len(values))"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "off_by_one",
+      "bug_location": "features.py::feature_engineer_node -> scaler.py::scaler_node",
+      "mechanism_source": "feature_engineer_node computes rolling mean with window_size - 1 instead of window_size",
+      "canonical_field": "rolling_mean",
+      "fix_location": "features.py",
+      "mechanism_property": "rolling mean must average the last window_size values (e.g., window=3 means average of last 3), not window_size - 1 values",
+      "mechanism_steps": [
+        "feature_engineer_node uses window-1: rolling_mean = 45.0 (buggy)",
+        "scaler_node standardizes: (45-30)/15 = 1.0",
+        "model_scorer_node computes 0.5 + 0.3\u00d71.0 = 0.8, then subtracts 0.1 bias \u2192 0.7",
+        "primary score is correct (0.7) by coincidence of the bias matching the error",
+        "short dataset [5,15]: both buggy and correct give mean=10, score=0.1, but bias makes it 0.0",
+        "varied dataset [10,20,50]: buggy mean=35, correct mean=26.67; error is 8.33, not 5.0 \u2192 bias of 0.1 in score space doesn't compensate"
+      ],
+      "mechanism_outcome": "primary score is correct by coincidence but the hardcoded -0.1 bias over-corrects short datasets and under-corrects varied datasets",
+      "trap_description": "model_scorer_node subtracts a hardcoded 0.1 bias from all scores (0.8-0.1=0.7), which works for the primary dataset but over-corrects on short datasets (score 0.1 becomes 0.0) and under-corrects on varied datasets"
+    },
+    "reference_fix": {
+      "file": "features.py",
+      "function": "feature_engineer_node"
+    }
+  },
+  {
+    "id": "ml_feature_chain_trap_3",
+    "family": "ml_feature_chain",
+    "difficulty": "C",
+    "task": "The scaler was recently patched and primary scores are now correct. However, on the varied dataset [10, 20, 50], the score is approximately 0.5 instead of the expected 0.433. The correction does not generalize. Investigate.",
+    "failure_mode": "LOGIC",
+    "trap": "A middle node applies a heuristic or hardcoded correction that works for the primary test case but fails on alternate datasets or edge cases.",
+    "code_files": [
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_3/data.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_3/data_source.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_3/features.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_3/scaler.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_3/scorer.py"
+    ],
+    "ground_truth_bug": {
+      "type": "off_by_one",
+      "location": "features.py::feature_engineer_node",
+      "invariant": "rolling mean must use window_size (not window_size - 1) values",
+      "fix_pattern": "Use actual_window = min(window, len(values)) instead of min(window - 1, len(values))"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "off_by_one",
+      "bug_location": "features.py::feature_engineer_node -> scaler.py::scaler_node",
+      "mechanism_source": "feature_engineer_node computes rolling mean with window_size - 1 instead of window_size",
+      "canonical_field": "rolling_mean",
+      "fix_location": "features.py",
+      "mechanism_property": "rolling mean must average the last window_size values (e.g., window=3 means average of last 3), not window_size - 1 values",
+      "mechanism_steps": [
+        "feature_engineer_node uses window-1: rolling_mean = 45.0 (buggy)",
+        "scaler_node subtracts hardcoded 5.0 from rolling_mean before standardizing: 45-5=40",
+        "standardized: (40-30)/15 = 0.667 \u2192 score = 0.5 + 0.3\u00d70.667 = 0.7",
+        "primary score is correct because buggy-correct difference is exactly 5.0",
+        "varied dataset [10,20,50]: buggy mean=35, correct mean=26.67 \u2192 error is 8.33, not 5.0",
+        "scaler subtracts 5.0: 35-5=30, scaled=0, score=0.5 instead of correct 0.433"
+      ],
+      "mechanism_outcome": "primary score is correct because the 5.0 bias happens to match the error for that dataset, but varied datasets have different errors and the hardcoded correction fails",
+      "trap_description": "scaler_node subtracts a hardcoded 5.0 from rolling_mean before standardizing, exactly compensating for the primary dataset (buggy 45 - 5 = correct 40) but failing on alternate data where the error is not 5.0"
+    },
+    "reference_fix": {
+      "file": "features.py",
+      "function": "feature_engineer_node"
+    }
+  },
+  {
+    "id": "ml_feature_chain_trap_4",
+    "family": "ml_feature_chain",
+    "difficulty": "B+",
+    "task": "The scaler was recently updated and predictions are now correct. However, the feature monitoring dashboard reports a different rolling_mean value than what the scorer actually used. Investigate the inconsistency.",
+    "failure_mode": "LOGIC",
+    "trap": "A downstream node re-derives or compensates for the corrupted data, producing correct output through the main path. But a bypass consumer still reads the corrupted upstream data.",
+    "code_files": [
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_4/data.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_4/data_source.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_4/features.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_4/scaler.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_4/scorer.py"
+    ],
+    "ground_truth_bug": {
+      "type": "off_by_one",
+      "location": "features.py::feature_engineer_node",
+      "invariant": "rolling mean must use window_size (not window_size - 1) values",
+      "fix_pattern": "Use actual_window = min(window, len(values)) instead of min(window - 1, len(values))"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "off_by_one",
+      "bug_location": "features.py::feature_engineer_node -> scaler.py::scaler_node",
+      "mechanism_source": "feature_engineer_node computes rolling mean with window_size - 1 instead of window_size",
+      "canonical_field": "rolling_mean",
+      "fix_location": "features.py",
+      "mechanism_property": "rolling mean must average the last window_size values (e.g., window=3 means average of last 3), not window_size - 1 values",
+      "mechanism_steps": [
+        "feature_engineer_node uses window-1: rolling_mean = 45.0 (buggy)",
+        "feature_engineer_node also passes raw values=[10,20,30,40,50] and window_size=3 through to scaler",
+        "scaler_node re-derives correct rolling_mean from raw values: (30+40+50)/3 = 40.0",
+        "standardized: (40-30)/15 = 0.667 \u2192 score = 0.5 + 0.3\u00d70.667 = 0.7",
+        "monitoring dashboard reads rolling_mean from the feature dict \u2192 45.0 (buggy value)"
+      ],
+      "mechanism_outcome": "score is correct because scaler re-derives from raw data, but monitoring shows rolling_mean=45 because the feature dict still contains the buggy value",
+      "trap_description": "feature_engineer_node passes raw values through to the scaler which re-derives the correct rolling_mean, but the monitoring dashboard (bypass) reads rolling_mean from the feature dict and displays the wrong value 45.0"
+    },
+    "reference_fix": {
+      "file": "features.py",
+      "function": "feature_engineer_node"
+    }
+  },
+  {
+    "id": "ml_feature_chain_trap_5",
+    "family": "ml_feature_chain",
+    "difficulty": "B+",
+    "task": "The feature pipeline was recently updated and predictions are correct. However, the monitoring dashboard displays a different rolling_mean than what the scaler used for standardization. Investigate the inconsistency.",
+    "failure_mode": "LOGIC",
+    "trap": "The buggy node adds a corrected field alongside the corrupted one. Downstream nodes use the new field, but bypass consumers and other readers still access the original corrupted field.",
+    "code_files": [
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_5/data.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_5/data_source.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_5/features.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_5/scaler.py",
+      "deep_dependency_chain_cases/ml_feature/generated_cases/ml_feature_trap_5/scorer.py"
+    ],
+    "ground_truth_bug": {
+      "type": "off_by_one",
+      "location": "features.py::feature_engineer_node",
+      "invariant": "rolling mean must use window_size (not window_size - 1) values",
+      "fix_pattern": "Use actual_window = min(window, len(values)) instead of min(window - 1, len(values))"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "off_by_one",
+      "bug_location": "features.py::feature_engineer_node -> scaler.py::scaler_node",
+      "mechanism_source": "feature_engineer_node computes rolling mean with window_size - 1 instead of window_size",
+      "canonical_field": "rolling_mean",
+      "fix_location": "features.py",
+      "mechanism_property": "rolling mean must average the last window_size values (e.g., window=3 means average of last 3), not window_size - 1 values",
+      "mechanism_steps": [
+        "feature_engineer_node uses window-1: rolling_mean = 45.0 (buggy)",
+        "feature_engineer_node also computes corrected_rolling_mean = (30+40+50)/3 = 40.0",
+        "scaler_node reads corrected_rolling_mean instead of rolling_mean",
+        "standardized: (40-30)/15 = 0.667 \u2192 score = 0.5 + 0.3\u00d70.667 = 0.7",
+        "monitoring dashboard reads rolling_mean (not corrected_rolling_mean) \u2192 45.0"
+      ],
+      "mechanism_outcome": "score is correct via corrected_rolling_mean but monitoring displays rolling_mean=45 because it reads the original buggy field",
+      "trap_description": "feature_engineer_node adds corrected_rolling_mean=40.0 alongside the buggy rolling_mean=45.0; scaler_node uses corrected_rolling_mean for standardization, but monitoring reads rolling_mean and displays 45.0"
+    },
+    "reference_fix": {
+      "file": "features.py",
+      "function": "feature_engineer_node"
+    }
+  },
+  {
+    "id": "search_index_chain_trap_3",
+    "family": "search_index_chain",
+    "difficulty": "C",
+    "task": "The field extractor was recently updated and metadata no longer appears in search results. However, searching for \"javascript\" returns no results even though documents have that tag. Some content appears to be missing from the index. Investigate.",
+    "failure_mode": "LOGIC",
+    "trap": "A middle node applies a heuristic or hardcoded correction that works for the primary test case but fails on alternate datasets or edge cases.",
+    "code_files": [
+      "deep_dependency_chain_cases/search_index/generated_cases/search_index_trap_3/data.py",
+      "deep_dependency_chain_cases/search_index/generated_cases/search_index_trap_3/extractor.py",
+      "deep_dependency_chain_cases/search_index/generated_cases/search_index_trap_3/indexer.py",
+      "deep_dependency_chain_cases/search_index/generated_cases/search_index_trap_3/loader.py",
+      "deep_dependency_chain_cases/search_index/generated_cases/search_index_trap_3/tokenizer.py"
+    ],
+    "ground_truth_bug": {
+      "type": "missing_field_filter",
+      "location": "extractor.py::extract_fields",
+      "invariant": "content_fields must contain only keys from CONTENT_KEYS (title, body, tags)",
+      "fix_pattern": "Skip keys not in CONTENT_KEYS: if key not in CONTENT_KEYS: continue"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "missing_field_filter",
+      "bug_location": "extractor.py::extract_fields -> tokenizer.py::tokenize",
+      "mechanism_source": "extract_fields includes all string-valued fields from the document in content_fields, not just content keys",
+      "canonical_field": "content_fields",
+      "fix_location": "extractor.py",
+      "mechanism_property": "content_fields must contain only CONTENT_KEYS (title, body, tags), excluding metadata fields (id, author, created_at)",
+      "mechanism_steps": [
+        "extract_fields hardcodes content keys to {'title', 'body'} instead of using CONTENT_KEYS",
+        "metadata fields (id, author, created_at) are correctly excluded",
+        "but 'tags' field is also excluded because it's not in the hardcoded set",
+        "tokenize_node only processes title and body text",
+        "build_index_node creates an index missing all tag-based tokens",
+        "searching for 'javascript' (a tag on doc3) returns no results"
+      ],
+      "mechanism_outcome": "metadata is removed from the index but tags are also lost because the extractor uses a hardcoded set that's narrower than CONTENT_KEYS",
+      "trap_description": "extract_fields hardcodes content keys to {title, body} only, removing metadata from content_fields but also dropping the tags field \u2014 tag-based searches like 'javascript' return no results"
+    },
+    "reference_fix": {
+      "file": "extractor.py",
+      "function": "extract_fields"
+    }
+  },
+  {
+    "id": "search_index_chain_trap_5",
+    "family": "search_index_chain",
+    "difficulty": "B+",
+    "task": "The search pipeline was recently updated and the search index no longer returns false positives. However, the raw field audit reports that metadata fields are still present in the extracted data. Investigate the inconsistency.",
+    "failure_mode": "LOGIC",
+    "trap": "The buggy node adds a corrected field alongside the corrupted one. Downstream nodes use the new field, but bypass consumers and other readers still access the original corrupted field.",
+    "code_files": [
+      "deep_dependency_chain_cases/search_index/generated_cases/search_index_trap_5/data.py",
+      "deep_dependency_chain_cases/search_index/generated_cases/search_index_trap_5/extractor.py",
+      "deep_dependency_chain_cases/search_index/generated_cases/search_index_trap_5/indexer.py",
+      "deep_dependency_chain_cases/search_index/generated_cases/search_index_trap_5/loader.py",
+      "deep_dependency_chain_cases/search_index/generated_cases/search_index_trap_5/tokenizer.py"
+    ],
+    "ground_truth_bug": {
+      "type": "missing_field_filter",
+      "location": "extractor.py::extract_fields",
+      "invariant": "content_fields must contain only keys from CONTENT_KEYS (title, body, tags)",
+      "fix_pattern": "Skip keys not in CONTENT_KEYS: if key not in CONTENT_KEYS: continue"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "missing_field_filter",
+      "bug_location": "extractor.py::extract_fields -> tokenizer.py::tokenize",
+      "mechanism_source": "extract_fields includes all string-valued fields from the document in content_fields, not just content keys",
+      "canonical_field": "content_fields",
+      "fix_location": "extractor.py",
+      "mechanism_property": "content_fields must contain only CONTENT_KEYS (title, body, tags), excluding metadata fields (id, author, created_at)",
+      "mechanism_steps": [
+        "extract_fields includes all string fields in content_fields (buggy, with metadata)",
+        "extract_fields also creates clean_content dict filtered to CONTENT_KEYS only",
+        "tokenize_node reads clean_content instead of content_fields for tokenization",
+        "build_index_node creates a clean index from correctly filtered tokens",
+        "but raw field audit (bypass) reads content_fields keys directly \u2192 reports metadata present"
+      ],
+      "mechanism_outcome": "search index is clean via clean_content but the raw field audit reads content_fields and reports metadata fields (id, author, created_at) are still included",
+      "trap_description": "extract_fields adds a clean_content dict filtered to CONTENT_KEYS alongside the buggy content_fields; tokenize_node reads clean_content for indexing, but the raw field audit (bypass) reads content_fields keys and still reports metadata present"
+    },
+    "reference_fix": {
+      "file": "extractor.py",
+      "function": "extract_fields"
+    }
+  },
+  {
+    "id": "serialization_pipeline_chain_trap_1",
+    "family": "serialization_pipeline_chain",
+    "difficulty": "D",
+    "task": "The transport layer was recently patched and now reports all timestamps as string type. However, downstream ISO parsers still fail \u2014 the string values don't contain the expected format. Investigate.",
+    "failure_mode": "TYPE_ERROR",
+    "trap": "The endpoint/final node has been patched to compensate for the upstream bug. The symptom is masked but the root cause remains. The fix is superficial \u2014 it breaks on edge cases or alternate consumers.",
+    "code_files": [
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_1/builder.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_1/compressor.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_1/data.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_1/serializer.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_1/transport.py"
+    ],
+    "ground_truth_bug": {
+      "type": "type_conversion_in_serializer",
+      "location": "serializer.py::serialize",
+      "invariant": "created_at must remain an ISO string throughout the pipeline",
+      "fix_pattern": "Use created_at: record[\"created_at\"] instead of looking up EPOCH_TABLE"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "type_conversion_in_serializer",
+      "bug_location": "serializer.py::serialize -> transport.py::transport",
+      "mechanism_source": "serialize converts created_at from ISO string to epoch integer via EPOCH_TABLE lookup",
+      "canonical_field": "created_at",
+      "fix_location": "serializer.py",
+      "mechanism_property": "created_at must remain an ISO 8601 string ('YYYY-MM-DDTHH:MM:SS') throughout the pipeline for downstream string-based operations to work",
+      "mechanism_steps": [
+        "serialize converts created_at to epoch integer (e.g., 1743501600)",
+        "compress_node dedup keys use str(1743501600) = '1743501600'",
+        "transport_node calls str() on all timestamps before sending",
+        "output contains strings like '1743501600' \u2014 passes isinstance(str) check",
+        "but '1743501600' has no 'T' separator \u2014 not valid ISO 8601",
+        "downstream ISO parsers fail on the stringified epoch values"
+      ],
+      "mechanism_outcome": "timestamps are strings but contain epoch values ('1743501600') not ISO format, so type checks pass but format validation fails",
+      "trap_description": "transport_node calls str() on all timestamps before sending, producing strings like '1743501600' that pass a type check (isinstance str) but lack the 'T' separator expected by ISO 8601 parsers"
+    },
+    "reference_fix": {
+      "file": "serializer.py",
+      "function": "serialize"
+    }
+  },
+  {
+    "id": "serialization_pipeline_chain_trap_3",
+    "family": "serialization_pipeline_chain",
+    "difficulty": "C",
+    "task": "The serialization pipeline was recently updated and timestamps are now strings. However, downstream parsers that expect ISO 8601 format still reject the values. The format appears close but not quite right. Investigate.",
+    "failure_mode": "TYPE_ERROR",
+    "trap": "A middle node applies a heuristic or hardcoded correction that works for the primary test case but fails on alternate datasets or edge cases.",
+    "code_files": [
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_3/builder.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_3/compressor.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_3/data.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_3/serializer.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_3/transport.py"
+    ],
+    "ground_truth_bug": {
+      "type": "type_conversion_in_serializer",
+      "location": "serializer.py::serialize",
+      "invariant": "created_at must remain an ISO string throughout the pipeline",
+      "fix_pattern": "Use created_at: record[\"created_at\"] instead of looking up EPOCH_TABLE"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "type_conversion_in_serializer",
+      "bug_location": "serializer.py::serialize -> transport.py::transport",
+      "mechanism_source": "serialize converts created_at from ISO string to epoch integer via EPOCH_TABLE lookup",
+      "canonical_field": "created_at",
+      "fix_location": "serializer.py",
+      "mechanism_property": "created_at must remain an ISO 8601 string ('YYYY-MM-DDTHH:MM:SS') throughout the pipeline for downstream string-based operations to work",
+      "mechanism_steps": [
+        "serialize converts created_at to epoch, then converts back via EPOCH_TO_ISO",
+        "the reverse conversion replaces 'T' with a space: '2026-04-01 10:00:00'",
+        "timestamps are now strings (passes type check) with human-readable dates",
+        "but the space separator violates ISO 8601 which requires 'T'",
+        "compress_node dedup keys use the space-separated string",
+        "transport_node outputs the space-separated format"
+      ],
+      "mechanism_outcome": "timestamps are human-readable strings but use space separator instead of 'T', failing ISO 8601 format validation",
+      "trap_description": "serialize converts to epoch then back via EPOCH_TO_ISO but replaces 'T' with a space separator ('2026-04-01 10:00:00'), which fails ISO 8601 validation requiring the 'T' separator"
+    },
+    "reference_fix": {
+      "file": "serializer.py",
+      "function": "serialize"
+    }
+  },
+  {
+    "id": "serialization_pipeline_chain_trap_4",
+    "family": "serialization_pipeline_chain",
+    "difficulty": "B+",
+    "task": "The compressor was recently enhanced and transport output now contains correct ISO timestamps. However, the debug log shows different timestamp formats than the transport output. Investigate the inconsistency.",
+    "failure_mode": "TYPE_ERROR",
+    "trap": "A downstream node re-derives or compensates for the corrupted data, producing correct output through the main path. But a bypass consumer still reads the corrupted upstream data.",
+    "code_files": [
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_4/builder.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_4/compressor.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_4/data.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_4/serializer.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_4/transport.py"
+    ],
+    "ground_truth_bug": {
+      "type": "type_conversion_in_serializer",
+      "location": "serializer.py::serialize",
+      "invariant": "created_at must remain an ISO string throughout the pipeline",
+      "fix_pattern": "Use created_at: record[\"created_at\"] instead of looking up EPOCH_TABLE"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "type_conversion_in_serializer",
+      "bug_location": "serializer.py::serialize -> transport.py::transport",
+      "mechanism_source": "serialize converts created_at from ISO string to epoch integer via EPOCH_TABLE lookup",
+      "canonical_field": "created_at",
+      "fix_location": "serializer.py",
+      "mechanism_property": "created_at must remain an ISO 8601 string ('YYYY-MM-DDTHH:MM:SS') throughout the pipeline for downstream string-based operations to work",
+      "mechanism_steps": [
+        "serialize converts created_at to epoch integer (e.g., 1743501600)",
+        "compress_node detects integer created_at and converts to ISO via EPOCH_TO_ISO",
+        "dedup keys use the correct ISO string",
+        "compressed records have created_at as correct ISO string",
+        "transport_node outputs correct ISO timestamps",
+        "but debug log reads created_at directly from serialize output \u2192 epoch integers"
+      ],
+      "mechanism_outcome": "transport output is correct ISO strings but the debug log (which reads serialized records before compression) shows epoch integers, creating an inconsistency",
+      "trap_description": "compress_node detects integer timestamps and converts them back to ISO strings via EPOCH_TO_ISO before dedup and output, producing correct compressed output, but the debug log (bypass) reads created_at directly from serialized records and still shows epoch integers"
+    },
+    "reference_fix": {
+      "file": "serializer.py",
+      "function": "serialize"
+    }
+  },
+  {
+    "id": "serialization_pipeline_chain_trap_5",
+    "family": "serialization_pipeline_chain",
+    "difficulty": "B+",
+    "task": "The serialization pipeline was recently updated and transport output contains correct ISO timestamps. However, the debug log (which reads directly from serialized records) shows a different format. Investigate the inconsistency.",
+    "failure_mode": "TYPE_ERROR",
+    "trap": "The buggy node adds a corrected field alongside the corrupted one. Downstream nodes use the new field, but bypass consumers and other readers still access the original corrupted field.",
+    "code_files": [
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_5/builder.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_5/compressor.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_5/data.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_5/serializer.py",
+      "deep_dependency_chain_cases/serialization_pipeline/generated_cases/serialization_pipeline_trap_5/transport.py"
+    ],
+    "ground_truth_bug": {
+      "type": "type_conversion_in_serializer",
+      "location": "serializer.py::serialize",
+      "invariant": "created_at must remain an ISO string throughout the pipeline",
+      "fix_pattern": "Use created_at: record[\"created_at\"] instead of looking up EPOCH_TABLE"
+    },
+    "oracle_ground_truth": {
+      "bug_type": "type_conversion_in_serializer",
+      "bug_location": "serializer.py::serialize -> transport.py::transport",
+      "mechanism_source": "serialize converts created_at from ISO string to epoch integer via EPOCH_TABLE lookup",
+      "canonical_field": "created_at",
+      "fix_location": "serializer.py",
+      "mechanism_property": "created_at must remain an ISO 8601 string ('YYYY-MM-DDTHH:MM:SS') throughout the pipeline for downstream string-based operations to work",
+      "mechanism_steps": [
+        "serialize converts created_at to epoch and also stores the ISO string in created_at_iso",
+        "compress_node reads created_at_iso for dedup and copies it into created_at in output",
+        "compressed records have correct ISO created_at",
+        "transport_node outputs correct ISO timestamps",
+        "but debug log reads created_at from serialized records (before compression) \u2192 epoch integers"
+      ],
+      "mechanism_outcome": "transport output has correct ISO timestamps via created_at_iso but the debug log reads the original created_at field from serialized records and shows epoch integers",
+      "trap_description": "serialize adds created_at_iso alongside the epoch created_at; compress_node reads created_at_iso for dedup and copies it to created_at in output, but the debug log reads created_at from the serialized records and shows epoch integers"
+    },
+    "reference_fix": {
+      "file": "serializer.py",
+      "function": "serialize"
+    }
   }
 ]

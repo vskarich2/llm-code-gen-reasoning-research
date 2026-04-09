@@ -39,9 +39,9 @@ def score_execution(joined, artifact, classifier_result, exec_result,
     ev["execution_category"] = joined["execution_category"]
     ev["reasoning_execution_alignment"] = (
         joined["reasoning_execution_alignment"])
-    # FIX-NOW-5: None mechanism_correct means "not evaluated",
+    # FIX-NOW-5: None reasoning_consistent means "not evaluated",
     # not "wrong". Do not conflate with False.
-    mc = joined["mechanism_correct"]
+    mc = joined.get("reasoning_consistent") or joined.get("reasoning_consistent")
     if mc is None:
         ev["leg_candidate"] = None  # unknown
         ev["lucky_fix_candidate"] = None  # unknown

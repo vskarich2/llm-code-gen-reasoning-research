@@ -820,9 +820,3 @@ def assemble_original(case: dict, mode: str | None = None) -> AssemblyResult:
     return CodeAssembler(mode=mode).assemble(concat, case)
 
 
-def assemble_code(code: str, case: dict, mode: str | None = None) -> AssemblyResult:
-    """Assemble arbitrary code against a case through the canonical assembly path.
-
-    Used by validation and preflight to load reference fixes, mutants, etc.
-    """
-    return CodeAssembler(mode=mode).assemble(code, case)

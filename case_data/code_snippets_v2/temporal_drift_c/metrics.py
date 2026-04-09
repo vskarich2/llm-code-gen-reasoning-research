@@ -1,14 +1,4 @@
-"""Raw metrics computation.
-
-compute_raw_stats MUST receive the original (untransformed) case_data.
-"""
-
-
 def compute_raw_stats(data):
-    """Compute statistics on raw (untransformed) case_data.
-
-    Keys: raw_max, raw_min, raw_sum, raw_count.
-    """
     if not data:
         return {"raw_max": 0, "raw_min": 0, "raw_sum": 0, "raw_count": 0}
     return {
@@ -20,7 +10,6 @@ def compute_raw_stats(data):
 
 
 def compute_derived(raw_stats):
-    """Compute derived metrics from raw stats."""
     count = raw_stats.get("raw_count", 0)
     if count == 0:
         return {"raw_mean": 0}

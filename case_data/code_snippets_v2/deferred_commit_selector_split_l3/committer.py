@@ -16,7 +16,6 @@ def run_pipeline():
     snap = snapshot(candidates)
     normalized = normalize(snap)
 
-    # BUG: resolves using positional + fallback heuristic
     if len(normalized) > 1 and normalized[0]["normalized_score"] > normalized[1]["normalized_score"]:
         chosen = normalized[0]
     else:

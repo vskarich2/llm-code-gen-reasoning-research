@@ -131,6 +131,7 @@ class EvaluationConfig:
     classifier_template: str = "classify_reasoning_v2"  # .j2 template name for classifier
     classifier_schema_variant: str = "v2_semicolon"  # "v2_semicolon" | "v3_json"
     generation_schema_variant: str = "v2"  # "v2" | "v3"
+    depth_hint_level: str | None = None  # "gentle", "directed", "explicit", or None (disabled)
 
 
 @dataclass
@@ -429,12 +430,13 @@ def _parse_config(raw: dict) -> ExperimentConfig:
         classifier_template=eval_section.get("classifier_template", "classify_reasoning_v2"),
         classifier_schema_variant=eval_section.get("classifier_schema_variant", "v2_semicolon"),
         generation_schema_variant=eval_section.get("generation_schema_variant", "v2"),
+        depth_hint_level=eval_section.get("depth_hint_level", None),
     )
 
     _eval_allowed = {"leg", "failure_classification", "alignment",
                      "classifier_mode", "reasoning_correct_mode",
                      "classifier_template", "classifier_schema_variant",
-                     "generation_schema_variant"}
+                     "generation_schema_variant", "depth_hint_level"}
     _unknown_eval = set(eval_section.keys()) - _eval_allowed
     if _unknown_eval:
         raise ValueError(

@@ -1,18 +1,11 @@
-"""Scheduler with decorator that tracks call history."""
+
 
 from worker import process, batch_process
-
 
 _shared_log = []
 
 
 def with_history(func, history=_shared_log):
-    """Decorator that records call history for a function.
-
-    Invariant: each decorated function must have its OWN
-    independent history list.
-    """
-
     def wrapper(*args, **kwargs):
         result = func(*args, **kwargs)
         history.append({"func": func.__name__, "args_count": len(args)})
@@ -22,21 +15,16 @@ def with_history(func, history=_shared_log):
     wrapper.clear_history = lambda: history.clear()
     return wrapper
 
-
 @with_history
 def schedule_one(task):
-    """Schedule and process a single task."""
     return process(task)
-
 
 @with_history
 def schedule_batch(tasks):
-    """Schedule and process a batch of tasks."""
     return batch_process(tasks)
 
 
 def get_all_stats():
-    """Get combined stats (distractor)."""
     return {
         "one_calls": len(schedule_one.get_history()),
         "batch_calls": len(schedule_batch.get_history()),

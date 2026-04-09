@@ -6,7 +6,6 @@ def snapshot(candidates):
             "payload": c["payload"],
             "priority": c["priority"],
             "raw_score": c["raw_score"],
-            # lineage is present but indirect
             "meta": {"src": c["source_id"]}
         })
     return snap

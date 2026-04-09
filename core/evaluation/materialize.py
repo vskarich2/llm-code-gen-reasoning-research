@@ -126,15 +126,18 @@ def _extract_row(event: dict) -> dict | None:
         execution_success = bool(execution.get("passed"))
 
     # ── Reasoning axis ──
-    mechanism_correct = evaluation.get("mechanism_correct")
+    reasoning_consistent = evaluation.get("reasoning_consistent") or evaluation.get("reasoning_consistent")
     commitments_valid = evaluation.get("commitments_valid")
     alignment_positive = evaluation.get("alignment_positive")
     reasoning_sufficient = evaluation.get("reasoning_sufficient")
 
     # Fallback for old events: read from payload
-    if mechanism_correct is None:
-        mech_dim = classification.get("mechanism_identified") or payload.get("mechanism_identified_dim")
-        mechanism_correct = (mech_dim == "CORRECT") if mech_dim else payload.get("mechanism_correct")
+    if reasoning_consistent is None:
+        ric_dim = (classification.get("reasoning_internal_consistency")
+                   or classification.get("reasoning_internal_consistency")
+                   or payload.get("reasoning_internal_consistency_dim")
+                   or payload.get("reasoning_internal_consistency_dim"))
+        reasoning_consistent = (ric_dim == "CORRECT") if ric_dim else payload.get("reasoning_consistent") or payload.get("reasoning_consistent")
 
     if commitments_valid is None:
         comm_dim = classification.get("commitments_satisfied") or payload.get("commitments_satisfied_dim")
@@ -145,8 +148,8 @@ def _extract_row(event: dict) -> dict | None:
         alignment_positive = (align_dim == "CORRECT") if align_dim else payload.get("alignment_positive")
 
     if reasoning_sufficient is None:
-        if mechanism_correct is not None and commitments_valid is not None:
-            reasoning_sufficient = bool(mechanism_correct) and bool(commitments_valid)
+        if reasoning_consistent is not None and commitments_valid is not None:
+            reasoning_sufficient = bool(reasoning_consistent) and bool(commitments_valid)
 
     # ── Outcome class ──
     outcome_class = evaluation.get("outcome_class")
@@ -192,7 +195,7 @@ def _extract_row(event: dict) -> dict | None:
     commitment_state = classification.get("commitment_state")
 
     if classifier_ran is None:
-        classifier_ran = payload.get("classify_v2_parse_error") is None and payload.get("mechanism_identified_dim") is not None
+        classifier_ran = payload.get("classify_v2_parse_error") is None and (payload.get("reasoning_internal_consistency_dim") is not None or payload.get("reasoning_internal_consistency_dim") is not None)
 
     if commitment_state is None:
         commitment_state = payload.get("commitment_source_for_classifier") or "none"
@@ -224,7 +227,7 @@ def _extract_row(event: dict) -> dict | None:
         "execution_category": execution_category,
 
         # Reasoning axis
-        "mechanism_correct": mechanism_correct,
+        "reasoning_consistent": reasoning_consistent,
         "commitments_valid": commitments_valid,
         "alignment_positive": alignment_positive,
         "reasoning_sufficient": reasoning_sufficient,

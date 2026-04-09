@@ -8,5 +8,5 @@ def normalize(candidates):
             "normalized_score": score,
             "meta": c["meta"]
         })
-    # reorder based on new scoring
+
     return sorted(normalized, key=lambda x: x["normalized_score"], reverse=True)

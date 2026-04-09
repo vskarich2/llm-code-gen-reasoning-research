@@ -1,8 +1,6 @@
 BASE_CONTEXT = {"flags": {"force_fallback": False}}
 
-
 def build_base_context():
-    # BUG: shallow copy preserves nested aliasing
     return BASE_CONTEXT.copy()
 
 

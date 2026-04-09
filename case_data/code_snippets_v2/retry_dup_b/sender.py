@@ -1,5 +1,3 @@
-"""Message sender with retry and store integration."""
-
 from store import append, notify, get_messages, get_notifications
 
 _attempt_count = 0
@@ -23,7 +21,6 @@ def send(msg, fail_first=False):
 
 
 def send_with_retry(msg, max_retries=2, fail_first=False):
-    """Retry send on transient errors."""
     last_error = None
     for attempt in range(max_retries):
         try:

@@ -77,7 +77,7 @@ def run_oracle_evaluation(
 
     NO LEAKAGE CONTRACT: This function must NEVER receive or access:
     - execution results (exec_result, passed, score)
-    - classifier results (mechanism_identified, etc.)
+    - classifier results (reasoning_internal_consistency, etc.)
     - reconstructed/generated code
     - AST evaluation results
     - normalized reasoning text
@@ -181,7 +181,7 @@ def compute_disagreement(classifier_result, oracle_result: dict, config) -> dict
 
     classifier_result:
         - v3 schema: reasoning_internal_consistency
-        - v2 schema: mechanism_identified (legacy fallback)
+        - v2 schema: reasoning_internal_consistency (legacy: reasoning_internal_consistency)
 
     oracle_result:
         - oracle_correct: bool (ground truth correctness)
@@ -200,7 +200,7 @@ def compute_disagreement(classifier_result, oracle_result: dict, config) -> dict
 
         # fallback for legacy v2
         if mech is None:
-            mech = classifier_result.get("mechanism_identified")
+            mech = classifier_result.get("reasoning_internal_consistency")
 
         cls_ran = classifier_result.get("classifier_ran", mech is not None)
 
@@ -208,7 +208,7 @@ def compute_disagreement(classifier_result, oracle_result: dict, config) -> dict
         mech = getattr(classifier_result, "reasoning_internal_consistency", None)
 
         if mech is None:
-            mech = getattr(classifier_result, "mechanism_identified", None)
+            mech = getattr(classifier_result, "reasoning_internal_consistency", None)
 
         # safer check than previous version
         parse_error = getattr(classifier_result, "parse_error", None)

@@ -7,5 +7,4 @@ def normalize(candidates):
         for c in candidates
     ]
 
-    # Normalization intentionally reorders by transformed score.
     return sorted(finalized, key=lambda c: -c['final_score'])

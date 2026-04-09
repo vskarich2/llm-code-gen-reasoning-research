@@ -1,0 +1,302 @@
+{
+  "django__django-14315": {
+    "bug_type": "semantic_truthiness_error",
+    "bug_location": "django/db/backends/base/client.py::runshell + django/db/backends/postgresql/client.py::settings_to_cmd_args_env",
+    "mechanism_source": "PostgreSQL settings_to_cmd_args_env returns empty dict {} when no password/service/ssl options are set, and runshell uses 'if env:' which is falsey for empty dict",
+    "mechanism_property": "subprocess.run(env=None) inherits parent environment; subprocess.run(env={}) passes empty environment, stripping all env vars",
+    "mechanism_steps": [
+      "DatabaseClient.settings_to_cmd_args_env initializes env={} and only populates it if password/service/ssl options exist",
+      "When no such options are configured, the method returns (args, {}) — an empty dict, not None",
+      "BaseDatabaseClient.runshell checks 'if env:' which is False for empty dict, skipping the os.environ merge",
+      "subprocess.run is called with env={} instead of env=None, stripping all environment variables from the child process",
+      "The database client shell fails because PATH and other required env vars are missing"
+    ],
+    "mechanism_outcome": "Database shell (psql) fails to start or loses environment variables when no password/SSL options are configured",
+    "trap_description": "Adding 'if env is not None' guard without also fixing the postgresql client to return None instead of {} when no env vars are set — need both files changed"
+  },
+  "sphinx-doc__sphinx-8551": {
+    "bug_type": "missing_context_propagation",
+    "bug_location": "sphinx/util/docfields.py::TypedField.make_field + sphinx/domains/python.py::PyXrefMixin.make_xref",
+    "mechanism_source": "When docfields creates cross-references for :type: and :rtype: annotations, it does not pass the py:module context to the pending_xref node",
+    "mechanism_property": "Cross-references in :type: fields must carry the current module context (py:module) to enable proper name resolution without ambiguity warnings",
+    "mechanism_steps": [
+      "User writes :type: or :rtype: with an unqualified class name in a module's docstring",
+      "DocFieldTransformer.transform calls TypedField.make_field which calls make_xref to create pending_xref nodes",
+      "PyXrefMixin.make_xref creates the pending_xref node but does not set the py:module attribute on it",
+      "During reference resolution, the resolver searches all modules for the unqualified name instead of starting from the current module",
+      "Multiple matches are found across different modules, triggering a false 'ambiguous class lookup' warning"
+    ],
+    "mechanism_outcome": "False 'ambiguous class lookup' warnings when using :type: and :rtype: with unqualified class names",
+    "trap_description": "Fixing only python.py without also fixing docfields.py, or adding module context in the wrong location in the xref creation chain"
+  },
+  "matplotlib__matplotlib-25479": {
+    "bug_type": "name_identity_mismatch",
+    "bug_location": "lib/matplotlib/cm.py::ColormapRegistry.register + lib/matplotlib/colors.py::Colormap",
+    "mechanism_source": "ColormapRegistry.register stores a colormap under the registry name but does not update the colormap's internal .name attribute to match",
+    "mechanism_property": "After registration, cmap.name must equal the name used for registration, otherwise lookups by name produce objects whose .name differs from the lookup key",
+    "mechanism_steps": [
+      "User creates a colormap with name='original' and registers it as 'alias' via cm.register(cmap, name='alias')",
+      "ColormapRegistry.register stores a copy of the colormap under key 'alias' but does not update the copy's .name attribute",
+      "The stored colormap still has .name='original' internally",
+      "When retrieved via cm['alias'], the returned colormap's .name is 'original', not 'alias'",
+      "Equality checks and re-registration logic break because the name identity assumption is violated"
+    ],
+    "mechanism_outcome": "Registered colormap's .name attribute doesn't match its registry key, causing confusion in lookups and equality checks",
+    "trap_description": "Fixing only cm.py without updating colors.py Colormap class, or modifying the wrong method (get vs register)"
+  },
+  "django__django-16938": {
+    "bug_type": "queryset_method_conflict",
+    "bug_location": "django/core/serializers/python.py::handle_m2m_field + django/core/serializers/xml_serializer.py::handle_m2m_field",
+    "mechanism_source": "M2M serialization calls .only('pk') on the related queryset, which conflicts with custom managers that use select_related",
+    "mechanism_property": "A queryset cannot have both deferred fields (from .only()) and select_related at the same time",
+    "mechanism_steps": [
+      "Model has a M2M relation with a custom manager that applies select_related in its default queryset",
+      "Serializer.handle_m2m_field calls getattr(obj, field.name).only('pk') to optimize the query",
+      ".only('pk') defers all fields except pk, but the custom manager's select_related already marked fields for eager loading",
+      "Django raises FieldError: 'Field cannot be both deferred and traversed using select_related at the same time'",
+      "Same bug exists in both python.py and xml_serializer.py serializers"
+    ],
+    "mechanism_outcome": "Serialization of M2M relations crashes with FieldError when the related model uses a custom manager with select_related",
+    "trap_description": "Fixing only one serializer (python.py) but missing the identical bug in xml_serializer.py, or using values_list instead of properly clearing select_related"
+  },
+  "django__django-12741": {
+    "bug_type": "redundant_parameter",
+    "bug_location": "django/db/backends/base/operations.py::execute_sql_flush + django/core/management/commands/flush.py::handle",
+    "mechanism_source": "execute_sql_flush takes a 'using' parameter that is redundant because self.connection.alias already identifies the database",
+    "mechanism_property": "execute_sql_flush should use self.connection.alias instead of accepting an external 'using' parameter",
+    "mechanism_steps": [
+      "execute_sql_flush(self, using, sql_list) takes 'using' as explicit parameter for transaction.atomic(using=using)",
+      "Callers already have the connection object and pass connection.alias as the 'using' argument",
+      "This creates a redundant interface where 'using' must always equal self.connection.alias",
+      "Fix: remove 'using' parameter, use self.connection.alias directly, and wrap in transaction.atomic using self.connection.alias",
+      "flush.py command must be updated to call execute_sql_flush(sql_list) without the database argument"
+    ],
+    "mechanism_outcome": "Redundant API parameter creates confusion and potential for misuse; callers must pass the same value that the method could derive internally",
+    "trap_description": "Changing only the method signature without updating the flush command caller, or forgetting to use self.connection.alias in the transaction.atomic call"
+  },
+  "django__django-10554": {
+    "bug_type": "ordering_alias_conflict",
+    "bug_location": "django/db/models/sql/compiler.py::get_order_by + django/db/models/sql/query.py::change_aliases",
+    "mechanism_source": "Union querysets with ordering break when the ordering references columns from derived/combined querysets because change_aliases doesn't properly remap ordering references",
+    "mechanism_property": "After combining querysets with union(), ordering must reference columns via valid aliases in the combined query, not the original subquery aliases",
+    "mechanism_steps": [
+      "Two querysets are combined with .union() and .order_by() is applied to the result",
+      "The compiler calls get_order_by() which resolves ordering fields against the query's column references",
+      "get_order_by uses get_order_dir to parse the ordering string, but this import/function is needed for the resolution",
+      "When the combined query changes aliases via change_aliases, the ordering expressions reference stale aliases from the original subqueries",
+      "The SQL compiler generates ORDER BY clauses with invalid column references, causing a database error"
+    ],
+    "mechanism_outcome": "Union querysets with .order_by() raise database errors because ordering references invalid aliases",
+    "trap_description": "Fixing only compiler.py without also fixing the alias remapping in query.py's change_aliases method"
+  },
+  "mwaskom__seaborn-3187": {
+    "bug_type": "formatter_offset_leak",
+    "bug_location": "seaborn/_core/scales.py::ContinuousBase._setup + seaborn/utils.py",
+    "mechanism_source": "When ContinuousBase creates legend labels for large numeric ranges, the ScalarFormatter applies an offset (e.g., +1e8) that is not disabled, producing labels like '2.5' with a hidden offset instead of the actual value",
+    "mechanism_property": "Legend tick labels must show the actual data values, not offset-adjusted values from ScalarFormatter",
+    "mechanism_steps": [
+      "ContinuousBase._setup creates a matplotlib ScalarFormatter for legend label generation",
+      "For large numeric ranges (e.g., 1e8 to 3e8), ScalarFormatter automatically enables offset notation",
+      "The formatter produces labels like '1.0', '2.0', '3.0' with a hidden +1e8 offset",
+      "Legend displays these offset-adjusted values without showing the offset, making labels incorrect",
+      "The offset should be disabled via formatter.set_useOffset(False) or similar"
+    ],
+    "mechanism_outcome": "Legend values for large numeric ranges show wrong numbers (offset-adjusted values without the offset)",
+    "trap_description": "Trying to fix the formatting after the fact rather than disabling the offset at the ScalarFormatter initialization"
+  },
+  "pylint-dev__pylint-4604": {
+    "bug_type": "missing_type_comment_handling",
+    "bug_location": "pylint/checkers/variables.py + pylint/constants.py",
+    "mechanism_source": "The unused-import checker does not recognize imports that are only used in PEP 484 type comments (# type: ModuleName)",
+    "mechanism_property": "An import used in a type comment is not unused — the checker must scan type comments for references before reporting unused imports",
+    "mechanism_steps": [
+      "User imports a module that is only referenced in a type comment: '# type: SomeModule'",
+      "pylint's VariablesChecker scans the AST for import usage but does not parse type comments",
+      "The import appears unused because no AST node references the imported name in executable code",
+      "pylint reports W0611 unused-import as a false positive",
+      "Fix requires adding type comment scanning in the variables checker, potentially with an IS_PYPY guard in constants.py"
+    ],
+    "mechanism_outcome": "False positive unused-import warning for modules that are only used in type comments",
+    "trap_description": "Adding a constant like IS_PYPY to constants.py without actually defining it, or not properly parsing type comments from the source"
+  },
+  "sphinx-doc__sphinx-8120": {
+    "bug_type": "locale_initialization_order",
+    "bug_location": "sphinx/application.py::Sphinx.__init__ + sphinx/locale/__init__.py",
+    "mechanism_source": "Sphinx application initializes locale catalog after extensions are loaded, so custom locale/translation directories specified via locale_dirs config are not picked up",
+    "mechanism_property": "Locale directories from sphinx.po translations must be initialized before the build environment processes documents",
+    "mechanism_steps": [
+      "User provides custom translation file in locale/<language>/LC_MESSAGES/sphinx.po",
+      "Sphinx.__init__ initializes the application and loads extensions",
+      "The locale catalog initialization happens too late — after extensions have already been loaded",
+      "Custom translations in locale_dirs are not registered when the translation proxy objects are created",
+      "Translated strings fall back to English defaults because the custom .po file was never loaded"
+    ],
+    "mechanism_outcome": "Custom sphinx.po translations in locale directories are silently ignored",
+    "trap_description": "Fixing the import order in locale/__init__.py instead of fixing the initialization order in application.py"
+  },
+  "sympy__sympy-17318": {
+    "bug_type": "index_error_on_edge_case",
+    "bug_location": "sympy/simplify/radsimp.py::split_surds + sympy/simplify/sqrtdenest.py::_sqrt_match",
+    "mechanism_source": "split_surds crashes with IndexError when called with expressions containing complex surds because _split_gcd receives an empty list",
+    "mechanism_property": "split_surds and _sqrt_match must handle expressions with non-rational or complex square root arguments without crashing",
+    "mechanism_steps": [
+      "sqrtdenest is called with an expression containing complex terms like sqrt(4 + 3*I)",
+      "The denesting algorithm calls split_surds to decompose the expression",
+      "split_surds filters for terms where x[1].is_Pow, but complex surds may not match this pattern or produce empty surd lists",
+      "_split_gcd is called with an empty list or list of non-rational elements, causing IndexError: pop from empty list",
+      "The fix must add guards for empty surd lists and handle non-rational square root arguments"
+    ],
+    "mechanism_outcome": "sqrtdenest raises IndexError when given expressions with complex square root arguments",
+    "trap_description": "Adding a try/except around the IndexError instead of fixing the root cause in split_surds' handling of complex arguments"
+  },
+  "sympy__sympy-19783": {
+    "bug_type": "missing_identity_simplification",
+    "bug_location": "sympy/physics/quantum/operator.py::Operator.__mul__ + sympy/physics/quantum/dagger.py::Dagger",
+    "mechanism_source": "Operator.__mul__ handles IdentityOperator on the right side but there is no corresponding __rmul__ or handling in Dagger for IdentityOperator multiplication",
+    "mechanism_property": "Dagger(A) * IdentityOperator() should simplify to Dagger(A), and IdentityOperator() * A should simplify to A",
+    "mechanism_steps": [
+      "User computes Dagger(A) * IdentityOperator() where A is an Operator",
+      "Dagger(A).__mul__ is called but Dagger extends adjoint (from core), not Operator, so it lacks the IdentityOperator check",
+      "The multiplication falls through to sympy's generic Mul, which does not simplify quantum operator identity products",
+      "The result is an unsimplified Dagger(A) * I expression instead of just Dagger(A)",
+      "Fix requires adding __mul__ handling for IdentityOperator in Dagger or adding IdentityOperator.__rmul__"
+    ],
+    "mechanism_outcome": "Dagger(A) * IdentityOperator() is not simplified and produces incorrect symbolic expressions",
+    "trap_description": "Editing complexes.py instead of operator.py/dagger.py, or creating infinite recursion by having __mul__ and __rmul__ call each other"
+  },
+  "sympy__sympy-22080": {
+    "bug_type": "precedence_error_in_code_generation",
+    "bug_location": "sympy/printing/codeprinter.py::_print_Mul + sympy/printing/precedence.py",
+    "mechanism_source": "CodePrinter._print_Mul does not handle Mod correctly — when Mod appears in a multiplication, the printer moves it incorrectly due to wrong precedence handling",
+    "mechanism_property": "expr * Mod(a, b) must be printed as expr * (a % b) with proper parenthesization, not rearranged",
+    "mechanism_steps": [
+      "User lambdifies an expression containing expr * Mod(a, b)",
+      "CodePrinter._print_Mul processes the multiplication factors",
+      "Mod is treated as a regular function but its precedence is not properly defined in precedence.py",
+      "The printer incorrectly reorders or parenthesizes the Mod expression within the multiplication",
+      "The generated code computes the wrong value because operator precedence is broken"
+    ],
+    "mechanism_outcome": "lambdify produces incorrect code for expressions containing Mod in multiplication, computing wrong numerical results",
+    "trap_description": "Fixing only codeprinter.py without updating the precedence table in precedence.py, or introducing NameError by referencing undefined symbols"
+  },
+  "sphinx-doc__sphinx-7462": {
+    "bug_type": "missing_ast_node_handler",
+    "bug_location": "sphinx/pycode/ast.py::unparse + sphinx/domains/python.py",
+    "mechanism_source": "The unparse function in ast.py does not handle ast.Tuple nodes, so empty tuple annotations like Tuple[()] crash with IndexError",
+    "mechanism_property": "unparse must handle all valid Python AST node types including ast.Tuple, especially empty tuples",
+    "mechanism_steps": [
+      "User writes a type annotation with an empty tuple: -> Tuple[()]",
+      "Sphinx parses this annotation into an AST containing an ast.Tuple node with empty elements",
+      "The unparse function in sphinx/pycode/ast.py has no handler for ast.Tuple",
+      "The code falls through to a generic handler that tries to access elements of the empty tuple",
+      "IndexError: pop from empty list is raised during signature rendering"
+    ],
+    "mechanism_outcome": "Sphinx crashes with IndexError when documenting functions with empty tuple type annotations",
+    "trap_description": "Breaking tuple unpacking logic by not handling the empty case, or causing AttributeError in the AST traversal"
+  },
+  "pylint-dev__pylint-4661": {
+    "bug_type": "xdg_noncompliance",
+    "bug_location": "pylint/config/__init__.py + setup.cfg",
+    "mechanism_source": "Pylint stores its data in ~/.pylint.d instead of following the XDG Base Directory Specification (~/.local/share/pylint or $XDG_DATA_HOME/pylint)",
+    "mechanism_property": "Application data should follow XDG Base Directory Specification: use $XDG_DATA_HOME/pylint (default ~/.local/share/pylint) instead of ~/.pylint.d",
+    "mechanism_steps": [
+      "PYLINT_HOME is hardcoded to os.path.join(USER_HOME, '.pylint.d') in config/__init__.py",
+      "This creates a dotfile directory directly in the user's home folder, violating XDG conventions",
+      "Users cannot control the location via standard XDG environment variables like XDG_DATA_HOME",
+      "Fix requires checking XDG_DATA_HOME first, falling back to ~/.local/share/pylint, with backward compatibility for existing .pylint.d",
+      "setup.cfg may need updating if it references the old path"
+    ],
+    "mechanism_outcome": "Pylint creates .pylint.d in home directory instead of following XDG Base Directory Specification",
+    "trap_description": "Using an external module like appdirs instead of implementing XDG logic directly, which introduces an unavailable dependency"
+  },
+  "pydata__xarray-3305": {
+    "bug_type": "attribute_propagation_missing",
+    "bug_location": "xarray/core/variable.py::Variable.quantile + xarray/core/dataset.py",
+    "mechanism_source": "Variable.quantile does not propagate the keep_attrs parameter, always returning a result with empty attrs regardless of the flag",
+    "mechanism_property": "When keep_attrs=True is passed to quantile(), the result must preserve the original variable's attributes",
+    "mechanism_steps": [
+      "User calls DataArray.quantile(q=0.5, keep_attrs=True)",
+      "The call dispatches to Variable.quantile which computes the quantile values",
+      "Variable.quantile constructs a new Variable for the result but does not copy attrs from self",
+      "The keep_attrs parameter is either not accepted or not used in the Variable.quantile implementation",
+      "The returned DataArray has empty attrs={} even though keep_attrs=True was specified"
+    ],
+    "mechanism_outcome": "DataArray.quantile() ignores keep_attrs=True and always returns result with empty attributes",
+    "trap_description": "Adding keep_attrs to the Dataset level but not propagating it down to Variable.quantile"
+  },
+  "pylint-dev__pylint-6528": {
+    "bug_type": "ignore_not_applied_recursively",
+    "bug_location": "pylint/lint/expand_modules.py::expand_modules + pylint/lint/pylinter.py",
+    "mechanism_source": "In recursive mode (--recursive=y), expand_modules only checks ignore patterns against the top-level entry, not against discovered submodules and files",
+    "mechanism_property": "When recursing into directories, each discovered file/module must be checked against --ignore, --ignore-patterns, and --ignore-paths",
+    "mechanism_steps": [
+      "User runs pylint with --recursive=y --ignore=tests on a package directory",
+      "expand_modules iterates the top-level files_or_modules and checks ignore patterns",
+      "When recursing into subdirectories, it discovers files like package/tests/test_foo.py",
+      "The ignore check only applies to the basename of the top-level entry, not to discovered files during recursion",
+      "Files in ignored directories (like tests/) are still linted despite matching the ignore pattern"
+    ],
+    "mechanism_outcome": "pylint --recursive=y does not respect --ignore, --ignore-patterns, or --ignore-paths for files discovered during directory recursion",
+    "trap_description": "Adding ignore checks only in pylinter.py without also fixing expand_modules.py, or checking only basename instead of full path"
+  },
+  "sphinx-doc__sphinx-8548": {
+    "bug_type": "inherited_member_resolution_failure",
+    "bug_location": "sphinx/ext/autodoc/__init__.py + sphinx/ext/autodoc/importer.py::get_object_members",
+    "mechanism_source": "autodoc's get_object_members uses __dict__ to find directly-defined members but misses inherited data attributes (non-method members) when :inherited-members: is set",
+    "mechanism_property": "With :inherited-members:, autodoc must traverse the MRO to find inherited data attributes, not just methods",
+    "mechanism_steps": [
+      "User documents a class with :inherited-members: option that inherits data attributes from a parent class",
+      "get_object_members checks subject.__dict__ for directly-defined members",
+      "Inherited data attributes (class variables, descriptors) exist in parent.__dict__ but not in subject.__dict__",
+      "autodoc searches for cached docstrings to find inherited members but data attributes may not have docstrings",
+      "Inherited data attributes are silently omitted from the documentation"
+    ],
+    "mechanism_outcome": "autodoc :inherited-members: does not document inherited data attributes (only inherited methods work)",
+    "trap_description": "Fixing only __init__.py without also updating importer.py, or changing the member ordering incorrectly"
+  },
+  "matplotlib__matplotlib-24870": {
+    "bug_type": "missing_type_coercion",
+    "bug_location": "lib/matplotlib/contour.py::_process_args + lib/matplotlib/tri/_tricontour.py",
+    "mechanism_source": "contour() does not auto-detect boolean arrays — passing a bool array as Z causes confusing errors instead of coercing to numeric or raising a clear error",
+    "mechanism_property": "contour functions should detect boolean input arrays and either convert to numeric (0/1) or raise a clear TypeError",
+    "mechanism_steps": [
+      "User passes a boolean numpy array to plt.contour(X, Y, Z_bool)",
+      "The contour code processes Z without checking its dtype",
+      "Boolean arrays cause unexpected behavior in the level-finding and contouring algorithms",
+      "The error message is confusing or the output is visually wrong because boolean values are not properly handled as contour levels",
+      "Fix should add dtype checking in _process_args to detect and handle boolean arrays"
+    ],
+    "mechanism_outcome": "contour() produces confusing errors or wrong output when given boolean arrays instead of numeric arrays",
+    "trap_description": "Adding the type check in contour.py but missing the same check in tri/_tricontour.py, or referencing undefined docstring variables"
+  },
+  "pydata__xarray-6938": {
+    "bug_type": "shared_reference_mutation",
+    "bug_location": "xarray/core/dataset.py::Dataset.swap_dims + xarray/core/variable.py",
+    "mechanism_source": "swap_dims modifies the internal variable objects of the original Dataset instead of making copies, causing the original object to be mutated",
+    "mechanism_property": "swap_dims must return a new Dataset without modifying the original — variable objects must be copied before mutation",
+    "mechanism_steps": [
+      "User calls ds.swap_dims({'x': 'y'}) expecting ds to remain unchanged",
+      "swap_dims creates new index variables but reuses references to the original Dataset's internal Variable objects",
+      "When the method modifies the variable's dims attribute to reflect the swap, it mutates the original object in place",
+      "After swap_dims returns, the original Dataset's variables have been silently modified",
+      "The fix requires copying variables before modifying their dims via to_index_variable or similar"
+    ],
+    "mechanism_outcome": "swap_dims mutates the original Dataset object instead of returning an independent copy",
+    "trap_description": "Fixing only dataset.py without ensuring Variable.to_index_variable makes a proper copy, or breaking the copy semantics"
+  },
+  "scikit-learn__scikit-learn-25102": {
+    "bug_type": "dtype_not_preserved",
+    "bug_location": "sklearn/base.py + sklearn/feature_selection/_base.py",
+    "mechanism_source": "Transformers that do not modify input values (like feature selectors) do not preserve DataFrame dtypes in their output when set_output(transform='pandas') is used",
+    "mechanism_property": "When a transformer selects columns without modifying values, the output DataFrame must preserve the original column dtypes",
+    "mechanism_steps": [
+      "User enables pandas output via set_output(transform='pandas') on a feature selector (e.g., SelectKBest)",
+      "The transformer's transform() method selects a subset of features without modifying their values",
+      "The output construction in _base.py converts the selected features to a new DataFrame",
+      "During construction, the original dtype information is lost — all columns become float64",
+      "Fix requires propagating dtype info from the input DataFrame to the output DataFrame in the base transformer"
+    ],
+    "mechanism_outcome": "Feature selectors with pandas output lose dtype information — all output columns become float64 even if input had int, bool, or categorical dtypes",
+    "trap_description": "Producing an empty or minimal patch, or fixing only base.py without also updating feature_selection/_base.py"
+  }
+}

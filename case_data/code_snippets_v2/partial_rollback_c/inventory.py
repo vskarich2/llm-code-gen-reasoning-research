@@ -1,4 +1,4 @@
-"""Inventory management with reservation tracking."""
+
 
 _stock = {}
 _reserved = {}

@@ -1,0 +1,12 @@
+RAW_DATA = {'primary': {'HOST': 'prod.example.com',
+             'PORT': '8080',
+             'MAX_CONN': '50',
+             'DEBUG': 'false'},
+ 'alt_port': {'HOST': 'staging.example.com',
+              'PORT': '3000',
+              'MAX_CONN': '10',
+              'DEBUG': 'true'},
+ 'trap_catching': {'HOST': 'dev.example.com',
+                   'PORT': '443',
+                   'MAX_CONN': '5',
+                   'DEBUG': 'false'}}

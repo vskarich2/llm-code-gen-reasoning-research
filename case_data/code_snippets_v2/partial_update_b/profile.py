@@ -1,10 +1,9 @@
-"""User profile with derived full_name field."""
+
 
 from validation import validate_name, sanitize_string
 
 
 def create_user(first_name, last_name, email):
-    """Create user with derived full_name."""
     return {
         "first_name": first_name,
         "last_name": last_name,
@@ -14,7 +13,6 @@ def create_user(first_name, last_name, email):
 
 
 def update_profile(user, changes):
-    """Update profile fields. full_name must stay in sync."""
     for key, value in changes.items():
         value = sanitize_string(value)
         if key == "first_name" and validate_name(value):

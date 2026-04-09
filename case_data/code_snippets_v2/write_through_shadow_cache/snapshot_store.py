@@ -1,9 +1,6 @@
-"""Snapshot store — preferred read layer for warm reads."""
-
 _snapshots = {}
 
 from version_index import get_cache_version, get_snapshot_version, set_snapshot_version
-
 
 def clear_snapshots():
     global _snapshots
@@ -22,10 +19,6 @@ def refresh_snapshot(user_id, profile):
         existing_snapshot_version = get_snapshot_version(user_id)
         cache_version = get_cache_version(user_id)
 
-        # BUG: uses cache_version as freshness authority.
-        # After write, cache is invalidated (data removed) but version index
-        # still holds old version N. Snapshot version is also N.
-        # So N >= N passes, and stale snapshot is preserved.
         if existing_snapshot_version >= cache_version:
             return existing
 

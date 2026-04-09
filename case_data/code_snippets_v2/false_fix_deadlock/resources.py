@@ -84,10 +84,10 @@ def interleaved_transfers():
     lock_ba, do_ba = make_transfer_b_to_a_steps(10)
     try:
         run_steps([
-            (lock_ab, ()),   # A→B locks A
-            (lock_ba, ()),   # B→A locks B
-            (do_ab, ()),     # A→B tries to lock B — DEADLOCK
-            (do_ba, ()),     # never reached
+            (lock_ab, ()),
+            (lock_ba, ()),
+            (do_ab, ()),
+            (do_ba, ()),
         ])
         return get_state()
     except RuntimeError as e:

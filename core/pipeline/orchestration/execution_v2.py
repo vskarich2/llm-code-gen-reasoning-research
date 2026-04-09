@@ -127,7 +127,7 @@ def run_v2(case: dict, model: str, condition: str, logger,
     from core.pipeline.orchestration.stages import (
         stage_generate, stage_parse, stage_oracle, stage_normalize,
         stage_reconstruct, stage_classify, stage_ast, stage_execute,
-        stage_derive_metrics,
+        stage_spec_oracle, stage_derive_metrics,
     )
 
     config = get_config()
@@ -147,6 +147,7 @@ def run_v2(case: dict, model: str, condition: str, logger,
     stage_classify(state, case, config, logger)
     stage_ast(state, case)
     stage_execute(state, case, config, logger)
+    stage_spec_oracle(state, case)
     stage_derive_metrics(state, config)
 
     ev = _assemble_result_from_state(state, case, config)
@@ -174,6 +175,10 @@ def _assemble_result_from_state(state, case, config=None):
         state.ast_result, state.oracle_result, state.disagreement,
         prompt_meta=state.prompt_meta,
     )
+
+    # Spec oracle (DDC cases only)
+    if state.spec_oracle_result is not None:
+        ev["spec_oracle"] = state.spec_oracle_result
 
     # Add canonical parsing semantics (v4 plan fields)
     if "reconstruction" in ev:
@@ -649,7 +654,7 @@ def _compute_evaluation(
 
     if classifier_ran:
         canonical = _extract_canonical_dims(classification)
-        RIC = canonical.get("mechanism_identified")
+        RIC = canonical.get("reasoning_internal_consistency")
         CIC = canonical.get("commitments_extracted")
         CCC = canonical.get("commitments_satisfied")
         RCA = canonical.get("reasoning_code_alignment")
@@ -915,7 +920,7 @@ def _assemble_result(exec_result, artifact, classifier_result, signals,
     _cls_canonical = _extract_canonical_dims(classifier_result)
     ev["classification"] = {
         # Canonical dimension signals (via mapping layer)
-        "mechanism_identified": _cls_canonical["mechanism_identified"],
+        "reasoning_internal_consistency": _cls_canonical["reasoning_internal_consistency"],
         "commitments_extracted": _cls_canonical["commitments_extracted"],
         "commitments_satisfied": _cls_canonical["commitments_satisfied"],
         "reasoning_code_alignment": _cls_canonical["reasoning_code_alignment"],

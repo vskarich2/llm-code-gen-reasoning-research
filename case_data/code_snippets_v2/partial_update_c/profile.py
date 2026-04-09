@@ -1,11 +1,10 @@
-"""User profile with email verification and cached greeting."""
 
 from validation import validate_email, validate_name
 from notifications import build_greeting
 
 
 def create_user(name, email):
-    """Create a user with verified status and cached greeting."""
+
     return {
         "name": name,
         "email": email,
@@ -14,12 +13,12 @@ def create_user(name, email):
     }
 
 def verify_user(user):
-    """Mark user as verified."""
+
     user["verified"] = True
     return user
 
 def update_profile(user, changes):
-    """Update profile fields."""
+
     for key, value in changes.items():
         if key == "email" and validate_email(value):
             old_email = user.get("email")

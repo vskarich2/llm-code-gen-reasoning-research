@@ -1,5 +1,3 @@
-
-
 _CONFIG = {
     "feature": {
         "dark_mode": True,
@@ -12,13 +10,10 @@ _CONFIG = {
     },
 }
 
-
 def get_raw():
-    """Return the raw config dict."""
     return _CONFIG
 
 
 def validate_config():
-    """Validate top-level config keys. Does NOT recurse."""
     required = {"feature", "ui"}
     return required.issubset(_CONFIG.keys())

@@ -71,6 +71,9 @@ class AttemptState:
     exec_result: dict = field(default_factory=dict)
     passed: bool = False
 
+    # ── Stage 8b: Spec oracle (DDC cases only) ──
+    spec_oracle_result: dict | None = None
+
     # ── Stage 9: Derived metrics ──
     disagreement: dict = field(default_factory=dict)
     signals: dict = field(default_factory=dict)
