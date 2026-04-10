@@ -123,11 +123,13 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
         with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
 
+        # Phase 1: JSON object type
         if not isinstance(data, dict):
             raise RuntimeError(
                 f"Call artifact must be JSON object: {json_path}"
             )
 
+        # Phase 2: Required fields
         missing = REQUIRED_CALL_FIELDS - set(data.keys())
         if missing:
             raise RuntimeError(
@@ -135,10 +137,44 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
                 f"{sorted(missing)}: {json_path}"
             )
 
+        # Phase 3: Primitive field type / emptiness validation
+        for field_name in NON_EMPTY_STRING_FIELDS:
+            if not isinstance(data[field_name], str) or not data[field_name]:
+                raise RuntimeError(
+                    f"Field {field_name!r} must be non-empty string in {json_path}"
+                )
+
+        if not isinstance(data["prompt"], str):
+            raise RuntimeError(f"Invalid prompt type in {json_path}: {type(data['prompt']).__name__}")
+        if not isinstance(data["response"], str):
+            raise RuntimeError(f"Invalid response type in {json_path}: {type(data['response']).__name__}")
+
+        if not isinstance(data["trial"], int) or data["trial"] < 0:
+            raise RuntimeError(f"Invalid trial in {json_path}: {data['trial']!r}")
+        if not isinstance(data["path"], int) or data["path"] < 0:
+            raise RuntimeError(f"Invalid path in {json_path}: {data['path']!r}")
+        if not isinstance(data["latency_ms"], int) or data["latency_ms"] < 0:
+            raise RuntimeError(f"Invalid latency_ms in {json_path}: {data['latency_ms']!r}")
+        if not isinstance(data["temperature"], float):
+            raise RuntimeError(f"Invalid temperature in {json_path}: {data['temperature']!r}")
+        if not isinstance(data["top_p"], float):
+            raise RuntimeError(f"Invalid top_p in {json_path}: {data['top_p']!r}")
+        if not isinstance(data["prompt_length"], int) or data["prompt_length"] < 0:
+            raise RuntimeError(f"Invalid prompt_length in {json_path}: {data['prompt_length']!r}")
+        if not isinstance(data["response_length"], int) or data["response_length"] < 0:
+            raise RuntimeError(f"Invalid response_length in {json_path}: {data['response_length']!r}")
+
+        if data["max_tokens"] is not None:
+            if not isinstance(data["max_tokens"], int) or data["max_tokens"] < 0:
+                raise RuntimeError(f"Invalid max_tokens in {json_path}: {data['max_tokens']!r}")
+
+        if data["error"] is not None:
+            if not isinstance(data["error"], str) or not data["error"]:
+                raise RuntimeError(f"Invalid error field in {json_path}: {data['error']!r}")
+
+        # Phase 4: Identity validation (call_id, uniqueness)
         if not isinstance(data["call_id"], str) or not data["call_id"]:
-            raise RuntimeError(
-                f"Invalid call_id in artifact: {json_path}"
-            )
+            raise RuntimeError(f"Invalid call_id in artifact: {json_path}")
         if not CALL_ID_PATTERN.fullmatch(data["call_id"]):
             raise RuntimeError(
                 f"Invalid call_id format in artifact {json_path}: "
@@ -151,6 +187,13 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
             )
         seen_call_ids[data["call_id"]] = json_path
 
+        # Phase 5: Hash field type validation
+        if not isinstance(data["prompt_hash"], str) or not data["prompt_hash"]:
+            raise RuntimeError(f"Invalid prompt_hash in {json_path}: {data['prompt_hash']!r}")
+        if not isinstance(data["response_hash"], str) or not data["response_hash"]:
+            raise RuntimeError(f"Invalid response_hash in {json_path}: {data['response_hash']!r}")
+
+        # Phase 6: Hash integrity validation
         actual_prompt_hash = compute_prompt_hash(data["prompt"])
         if actual_prompt_hash != data["prompt_hash"]:
             raise RuntimeError(
@@ -158,7 +201,6 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
                 f"expected {data['prompt_hash'][:16]}, "
                 f"got {actual_prompt_hash[:16]}"
             )
-
         actual_response_hash = compute_response_hash(data["response"])
         if actual_response_hash != data["response_hash"]:
             raise RuntimeError(
@@ -167,6 +209,7 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
                 f"got {actual_response_hash[:16]}"
             )
 
+        # Phase 7: Numeric/range validation (lengths)
         if data["prompt_length"] != len(data["prompt"]):
             raise RuntimeError(
                 f"prompt_length mismatch in {json_path}: "
@@ -177,36 +220,6 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
                 f"response_length mismatch in {json_path}: "
                 f"declared {data['response_length']}, actual {len(data['response'])}"
             )
-
-        if not isinstance(data["trial"], int) or data["trial"] < 0:
-            raise RuntimeError(f"Invalid trial in {json_path}: {data['trial']!r}")
-        if not isinstance(data["path"], int) or data["path"] < 0:
-            raise RuntimeError(f"Invalid path in {json_path}: {data['path']!r}")
-        if not isinstance(data["latency_ms"], int) or data["latency_ms"] < 0:
-            raise RuntimeError(f"Invalid latency_ms in {json_path}: {data['latency_ms']!r}")
-
-        if not isinstance(data["temperature"], float):
-            raise RuntimeError(f"Invalid temperature in {json_path}: {data['temperature']!r}")
-        if not isinstance(data["top_p"], float):
-            raise RuntimeError(f"Invalid top_p in {json_path}: {data['top_p']!r}")
-
-        if data["max_tokens"] is not None:
-            if not isinstance(data["max_tokens"], int) or data["max_tokens"] < 0:
-                raise RuntimeError(
-                    f"Invalid max_tokens in {json_path}: {data['max_tokens']!r}"
-                )
-
-        if data["error"] is not None:
-            if not isinstance(data["error"], str) or not data["error"]:
-                raise RuntimeError(
-                    f"Invalid error field in {json_path}: {data['error']!r}"
-                )
-
-        for field_name in NON_EMPTY_STRING_FIELDS:
-            if not isinstance(data[field_name], str) or not data[field_name]:
-                raise RuntimeError(
-                    f"Field {field_name!r} must be non-empty string in {json_path}"
-                )
 
         validated.append((data, json_path))
 
