@@ -53,8 +53,33 @@ def call_model(
 
     Returns ModelCallResult with .response and .event_id.
     event_id is None if no logger was provided.
+
+    If a replay adapter is installed via
+    side_projects.graph_runner.replay.adapter.install_adapter(),
+    uses it instead of making real API calls.
     """
     import time as _time
+
+    # ── Replay adapter hook (highest priority) ──
+    try:
+        from side_projects.graph_runner.replay.adapter import (
+            get_active_adapter, LLMRequest,
+        )
+        adapter = get_active_adapter()
+        if adapter is not None:
+            t0 = _time.monotonic()
+            resp = adapter.call(LLMRequest(
+                model=model, prompt=prompt,
+            ))
+            elapsed = _time.monotonic() - t0
+            eid = _log_call_if_logger(
+                logger, model, prompt, resp.text, elapsed, None,
+                case_id, phase, condition, prompt_assembly,
+                parent_event_id,
+            )
+            return ModelCallResult(response=resp.text, event_id=eid)
+    except ImportError:
+        pass  # replay module not available — continue normally
 
     is_anthropic = _is_anthropic_model(model)
     if is_anthropic:

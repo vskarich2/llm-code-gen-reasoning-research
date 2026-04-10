@@ -158,6 +158,94 @@ def _run_one(case: dict, model: str, condition: str, logger) -> tuple[str, str, 
         raise
 
 
+def _dispatch_single_attempt(
+    case: dict, model: str, condition: str, logger,
+    case_start_eid: int | str,
+) -> tuple[str, str, dict]:
+    """Route single-attempt conditions through the configured backend.
+
+    Backend selection via config.execution.single_attempt_backend:
+      - BACKEND_LEGACY_V2 (default): existing V2 pipeline
+      - BACKEND_GRAPH_V1: new graph engine
+      - BACKEND_SHADOW: run both, compare, return legacy result
+    """
+    from core.config.experiment_config import get_config
+    from core.constants.pipeline_constants import (
+        BACKEND_GRAPH_V1, BACKEND_LEGACY_V2, BACKEND_SHADOW,
+        VALID_BACKENDS,
+    )
+    config = get_config()
+    backend = getattr(
+        config.execution, "single_attempt_backend", BACKEND_LEGACY_V2,
+    )
+
+    if backend not in VALID_BACKENDS:
+        raise RuntimeError(
+            f"Invalid execution.single_attempt_backend={backend!r}. "
+            f"Expected one of {sorted(VALID_BACKENDS)}"
+        )
+
+    if backend == BACKEND_GRAPH_V1:
+        from side_projects.graph_runner.control.run_single_attempt import run_graph_v1
+        return run_graph_v1(case, model, condition, logger, case_start_eid)
+
+    if backend == BACKEND_SHADOW:
+        from side_projects.graph_runner.control.shadow_compare import run_shadow
+        return run_shadow(case, model, condition, logger, case_start_eid)
+
+    # Default: BACKEND_LEGACY_V2
+    from core.pipeline.orchestration.execution_v2 import run_v2
+    return run_v2(case, model, condition, logger, case_start_eid)
+
+
+def _dispatch_retry(
+    case: dict, model: str, condition: str, logger,
+    case_start_eid: int | str,
+) -> tuple[str, str, dict]:
+    """Route retry/critique conditions through the configured backend.
+
+    Backend selection via config.execution.retry_backend:
+      - BACKEND_LEGACY_V2 (default): existing retry_v2 pipeline
+      - BACKEND_GRAPH_V1: graph-based retry controller
+      - BACKEND_SHADOW: run both, compare, return legacy result
+    """
+    from core.config.experiment_config import get_config
+    from core.constants.pipeline_constants import (
+        BACKEND_GRAPH_V1, BACKEND_LEGACY_V2, BACKEND_SHADOW,
+        VALID_BACKENDS,
+    )
+    config = get_config()
+    backend = getattr(
+        config.execution, "retry_backend", BACKEND_LEGACY_V2,
+    )
+
+    if backend not in VALID_BACKENDS:
+        raise RuntimeError(
+            f"Invalid execution.retry_backend={backend!r}. "
+            f"Expected one of {sorted(VALID_BACKENDS)}"
+        )
+
+    if backend == BACKEND_GRAPH_V1:
+        from side_projects.graph_runner.control.retry_controller import (
+            run_retry_graph,
+        )
+        return run_retry_graph(
+            case, model, condition, logger, case_start_eid,
+        )
+
+    if backend == BACKEND_SHADOW:
+        from side_projects.graph_runner.control.shadow_retry import (
+            run_shadow_retry,
+        )
+        return run_shadow_retry(
+            case, model, condition, logger, case_start_eid,
+        )
+
+    # Default: BACKEND_LEGACY_V2
+    from core.pipeline.orchestration.retry_v2 import run_retry_v2
+    return run_retry_v2(case, model, condition, logger, case_start_eid)
+
+
 def _run_one_inner(case: dict, model: str, condition: str, logger,
                     case_start_eid: int | str) -> tuple[str, str, dict]:
     # HARD GUARD: only v2 conditions are allowed
@@ -169,15 +257,11 @@ def _run_one_inner(case: dict, model: str, condition: str, logger,
 
     if condition in ("baseline_v2", "leg_reduction_v2", "leg_reduction_lean_v2",
                      "baseline_v3", "leg_reduction_lean_v3"):
-        from core.pipeline.orchestration.execution_v2 import run_v2
-        return run_v2(case, model, condition, logger, case_start_eid)
-    if condition.startswith("retry_"):
-        from core.pipeline.orchestration.retry_v2 import run_retry_v2
-        return run_retry_v2(case, model, condition, logger, case_start_eid)
-    if condition.startswith("critique_"):
-        # V3 critique conditions route through retry with critique variant
-        from core.pipeline.orchestration.retry_v2 import run_retry_v2
-        return run_retry_v2(case, model, condition, logger, case_start_eid)
+        return _dispatch_single_attempt(
+            case, model, condition, logger, case_start_eid)
+    if condition.startswith("retry_") or condition.startswith("critique_"):
+        return _dispatch_retry(
+            case, model, condition, logger, case_start_eid)
 
     raise RuntimeError(
         f"FATAL: V2 condition '{condition}' has no dispatch handler"

@@ -29,6 +29,29 @@ from core.pipeline.parsing.parser_v2 import parse_v2_execution, parse_v2_format,
 from core.pipeline import _format_code_files
 from core.evaluation.reasoning_v2 import normalize_generation_v2
 from core.pipeline.reconstructor import reconstruct_strict
+from core.constants.pipeline_constants import (
+    CLASSIFIER_V3_CORRECT,
+    CRITIQUE_AGGRESSIVE,
+    CRITIQUE_MODERATE,
+    CRITIQUE_REASONING_ONLY,
+    CRITIQUE_STRICT,
+    DIM_COMMITMENTS_EXTRACTED,
+    DIM_COMMITMENTS_INTERNAL_CONSISTENCY,
+    DIM_COMMITMENTS_CODE_CONSISTENCY,
+    DIM_COMMITMENTS_SATISFIED,
+    DIM_REASONING_CODE_ALIGNMENT,
+    DIM_REASONING_INTERNAL_CONSISTENCY,
+    OUTCOME_CLASSIFIER_NOT_RUN,
+    OUTCOME_COHERENT_INCORRECT,
+    OUTCOME_INCOHERENT_INCORRECT,
+    OUTCOME_INTERPRETABLE_SUCCESS,
+    OUTCOME_LEG,
+    OUTCOME_LUCKY_FIX,
+    OUTCOME_ORACLE_NOT_AVAILABLE,
+    OUTCOME_SERIALIZATION_FAILURE,
+    OUTCOME_UNCLASSIFIED,
+    PARSE_MODE_FAILED,
+)
 
 _log = logging.getLogger("t3.retry_v2")
 
@@ -74,7 +97,7 @@ def _compile_prompt(components: tuple[str, ...], variables: dict[str, str]) -> s
 # ============================================================
 
 _CRITIQUE_PROMPTS = {
-    "strict": """You are auditing consistency between a developer's stated reasoning and their generated code.
+    CRITIQUE_STRICT: """You are auditing consistency between a developer's stated reasoning and their generated code.
 
 You are given:
 
@@ -102,7 +125,7 @@ Strict CLAUDE_RULES:
 Output:
 One sentence only.""",
 
-    "moderate": """You are auditing consistency between a developer's stated reasoning and their generated code.
+    CRITIQUE_MODERATE: """You are auditing consistency between a developer's stated reasoning and their generated code.
 
 You are given:
 
@@ -130,7 +153,7 @@ Rules:
 Output:
 One sentence only.""",
 
-    "aggressive": """You are auditing consistency between a developer's stated reasoning and their generated code.
+    CRITIQUE_AGGRESSIVE: """You are auditing consistency between a developer's stated reasoning and their generated code.
 
 You are given:
 
@@ -158,7 +181,7 @@ Rules:
 Output:
 One sentence only.""",
 
-    "reasoning_only": """You are auditing a developer's stated reasoning about a software bug.
+    CRITIQUE_REASONING_ONLY: """You are auditing a developer's stated reasoning about a software bug.
 
 You are given ONLY the developer's reasoning. You do NOT see their code.
 
@@ -195,15 +218,15 @@ _PRESCRIPTIVE_WORDS = frozenset({
 def _resolve_critique_variant(condition: str) -> str | None:
     """Map condition name to critique variant. Returns None if not a critique mode."""
     if "reasoning_only" in condition:
-        return "reasoning_only"
+        return CRITIQUE_REASONING_ONLY
     if "critique_strict" in condition:
-        return "strict"
+        return CRITIQUE_STRICT
     if "critique_moderate" in condition:
-        return "moderate"
+        return CRITIQUE_MODERATE
     if "critique_aggressive" in condition:
-        return "aggressive"
+        return CRITIQUE_AGGRESSIVE
     if "leg_critique" in condition and "strict" not in condition and "moderate" not in condition and "aggressive" not in condition:
-        return "moderate"  # legacy retry_leg_critique_v2 uses moderate
+        return CRITIQUE_MODERATE  # legacy retry_leg_critique_v2 uses moderate
     return None
 
 
@@ -242,7 +265,7 @@ def _generate_critique(
     }
 
     # reasoning_only variant does not need code
-    if variant == "reasoning_only":
+    if variant == CRITIQUE_REASONING_ONLY:
         if not root_cause or not fix_strategy:
             info["skipped_missing_fields"] = True
             return info, parent_eid
@@ -253,10 +276,10 @@ def _generate_critique(
     # Map variant to .j2 component — use v3 templates when commitments available
     is_v3 = bool(code_commitments)
     variant_to_component = {
-        "strict": "critique_strict_v3" if is_v3 else "critique_strict",
-        "moderate": "critique_moderate",
-        "aggressive": "critique_aggressive",
-        "reasoning_only": "critique_reasoning_only_v3" if is_v3 else "critique_reasoning_only",
+        CRITIQUE_STRICT: "critique_strict_v3" if is_v3 else "critique_strict",
+        CRITIQUE_MODERATE: "critique_moderate",
+        CRITIQUE_AGGRESSIVE: "critique_aggressive",
+        CRITIQUE_REASONING_ONLY: "critique_reasoning_only_v3" if is_v3 else "critique_reasoning_only",
     }
     comp_name = variant_to_component.get(variant)
     if not comp_name:
@@ -266,7 +289,7 @@ def _generate_critique(
     crit_vars = {"root_cause": root_cause, "fix_strategy": fix_strategy}
     if code_commitments:
         crit_vars["code_commitments"] = code_commitments
-    if variant != "reasoning_only":
+    if variant != CRITIQUE_REASONING_ONLY:
         crit_vars["code"] = code
     prompt = _compile_prompt((comp_name,), crit_vars)
 
@@ -353,29 +376,29 @@ def _classify_outcome(R_bool, T_bool, execution_pass, routing_valid,
                       reconstruction_success, oracle_label, classifier_ran):
     """Derive outcome_class and LEG_subtype from axis booleans."""
     if not routing_valid or not reconstruction_success:
-        outcome = "serialization_failure"
+        outcome = OUTCOME_SERIALIZATION_FAILURE
     elif oracle_label is None:
-        outcome = "oracle_not_available"
+        outcome = OUTCOME_ORACLE_NOT_AVAILABLE
     elif not classifier_ran:
-        outcome = "classifier_not_run"
+        outcome = OUTCOME_CLASSIFIER_NOT_RUN
     elif R_bool is True and execution_pass is True:
-        outcome = "interpretable_success"
+        outcome = OUTCOME_INTERPRETABLE_SUCCESS
     elif R_bool is False and execution_pass is True:
-        outcome = "lucky_fix"
+        outcome = OUTCOME_LUCKY_FIX
     elif R_bool is True and execution_pass is False:
-        outcome = "LEG"
+        outcome = OUTCOME_LEG
     elif R_bool is False and execution_pass is False:
         if T_bool is True:
-            outcome = "coherent_incorrect"
+            outcome = OUTCOME_COHERENT_INCORRECT
         elif T_bool is False:
-            outcome = "incoherent_incorrect"
+            outcome = OUTCOME_INCOHERENT_INCORRECT
         else:
             outcome = "reasoning_failure_unknown"
     else:
-        outcome = "unclassified"
+        outcome = OUTCOME_UNCLASSIFIED
 
     leg_subtype = None
-    if outcome == "LEG":
+    if outcome == OUTCOME_LEG:
         if T_bool is True:
             leg_subtype = "execution_failure"
         elif T_bool is False:
@@ -434,11 +457,11 @@ def _compute_evaluation_from_trajectory(best, classifier_result):
     classifier_ran = best_cls.get("classifier_ran", False)
     canonical = _extract_canonical_dims(classifier_result)
     if classifier_ran:
-        RIC = canonical.get("reasoning_internal_consistency")
-        CCC = canonical.get("commitments_satisfied")
-        cls_dims = {"RIC": RIC, "CIC": canonical.get("commitments_extracted"),
-                    "CCC": CCC, "RCA": canonical.get("reasoning_code_alignment")}
-        T_bool = (RIC == "CORRECT") and (CCC == "CORRECT")
+        RIC = canonical.get(DIM_REASONING_INTERNAL_CONSISTENCY)
+        CCC = canonical.get(DIM_COMMITMENTS_SATISFIED)
+        cls_dims = {"RIC": RIC, "CIC": canonical.get(DIM_COMMITMENTS_EXTRACTED),
+                    "CCC": CCC, "RCA": canonical.get(DIM_REASONING_CODE_ALIGNMENT)}
+        T_bool = (RIC == CLASSIFIER_V3_CORRECT) and (CCC == CLASSIFIER_V3_CORRECT)
     else:
         cls_dims = {"RIC": None, "CIC": None, "CCC": None, "RCA": None}
         T_bool = None
@@ -457,7 +480,7 @@ def _compute_evaluation_from_trajectory(best, classifier_result):
         "oracle_label": oracle_label, "oracle_correct": R_bool, "reasoning_correct": R_bool,
         "classifier_ran": classifier_ran, "classifier_dims": cls_dims,
         "translation_consistent": T_bool,
-        "outcome_class": outcome, "LEG": (outcome == "LEG"), "LEG_subtype": leg_subtype,
+        "outcome_class": outcome, "LEG": (outcome == OUTCOME_LEG), "LEG_subtype": leg_subtype,
         "quadrant_RT": quadrant_RT, "quadrant_RE": quadrant_RE, "artifact_id": "retry_best",
     }
 
@@ -730,15 +753,15 @@ def run_retry_v2(
     best_cls = best.get("classifier", {})
     classifier_result = ClassifierResultV2()
     # Populate v3 fields if present, else v2 fields
-    if best_cls.get("reasoning_internal_consistency") is not None:
-        classifier_result.reasoning_internal_consistency = best_cls.get("reasoning_internal_consistency")
-        classifier_result.commitments_internal_consistency = best_cls.get("commitments_internal_consistency")
-        classifier_result.commitments_code_consistency = best_cls.get("commitments_code_consistency")
+    if best_cls.get(DIM_REASONING_INTERNAL_CONSISTENCY) is not None:
+        classifier_result.reasoning_internal_consistency = best_cls.get(DIM_REASONING_INTERNAL_CONSISTENCY)
+        classifier_result.commitments_internal_consistency = best_cls.get(DIM_COMMITMENTS_INTERNAL_CONSISTENCY)
+        classifier_result.commitments_code_consistency = best_cls.get(DIM_COMMITMENTS_CODE_CONSISTENCY)
     else:
-        classifier_result.reasoning_internal_consistency = best_cls.get("reasoning_internal_consistency")
-        classifier_result.commitments_extracted = best_cls.get("commitments_extracted")
-        classifier_result.commitments_satisfied = best_cls.get("commitments_satisfied")
-    classifier_result.reasoning_code_alignment = best_cls.get("reasoning_code_alignment")
+        classifier_result.reasoning_internal_consistency = best_cls.get(DIM_REASONING_INTERNAL_CONSISTENCY)
+        classifier_result.commitments_extracted = best_cls.get(DIM_COMMITMENTS_EXTRACTED)
+        classifier_result.commitments_satisfied = best_cls.get(DIM_COMMITMENTS_SATISFIED)
+    classifier_result.reasoning_code_alignment = best_cls.get(DIM_REASONING_CODE_ALIGNMENT)
     if not best_cls.get("classifier_ran", False):
         classifier_result.parse_error = best_cls.get("error", "unknown")
 

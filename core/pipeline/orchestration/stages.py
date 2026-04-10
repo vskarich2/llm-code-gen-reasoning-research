@@ -11,6 +11,15 @@ import logging
 import time
 
 from core.pipeline.orchestration.attempt_state import AttemptState
+from core.constants.pipeline_constants import (
+    EXEC_INVARIANT_FAILURE,
+    EXEC_STRUCTURAL_FAILURE,
+    EXEC_SUCCESS,
+    EXEC_SYNTAX_FAILURE,
+    PARSE_MODE_FAILED,
+    PARSE_MODE_RECOVERED,
+    PARSE_MODE_STRICT,
+)
 
 _log = logging.getLogger("t3.stages")
 
@@ -54,11 +63,11 @@ def stage_parse(state: AttemptState, case: dict) -> None:
     )
 
     if state.strict_parse_valid:
-        state.parse_mode = "strict"
+        state.parse_mode = PARSE_MODE_STRICT
     elif state.recovery_parse_valid:
-        state.parse_mode = "recovered"
+        state.parse_mode = PARSE_MODE_RECOVERED
     else:
-        state.parse_mode = "failed"
+        state.parse_mode = PARSE_MODE_FAILED
 
     state.recovery_used = (state.routing.selected_source == "recovery")
     state.execution_source = state.routing.selected_source
@@ -124,13 +133,13 @@ def _swebench_exec_result(case: dict) -> dict:
     fail_cat = swe.get("failure_category_v5", "UNKNOWN")
 
     if resolved:
-        category = "EXECUTION_SUCCESS"
+        category = EXEC_SUCCESS
     elif fail_cat == "EMPTY_PATCH":
-        category = "STRUCTURAL_FAILURE"
+        category = EXEC_STRUCTURAL_FAILURE
     elif fail_cat in ("SYNTAX_ERROR", "IMPORT_ERROR"):
-        category = "SYNTAX_FAILURE"
+        category = EXEC_SYNTAX_FAILURE
     else:
-        category = "INVARIANT_FAILURE"
+        category = EXEC_INVARIANT_FAILURE
 
     return {
         "pass": resolved,
