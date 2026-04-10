@@ -104,12 +104,6 @@ REQUIRED_CALL_FIELDS = frozenset({
 
 CALL_ID_PATTERN = re.compile(r"^[0-9]{8}$")
 
-NON_EMPTY_STRING_FIELDS = frozenset({
-    "event_id", "model", "node", "case_id", "condition", "run_id",
-    "timestamp", "phase", "status",
-})
-
-
 def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
     calls_dir = run_root / "artifacts" / "calls"
     results: list[CallArtifact] = []
@@ -137,12 +131,22 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
                 f"{sorted(missing)}: {json_path}"
             )
 
-        # Phase 3: Primitive field type / emptiness validation
-        for field_name in NON_EMPTY_STRING_FIELDS:
-            if not isinstance(data[field_name], str) or not data[field_name]:
+        # Phase 3: Primitive field type / emptiness (explicit per-field)
+        def _require_nonempty_str(name: str) -> None:
+            if not isinstance(data[name], str) or not data[name]:
                 raise RuntimeError(
-                    f"Field {field_name!r} must be non-empty string in {json_path}"
+                    f"Field {name!r} must be non-empty string in {json_path}"
                 )
+
+        _require_nonempty_str("event_id")
+        _require_nonempty_str("model")
+        _require_nonempty_str("node")
+        _require_nonempty_str("case_id")
+        _require_nonempty_str("condition")
+        _require_nonempty_str("run_id")
+        _require_nonempty_str("timestamp")
+        _require_nonempty_str("phase")
+        _require_nonempty_str("status")
 
         if not isinstance(data["prompt"], str):
             raise RuntimeError(f"Invalid prompt type in {json_path}: {type(data['prompt']).__name__}")
@@ -187,10 +191,10 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
             )
         seen_call_ids[data["call_id"]] = json_path
 
-        # Phase 5: Hash field type validation
-        if not isinstance(data["prompt_hash"], str) or not data["prompt_hash"]:
+        # Phase 5: Hash field type + length validation
+        if not isinstance(data["prompt_hash"], str) or len(data["prompt_hash"]) < 64:
             raise RuntimeError(f"Invalid prompt_hash in {json_path}: {data['prompt_hash']!r}")
-        if not isinstance(data["response_hash"], str) or not data["response_hash"]:
+        if not isinstance(data["response_hash"], str) or len(data["response_hash"]) < 64:
             raise RuntimeError(f"Invalid response_hash in {json_path}: {data['response_hash']!r}")
 
         # Phase 6: Hash integrity validation
@@ -225,7 +229,12 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
 
     validated.sort(key=lambda pair: pair[0]["call_id"])
 
+    # Phase 8: Enum conversion
     for data, json_path in validated:
+        if not isinstance(data["phase"], str):
+            raise RuntimeError(f"phase must be string before enum conversion in {json_path}")
+        if not isinstance(data["status"], str):
+            raise RuntimeError(f"status must be string before enum conversion in {json_path}")
         try:
             data["phase"] = CallPhase(data["phase"])
         except Exception as exc:
@@ -238,5 +247,6 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
             raise RuntimeError(
                 f"Invalid status in call artifact {json_path}: {data['status']!r}"
             ) from exc
+        # Phase 9: Dataclass construction
         results.append(CallArtifact(**data))
     return results

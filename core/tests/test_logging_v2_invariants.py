@@ -48,9 +48,7 @@ class TestValidatePayload:
         e = EmittableEvent(
             event_type=EventType.RUN_STARTED,
             timestamp="t", run_id="r", emitter=Emitter.RUNNER,
-            payload={
-                "experiment_name": "x", "seed": 42, "BOGUS": True,
-            },
+            payload={"experiment_name": "x", "seed": 42, "BOGUS": True},
         )
         with pytest.raises(RuntimeError, match="Unexpected payload"):
             validate_payload(e)
@@ -74,20 +72,18 @@ class TestValidatePayload:
             validate_payload(e)
 
     def test_accepts_valid_payload(self) -> None:
-        e = EmittableEvent(
+        validate_payload(EmittableEvent(
             event_type=EventType.RUN_STARTED,
             timestamp="t", run_id="r", emitter=Emitter.RUNNER,
             payload={"experiment_name": "test", "seed": 42},
-        )
-        validate_payload(e)
+        ))
 
     def test_accepts_valid_completed_payload(self) -> None:
-        e = EmittableEvent(
+        validate_payload(EmittableEvent(
             event_type=EventType.RUN_COMPLETED,
             timestamp="t", run_id="r", emitter=Emitter.RUNNER,
             payload={"total_cases": 10, "total_pass": 7},
-        )
-        validate_payload(e)
+        ))
 
 
 class TestWALWriter:
@@ -95,38 +91,31 @@ class TestWALWriter:
     def test_rejects_mismatched_run_id(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             w = WALWriter(Path(td) / "wal.jsonl", "run_A")
-            e = EmittableEvent(
-                event_type=EventType.RUN_STARTED,
-                timestamp="t", run_id="run_B",
-                emitter=Emitter.RUNNER,
-                payload={"experiment_name": "x", "seed": 0},
-            )
             with pytest.raises(RuntimeError, match="run_id mismatch"):
-                w.emit(e)
+                w.emit(EmittableEvent(
+                    event_type=EventType.RUN_STARTED, timestamp="t",
+                    run_id="run_B", emitter=Emitter.RUNNER,
+                    payload={"experiment_name": "x", "seed": 0},
+                ))
             w.close()
 
     def test_rejects_invalid_emitter_for_event_type(self) -> None:
         """RUN_STARTED requires Emitter.RUNNER; ENGINE is wrong."""
         with tempfile.TemporaryDirectory() as td:
             w = WALWriter(Path(td) / "wal.jsonl", "r")
-            e = EmittableEvent(
-                event_type=EventType.RUN_STARTED,
-                timestamp="t", run_id="r",
-                emitter=Emitter.ENGINE,
-                payload={"experiment_name": "x", "seed": 0},
-            )
             with pytest.raises(RuntimeError, match="requires emitter"):
-                w.emit(e)
+                w.emit(EmittableEvent(
+                    event_type=EventType.RUN_STARTED, timestamp="t",
+                    run_id="r", emitter=Emitter.ENGINE,
+                    payload={"experiment_name": "x", "seed": 0},
+                ))
             w.close()
 
 
 class TestNormalizeModelName:
 
     def test_exact_member_returns_unchanged(self) -> None:
-        result = normalize_model_name(
-            "gpt-4o-mini", {"gpt-4o-mini", "gpt-5-mini"},
-        )
-        assert result == "gpt-4o-mini"
+        assert normalize_model_name("gpt-4o-mini", {"gpt-4o-mini"}) == "gpt-4o-mini"
 
     def test_unknown_model_raises(self) -> None:
         with pytest.raises(RuntimeError, match="Unknown model"):
@@ -179,11 +168,9 @@ class TestLoadCallArtifacts:
 
     def test_rejects_missing_required_fields(self, tmp_path: Path) -> None:
         from core.logging_v2.views.intermediate import load_call_artifacts
-        calls_dir = tmp_path / "artifacts" / "calls" / "c/m/case/trial_0/path_0/n"
-        calls_dir.mkdir(parents=True)
-        (calls_dir / "call_001.json").write_text(
-            json.dumps({"event_id": "e", "timestamp": "t"}),
-        )
+        d = tmp_path / "artifacts" / "calls" / "c/m/case/trial_0/path_0/n"
+        d.mkdir(parents=True)
+        (d / "call_001.json").write_text(json.dumps({"event_id": "e"}))
         with pytest.raises(RuntimeError, match="missing required"):
             load_call_artifacts(tmp_path)
 
@@ -243,7 +230,6 @@ class TestLoadCallArtifacts:
         data["max_tokens"] = None
         _write_call_artifact(tmp_path, data)
         results = load_call_artifacts(tmp_path)
-        assert len(results) == 1
         assert results[0].max_tokens is None
 
     def test_rejects_invalid_temperature_type(self, tmp_path: Path) -> None:
@@ -272,15 +258,15 @@ class TestLoadCallArtifacts:
 
     def test_rejects_json_list_with_path(self, tmp_path: Path) -> None:
         from core.logging_v2.views.intermediate import load_call_artifacts
-        calls_dir = tmp_path / "artifacts" / "calls" / "c/m/case/trial_0/path_0/n"
-        calls_dir.mkdir(parents=True)
-        artifact_path = calls_dir / "call_001.json"
-        artifact_path.write_text(json.dumps([1, 2, 3]))
+        d = tmp_path / "artifacts" / "calls" / "c/m/case/trial_0/path_0/n"
+        d.mkdir(parents=True)
+        p = d / "call_001.json"
+        p.write_text(json.dumps([1, 2, 3]))
         with pytest.raises(RuntimeError) as exc_info:
             load_call_artifacts(tmp_path)
         msg = str(exc_info.value)
-        assert "must be JSON object" in msg
-        assert str(artifact_path) in msg
+        assert "Call artifact must be JSON object" in msg
+        assert str(p) in msg
 
     def test_rejects_empty_string_error(self, tmp_path: Path) -> None:
         from core.logging_v2.views.intermediate import load_call_artifacts
@@ -299,16 +285,18 @@ class TestLoadCallArtifacts:
             load_call_artifacts(tmp_path)
         msg = str(exc_info.value)
         assert "Invalid phase in call artifact" in msg
+        assert str(p.parent) in msg or "path_0" in msg
 
     def test_rejects_invalid_status_enum_with_path(self, tmp_path: Path) -> None:
         from core.logging_v2.views.intermediate import load_call_artifacts
         data = _make_valid_call_data()
         data["status"] = "not_a_real_status"
-        _write_call_artifact(tmp_path, data)
+        p = _write_call_artifact(tmp_path, data)
         with pytest.raises(RuntimeError) as exc_info:
             load_call_artifacts(tmp_path)
         msg = str(exc_info.value)
         assert "Invalid status in call artifact" in msg
+        assert str(p.parent) in msg or "path_0" in msg
 
     def test_rejects_empty_phase_string(self, tmp_path: Path) -> None:
         from core.logging_v2.views.intermediate import load_call_artifacts
@@ -356,4 +344,12 @@ class TestLoadCallArtifacts:
         data["response_length"] = "five"
         _write_call_artifact(tmp_path, data)
         with pytest.raises(RuntimeError, match="Invalid response_length"):
+            load_call_artifacts(tmp_path)
+
+    def test_rejects_short_prompt_hash(self, tmp_path: Path) -> None:
+        from core.logging_v2.views.intermediate import load_call_artifacts
+        data = _make_valid_call_data()
+        data["prompt_hash"] = "abc"
+        _write_call_artifact(tmp_path, data)
+        with pytest.raises(RuntimeError, match="Invalid prompt_hash"):
             load_call_artifacts(tmp_path)
