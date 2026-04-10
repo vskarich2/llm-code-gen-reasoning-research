@@ -105,6 +105,20 @@ class TestWALWriterRunIdMismatch:
                 w.emit(e)
             w.close()
 
+    def test_rejects_invalid_event_type(self) -> None:
+        """validate_emittable enforces event_type membership via EVENT_TYPE_SPECS."""
+        with tempfile.TemporaryDirectory() as td:
+            w = WALWriter(Path(td) / "wal.jsonl", "r")
+            e = EmittableEvent(
+                event_type=EventType.RUN_STARTED,
+                timestamp="t", run_id="r",
+                emitter=Emitter.ENGINE,
+                payload={"experiment_name": "x", "seed": 0},
+            )
+            with pytest.raises(RuntimeError, match="requires emitter"):
+                w.emit(e)
+            w.close()
+
 
 class TestNormalizeModelName:
 
@@ -216,3 +230,51 @@ class TestLoadCallArtifacts:
         results = load_call_artifacts(tmp_path)
         assert len(results) == 1
         assert results[0].call_id == "00000001"
+
+    def test_rejects_invalid_temperature_type(self, tmp_path: Path) -> None:
+        from core.logging_v2.views.intermediate import load_call_artifacts
+        data = _make_valid_call_data()
+        data["temperature"] = "bad"
+        _write_call_artifact(tmp_path, data)
+        with pytest.raises(RuntimeError, match="Invalid temperature"):
+            load_call_artifacts(tmp_path)
+
+    def test_rejects_invalid_top_p_type(self, tmp_path: Path) -> None:
+        from core.logging_v2.views.intermediate import load_call_artifacts
+        data = _make_valid_call_data()
+        data["top_p"] = "bad"
+        _write_call_artifact(tmp_path, data)
+        with pytest.raises(RuntimeError, match="Invalid top_p"):
+            load_call_artifacts(tmp_path)
+
+    def test_rejects_negative_max_tokens(self, tmp_path: Path) -> None:
+        from core.logging_v2.views.intermediate import load_call_artifacts
+        data = _make_valid_call_data()
+        data["max_tokens"] = -1
+        _write_call_artifact(tmp_path, data)
+        with pytest.raises(RuntimeError, match="Invalid max_tokens"):
+            load_call_artifacts(tmp_path)
+
+    def test_rejects_json_list(self, tmp_path: Path) -> None:
+        from core.logging_v2.views.intermediate import load_call_artifacts
+        calls_dir = tmp_path / "artifacts" / "calls" / "c/m/case/trial_0/path_0/n"
+        calls_dir.mkdir(parents=True)
+        (calls_dir / "call_001.json").write_text(json.dumps([1, 2, 3]))
+        with pytest.raises(RuntimeError, match="must be JSON object"):
+            load_call_artifacts(tmp_path)
+
+    def test_rejects_empty_string_error(self, tmp_path: Path) -> None:
+        from core.logging_v2.views.intermediate import load_call_artifacts
+        data = _make_valid_call_data()
+        data["error"] = ""
+        _write_call_artifact(tmp_path, data)
+        with pytest.raises(RuntimeError, match="Invalid error field"):
+            load_call_artifacts(tmp_path)
+
+    def test_enum_error_includes_path(self, tmp_path: Path) -> None:
+        from core.logging_v2.views.intermediate import load_call_artifacts
+        data = _make_valid_call_data()
+        data["phase"] = "not_a_real_phase"
+        _write_call_artifact(tmp_path, data)
+        with pytest.raises(RuntimeError, match="Invalid phase in call artifact"):
+            load_call_artifacts(tmp_path)

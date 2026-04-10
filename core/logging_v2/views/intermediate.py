@@ -18,7 +18,7 @@ from core.logging_v2.call_artifacts import (
     compute_prompt_hash,
     compute_response_hash,
 )
-from core.logging_v2.enums import CallPhase, CallStatus, EventType
+from core.logging_v2.enums import CallPhase, CallStatus, Emitter, EventType
 from core.logging_v2.events import WALEvent
 from core.logging_v2.manifest import RunManifest, RunStatus
 
@@ -102,11 +102,11 @@ REQUIRED_CALL_FIELDS = frozenset({
     "status", "error",
 })
 
-CALL_ID_PATTERN = re.compile(r"\d{8}")
+CALL_ID_PATTERN = re.compile(r"^[0-9]{8}$")
 
 NON_EMPTY_STRING_FIELDS = frozenset({
     "event_id", "model", "node", "case_id", "condition", "run_id",
-    "timestamp",
+    "timestamp", "phase", "status",
 })
 
 
@@ -116,12 +116,17 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
     if not calls_dir.exists():
         return results
     json_paths = list(calls_dir.rglob("*.json"))
-    validated: list[dict] = []
-    seen_call_ids: set[str] = set()
+    validated: list[tuple[dict, Path]] = []
+    seen_call_ids: dict[str, Path] = {}
 
     for json_path in json_paths:
         with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
+
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                f"Call artifact must be JSON object: {json_path}"
+            )
 
         missing = REQUIRED_CALL_FIELDS - set(data.keys())
         if missing:
@@ -136,14 +141,15 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
             )
         if not CALL_ID_PATTERN.fullmatch(data["call_id"]):
             raise RuntimeError(
-                f"Invalid call_id format in artifact: {json_path}: "
+                f"Invalid call_id format in artifact {json_path}: "
                 f"{data['call_id']!r}"
             )
         if data["call_id"] in seen_call_ids:
             raise RuntimeError(
-                f"Duplicate call_id in artifacts: {data['call_id']}"
+                f"Duplicate call_id {data['call_id']} in {json_path} "
+                f"(already seen in {seen_call_ids[data['call_id']]})"
             )
-        seen_call_ids.add(data["call_id"])
+        seen_call_ids[data["call_id"]] = json_path
 
         actual_prompt_hash = compute_prompt_hash(data["prompt"])
         if actual_prompt_hash != data["prompt_hash"]:
@@ -179,28 +185,45 @@ def load_call_artifacts(run_root: Path) -> list[CallArtifact]:
         if not isinstance(data["latency_ms"], int) or data["latency_ms"] < 0:
             raise RuntimeError(f"Invalid latency_ms in {json_path}: {data['latency_ms']!r}")
 
+        if not isinstance(data["temperature"], float):
+            raise RuntimeError(f"Invalid temperature in {json_path}: {data['temperature']!r}")
+        if not isinstance(data["top_p"], float):
+            raise RuntimeError(f"Invalid top_p in {json_path}: {data['top_p']!r}")
+
+        if data["max_tokens"] is not None:
+            if not isinstance(data["max_tokens"], int) or data["max_tokens"] < 0:
+                raise RuntimeError(
+                    f"Invalid max_tokens in {json_path}: {data['max_tokens']!r}"
+                )
+
+        if data["error"] is not None:
+            if not isinstance(data["error"], str) or not data["error"]:
+                raise RuntimeError(
+                    f"Invalid error field in {json_path}: {data['error']!r}"
+                )
+
         for field_name in NON_EMPTY_STRING_FIELDS:
             if not isinstance(data[field_name], str) or not data[field_name]:
                 raise RuntimeError(
                     f"Field {field_name!r} must be non-empty string in {json_path}"
                 )
 
-        validated.append(data)
+        validated.append((data, json_path))
 
-    validated.sort(key=lambda d: d["call_id"])
+    validated.sort(key=lambda pair: pair[0]["call_id"])
 
-    for data in validated:
+    for data, json_path in validated:
         try:
             data["phase"] = CallPhase(data["phase"])
         except Exception as exc:
             raise RuntimeError(
-                f"Invalid phase in call artifact: {data['phase']!r}"
+                f"Invalid phase in call artifact {json_path}: {data['phase']!r}"
             ) from exc
         try:
             data["status"] = CallStatus(data["status"])
         except Exception as exc:
             raise RuntimeError(
-                f"Invalid status in call artifact: {data['status']!r}"
+                f"Invalid status in call artifact {json_path}: {data['status']!r}"
             ) from exc
         results.append(CallArtifact(**data))
     return results
